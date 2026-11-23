@@ -16,6 +16,51 @@ const SUG_W: f32 = 96.0;
 const SUG_ROW: f32 = 18.0;
 const SW: f32 = 22.0;
 
+fn custom_swatches(ui: &mut Ui, p: Rect, editing: Option<&(usize, [f32; 3])>) {
+    let t = ui.t;
+    let y = p.y + SW * 2. + 2.;
+    ui.c.text(Font::new(11), p.x + 5., y + 1., t.text_dim, "Custom swatches");
+    for i in 0..pt::CUSTOM_SWATCHES {
+        let cell = Rect::new(p.x + 5. + i as f32 * 36., y + 16., 32., 21.);
+        let color = pt::custom_swatch(i);
+        let swatch = Rect::new(cell.x, cell.y, 19., cell.h);
+        let hot = ui.hit(swatch, Action::Pat(Hit::CustomSwatch(i)),
+            if color.is_some() { "Apply saved color to the source" } else { "Create a custom color" });
+        ui.c.fill_rrect(swatch, 3., color.map_or(t.sunken, Color::rgb));
+        ui.c.stroke_rrect(swatch, 3., 1., if hot { t.glyph } else { t.menu_pop_border });
+        if color.is_none() {
+            ui.c.text_center(Font::new(13), swatch, t.text, "+");
+        } else {
+            let edit = Rect::new(swatch.right(), cell.y, cell.w - swatch.w, cell.h);
+            let hot = ui.hit(edit, Action::Pat(Hit::EditSwatch(i)), "Edit or clear this swatch");
+            if hot { ui.c.fill_rrect(edit, 3., t.menu_pop_hi); }
+            crate::icons::draw(ui.c, crate::icons::Icon::Pencil, edit.inset(1.), t.text);
+        }
+    }
+    if let Some((i, hsv)) = editing {
+        let wheel = Rect::new(p.x + 12., y + 43., 100., 100.);
+        let value = Rect::new(wheel.right() + 10.0, wheel.y, 22.0, wheel.h);
+        ui.hit(wheel, Action::Pat(Hit::SwatchWheel), "Color wheel: choose hue and saturation");
+        ui.hit(value, Action::Pat(Hit::SwatchBrightness), "Brightness");
+        crate::theme_adjust::paint_color_wheel(ui.c, wheel, value, *hsv);
+        ui.c.fill_rrect(Rect::new(value.right() + 10.0, wheel.y, 54.0, 31.0), 3.0,
+            crate::theme_adjust::from_hsv(*hsv));
+        let row = Rect::new(p.x + 5., y + 148., p.w - 10., 22.);
+        let mut left = row.x;
+        for (label, action, width) in [
+            ("Save", Hit::SaveSwatch, 41.),
+            ("Clear", Hit::ClearSwatch, 41.),
+            ("×", Hit::CancelSwatch, 24.),
+        ] {
+            let button = Rect::new(left, row.y, width, row.h);
+            let hot = ui.hit(button, Action::Pat(action), format!("{label} swatch {}", i + 1));
+            ui.c.fill_rrect(button, 3., if hot { t.menu_pop_hi } else { t.button });
+            ui.c.text_center(Font::new(11), button, t.text, label);
+            left += width + 3.;
+        }
+    }
+}
+
 fn cross(ui: &mut Ui, r: Rect, c: Color) {
     os_ui::kit::cross(ui.c, r, c);
 }
@@ -85,21 +130,35 @@ pub fn paint(ui: &mut Ui, s: &State) {
         ui.hit(r, Action::Pat(Hit::Inside), "");
         let named = matches!(b.target, BoxTarget::Name(_));
         // The colour tab: patterns and channels (spec: ui/channel-rack.md §13).
-        let tabbed = named || matches!(b.target, BoxTarget::Rack(crate::rack::RBox::Channel(_) | crate::rack::RBox::ColorSel));
+        let audio = matches!(b.target, BoxTarget::AudioClip(_))
+            && crate::workspace_visibility::shown("visible_playlist-custom-swatches");
+        let track = matches!(b.target, BoxTarget::MixerTrack(_) | BoxTarget::PlaylistTrack(_));
+        let tabbed = named || audio || track || matches!(b.target, BoxTarget::Rack(crate::rack::RBox::Channel(_)));
         let field = Rect::new(r.x + 4.0, r.y + 4.0, r.w - if !tabbed { 8.0 } else if lemon { 34.0 } else { 30.0 }, 22.0);
         if lemon {
             ui.c.fill_rrect(field, 4.0, t.tempo_box);
         } else {
             ui.c.fill_rect(field, t.tempo_box);
         }
-        let tw = ui.c.text_width(font, &b.text);
-        if b.fresh && !b.text.is_empty() {
-            ui.c.fill_rect(Rect::new(field.x + 3.0, field.y + 3.0, tw + 2.0, 16.0), Color::rgb(0x3d6a8a));
+        let mut editor = b.editor.clone();
+        if editor.text != b.text { editor.set(&b.text); if b.fresh { editor.select_all(); } }
+        let caret = ui.c.text_width(font, editor.before_caret());
+        let offset = (caret - field.w + 12.).max(0.);
+        let left = field.x + 4. - offset;
+        ui.c.push_clip(field.inset(2.));
+        if let Some((a,b)) = editor.selection() {
+            let x = left + ui.c.text_width(font, &editor.text[..editor.at(a)]);
+            let end = left + ui.c.text_width(font, &editor.text[..editor.at(b)]);
+            ui.c.fill_rect(Rect::new(x,field.y+3.,end-x,16.),Color::rgb(0x3d6a8a));
         }
-        ui.c.text_clip(font, field.x + 4.0, field.y + 3.0, field.w - 6.0, t.glyph, &b.text);
-        if !b.fresh {
-            let cx = (field.x + 5.0 + tw).min(field.right() - 2.0);
-            ui.c.fill_rect(Rect::new(cx, field.y + 3.0, 1.0, 16.0), t.glyph);
+        ui.c.text(font,left,field.y+3.,t.glyph,&editor.text);
+        ui.c.fill_rect(Rect::new(left+caret,field.y+3.,1.,16.),t.glyph);
+        ui.c.pop_clip();
+        for i in 0..=editor.len() {
+            let at = left + ui.c.text_width(font, &editor.text[..editor.at(i)]);
+            let before = if i == 0 { field.x } else { (at + left + ui.c.text_width(font, &editor.text[..editor.at(i-1)])) / 2. };
+            let after = if i == editor.len() { field.right() } else { (at + left + ui.c.text_width(font, &editor.text[..editor.at(i+1)])) / 2. };
+            ui.hit(Rect::new(before,field.y,(after-before).max(0.),field.h).intersect(&field),Action::Pat(Hit::Text(i)),"Edit name; drag to select text");
         }
         let row = r.y + 29.0;
         let mut x = r.x + 4.0;
@@ -119,20 +178,25 @@ pub fn paint(ui: &mut Ui, s: &State) {
         ui.c.fill_rrect(no, rb, if hov { t.menu_pop_hi } else { t.menu_pop });
         cross(ui, no, t.glyph);
         let caption = match b.target {
+            BoxTarget::MixerTrack(n) => format!("Mixer track {n}"),
+            BoxTarget::PlaylistTrack(n) => format!("Playlist track {}", n + 1),
+            BoxTarget::AudioClip(_) => "Audio clip name".into(),
             BoxTarget::Name(n) => format!("Pattern {n} name"),
             BoxTarget::Transpose(_) => "Semitones".to_string(),
             BoxTarget::Rack(rb) => crate::rack::box_caption(s, rb),
         };
         ui.c.text_clip(Font::new(12), x + 44.0, row + 2.0, r.right() - x - 74.0, t.glyph_dim, &caption);
         let tab_col = match b.target {
+            BoxTarget::MixerTrack(n) => Some(crate::mixer::track(s, n).and_then(|track| track.color)),
+            BoxTarget::PlaylistTrack(n) => Some(crate::playlist::track_info(s, n).and_then(|track| track.color)),
+            BoxTarget::AudioClip(i) if audio => Some(crate::playlist::clips(s).get(i).and_then(|c| c.color.or_else(|| crate::playlist::clip_tint(s, c.source)))),
             BoxTarget::Name(n) => Some(s.project.pattern(n).and_then(|p| p.color)),
             BoxTarget::Rack(crate::rack::RBox::Channel(r)) => Some(s.project.channels.get(r).and_then(|c| c.color)),
-            BoxTarget::Rack(crate::rack::RBox::ColorSel) => Some(s.rack.sel.first().and_then(|&r| s.project.channels.get(r)).and_then(|c| c.color)),
             _ => None,
         };
         if let Some(col) = tab_col {
             let col = col.map_or(Color::rgb(0x925755), rgb);
-            let hint = if named { "Pattern colour" } else { "Channel colour" };
+            let hint = if named { "Pattern colour" } else if audio { "Clip colour" } else if track { "Track colour" } else { "Channel colour" };
             colour_tab(ui, r, col, hint);
         }
         if b.suggestions {
@@ -162,7 +226,12 @@ pub fn paint(ui: &mut Ui, s: &State) {
             }
         }
         if b.palette {
-            let p = Rect::new(r.right() - SW * 10.0 - 2.0, r.bottom(), SW * 10.0 + 2.0, SW * 2.0 + 2.0);
+            let custom = track || crate::workspace_visibility::shown("visible_playlist-custom-swatches");
+            let w = SW * 10. + 2.;
+            let h = SW * 2. + 2. + if !custom { 0. } else if b.custom.is_some() { 174. } else { 43. };
+            let y = if r.bottom() + h <= s.screen.1 { r.bottom() }
+                else { (r.y - h).clamp(0.0, (s.screen.1 - h).max(0.0)) };
+            let p = Rect::new((r.right() - w).clamp(0., (s.screen.0 - w).max(0.)), y, w, h);
             ui.c.fill_rect(p, t.menu_pop);
             ui.hit(p, Action::Pat(Hit::Inside), "");
             for (i, &c) in SWATCHES.iter().enumerate() {
@@ -172,6 +241,9 @@ pub fn paint(ui: &mut Ui, s: &State) {
                 if hov {
                     ui.c.stroke_rrect(sr.inset(1.0), 0.0, 1.0, t.glyph);
                 }
+            }
+            if custom {
+                custom_swatches(ui, p, b.custom.as_ref());
             }
         }
     }
@@ -193,7 +265,7 @@ pub fn paint(ui: &mut Ui, s: &State) {
         };
         ui.c.text_clip(font, r.x + 12.0, r.y + 40.0, r.w - 24.0, t.glyph, &msg);
         // spec: ui/settings-choices.md "Hints and warnings: Manage messages and Project data size warning (2026-10-16)"
-        super::remember_check(ui, r.x + 12.0, r.bottom() - 22.0, s.pat_ui.remember, Action::Pat(Hit::ConfirmRemember));
+        super::remember_check(ui, r.x + 12.0, r.bottom() - 22.0, s.pat_ui.remember, super::REMEMBER, Action::Pat(Hit::ConfirmRemember));
         for (i, (label, hit)) in [("Ok", Hit::ConfirmOk), ("Cancel", Hit::ConfirmCancel)].into_iter().enumerate() {
             let br = Rect::new(r.right() - 180.0 + i as f32 * 86.0, r.bottom() - 34.0, 80.0, 24.0);
             let hov = ui.hit(br, Action::Pat(hit), label);

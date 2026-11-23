@@ -17,6 +17,12 @@ pub const VOICE_GAIN_FRAMES: u32 = 32;
 
 /// A note-driven stereo generator.
 pub trait Instrument: Send {
+    /// Opt-in idle processing suppression. Unsupported instruments keep running.
+    fn set_smart_disable(&mut self, _enabled: bool) {}
+    /// Whether processing can move between persistent audio workers between blocks.
+    /// Native integrations and adapters opt in only when their threading contract permits it.
+    fn parallel_processing(&self) -> bool { false }
+
     /// Starts a note `offset` frames into the next `process` call. Velocity 0..=1 (FL velocity / 128).
     fn note_on(&mut self, offset: u32, key: u8, velocity: f32);
     /// Ends a note `offset` frames into the next `process` call.
@@ -44,26 +50,10 @@ pub trait Instrument: Send {
         self.note_off(offset, key);
     }
     /// Starts an audio clip's voice as `note_start` does, named `voice` for `voice_gain` and `voice_choke` (two clips
-    /// of one channel overlap on the same key). `end` (0..1 of the sample, 0 = none) is the clip's trimmed end, where
-    /// an instrument that [`voice_ends`](Self::voice_ends) ends the voice. Default: `note_start`.
-    fn voice_start(
-        &mut self,
-        offset: u32,
-        key: u8,
-        velocity: f32,
-        start: f32,
-        end: f32,
-        levels: NoteLevels,
-        voice: u32,
-    ) {
-        let _ = (voice, end);
+    /// of one channel overlap on the same key). Default: `note_start`.
+    fn voice_start(&mut self, offset: u32, key: u8, velocity: f32, start: f32, levels: NoteLevels, voice: u32) {
+        let _ = voice;
         self.note_start(offset, key, velocity, start, levels);
-    }
-    /// True for an instrument that ends an audio clip's voice at the `end` `voice_start` gives it, through its declick
-    /// closing (spec: audio/audio-clips.md "What a clip plays"): the engine then chokes the voice only at the song's
-    /// end. Default false: the engine chokes it at the clip's end tick.
-    fn voice_ends(&self) -> bool {
-        false
     }
     /// True for an instrument that puts `voice_gain` on its voices one by one. Default false: the engine puts an audio
     /// clip's fades and gain on the instrument's whole output, which is right only while one clip plays at a time.
@@ -77,16 +67,37 @@ pub trait Instrument: Send {
     fn voice_gain(&mut self, offset: u32, voice: u32, gain: f32) {
         let _ = (offset, voice, gain);
     }
+    /// Applies a drawn pitch offset to a named instrument voice, in semitones.
+    /// Absolute note-expression adapters also receive the voice's base tuning.
+    fn voice_pitch(&mut self, _offset: u32, _voice: u32, _base: f32, _semitones: f32) {}
+    fn voice_pitch_supported(&self) -> bool { false }
     /// Cuts voice `voice` of `key` as `choke` does (its audio clip's end), leaving the key's other voices. Default:
     /// `choke`.
     fn voice_choke(&mut self, offset: u32, key: u8, voice: u32) {
         let _ = voice;
         self.choke(offset, key);
     }
+    /// Release a named note through its envelope without releasing other notes on the key.
+    fn voice_release(&mut self, offset: u32, key: u8, _voice: u32) {
+        self.note_off(offset, key);
+    }
     /// Tunes the sounding voices of `key` to `semitones` from the key's own pitch (portamento glides; spec:
     /// audio/channel-voices.md). Default: ignored (no glide).
     fn tune(&mut self, offset: u32, key: u8, semitones: f32) {
         let _ = (offset, key, semitones);
+    }
+    /// Sets the starting tuning of a named voice. Key-based adapters use their regular tuning path.
+    fn voice_tune(&mut self, offset: u32, key: u8, _voice: u32, semitones: f32) {
+        self.tune(offset, key, semitones);
+    }
+    /// Applies a drawn pitch to a regular instrument note. MIDI instruments receive the channel wheel.
+    fn draw_pitch(&mut self, offset: u32, _key: u8, base: f32, semitones: f32, range: u8) {
+        self.midi(offset, pitch_wheel(base + semitones, range));
+    }
+    /// A slide changes only voices in the note's color group. Velocity is the target note byte / 128.
+    fn slide(&mut self, offset: u32, key: u8, color: u8, semitones: f32, velocity: f32, pan: f32) {
+        let _ = (color, velocity, pan);
+        self.tune(offset, key, semitones);
     }
     /// The pitch-bend range (semitones) the plugin wrapper keeps for the plugin (spec: flp/events/plugins.md, record
     /// 1): an instrument that cannot take a note's tuning plays `tune` as MIDI pitch bend scaled by it ([`TuningBend`]).
@@ -103,6 +114,11 @@ pub trait Instrument: Send {
     }
     /// Renders `left.len()` frames at `rate`, overwriting both buffers.
     fn process(&mut self, rate: u32, left: &mut [f32], right: &mut [f32]);
+    /// Additional stereo outputs routed to consecutive mixer tracks after the channel's track.
+    fn set_split_outputs(&mut self, _split: bool) {}
+    fn extra_outputs(&self) -> usize { 0 }
+    /// Copies an extra port from the most recent processing block. False means silence.
+    fn extra_output(&mut self, _port:usize, _left:&mut[f32], _right:&mut[f32]) -> bool { false }
     /// True while the instrument still has sound to deliver (ringing voices, a long sample): the engine keeps
     /// processing it instead of stopping after its idle tail. Valid after `process`.
     fn active(&self) -> bool {
@@ -126,18 +142,6 @@ pub trait Instrument: Send {
     /// "Parameters"). Default false: values every few frames inside the tick (spec: plugins/plugin-parameters.md §2).
     fn tick_params(&self) -> bool {
         false
-    }
-    /// `tick_params` for parameter `index` alone: a channel's container's members each take theirs as their plugin does
-    /// (`crate::chain`).
-    fn tick_params_at(&self, index: u32) -> bool {
-        let _ = index;
-        self.tick_params()
-    }
-    /// The plain range (min, max) of parameter `index` as the plugin states it: what a pattern control point on the
-    /// parameter is read against (`os_model::target::plugin_point_level`). Default: unknown (such points do nothing).
-    fn param_range(&self, index: usize) -> Option<(f64, f64)> {
-        let _ = index;
-        None
     }
     /// The channel's levels for the next `process` call. An instrument that works the volume and pan into its voices
     /// itself returns true, and the engine then adds its output unchanged (FL native generators get them in their
@@ -250,22 +254,22 @@ impl ChannelVoicing {
 }
 
 /// A note's own levels besides its velocity and pitch (spec: audio/voice-levels.md "The note's own levels"): pan
-/// -1..1 (`(pan byte - 64) / 64`), mod X / mod Y -1..0.992 (`(byte - 128) / 128`), and the MIDI channel it is played on.
-/// Default: centred, no offsets, MIDI channel 1.
+/// -1..1 (`(pan byte - 64) / 64`), mod X / mod Y -1..0.992 (`(byte - 128) / 128`). Default: centred, no offsets.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct NoteLevels {
+    pub color: u8,
+    /// Pitch offset in semitones for a generated sampler echo.
+    pub echo_pitch: f32,
+    pub drive:f32,
     pub pan: f32,
     pub mod_x: f32,
     pub mod_y: f32,
-    /// The MIDI channel, 0..15 (0 = channel 1): a MIDI device's own for a live note on a channel with MIDI channel
-    /// through ticked (spec: ui/channel-rack.md §18), else 0. A hosted plugin gets the note, and its end, on it.
-    pub channel: u8,
 }
 
 impl NoteLevels {
     /// The levels of a note's pan, mod X and mod Y bytes.
     pub fn of_bytes(pan: u8, mod_x: u8, mod_y: u8) -> NoteLevels {
-        NoteLevels { pan: (f32::from(pan) - 64.0) / 64.0, mod_x: (f32::from(mod_x) - 128.0) / 128.0, mod_y: (f32::from(mod_y) - 128.0) / 128.0, channel: 0 }
+        NoteLevels { color: 0, echo_pitch: 0., drive:0., pan: (f32::from(pan) - 64.0) / 64.0, mod_x: (f32::from(mod_x) - 128.0) / 128.0, mod_y: (f32::from(mod_y) - 128.0) / 128.0 }
     }
 }
 
@@ -334,7 +338,20 @@ impl Default for TuningBend {
     }
 }
 
+/// MIDI channel 1 pitch wheel, with exact center and clamped endpoints.
+pub fn pitch_wheel(semitones: f32, range: u8) -> [u8; 3] {
+    let value = (8192.0 + f64::from(semitones) * 8192.0 / f64::from(range.max(1)))
+        .round().clamp(0.0, 16383.0) as u16;
+    [0xE0, (value & 0x7F) as u8, (value >> 7) as u8]
+}
+
 impl TuningBend {
+    pub fn draw(&mut self, key: u8, semitones: f32, range: u8) -> Option<[u8; 3]> {
+        self.key = Some(key);
+        self.tune = semitones;
+        self.send(pitch_wheel(semitones, range))
+    }
+
     /// The range in semitones (1..=48; others are taken as the default).
     pub fn set_range(&mut self, semitones: u32) {
         self.range = if (1..=48).contains(&semitones) { semitones } else { DEFAULT_BEND_RANGE };
@@ -363,12 +380,16 @@ impl TuningBend {
     }
 
     fn bend(&mut self) -> Option<[u8; 3]> {
-        let v = (8192.0 + f64::from(self.tune) / f64::from(self.range) * 8192.0).round().clamp(0.0, 16383.0) as u16;
+        self.send(pitch_wheel(self.tune, self.range as u8))
+    }
+
+    fn send(&mut self, event: [u8; 3]) -> Option<[u8; 3]> {
+        let v = u16::from(event[1]) | u16::from(event[2]) << 7;
         if v == self.sent {
             return None;
         }
         self.sent = v;
-        Some([0xE0, (v & 0x7F) as u8, (v >> 7) as u8])
+        Some(event)
     }
 }
 
@@ -389,6 +410,8 @@ impl fmt::Debug for Slot {
 /// sound through unchanged).
 // spec: ui/mixer.md §7 (effect slots)
 pub trait HostedEffect: Send {
+    /// Opt-in idle processing suppression. The host still delivers timing and parameters.
+    fn set_smart_disable_fx(&mut self, _enabled: bool) {}
     /// Processes `left.len()` frames at `rate` in place.
     fn process_fx(&mut self, rate: u32, left: &mut [f32], right: &mut [f32]);
     /// `process_fx` with the slot's sidechain input `key` (left, right; as long as `left`) for the plugin's first
@@ -408,17 +431,6 @@ pub trait HostedEffect: Send {
     fn tick_params_fx(&self) -> bool {
         false
     }
-    /// `tick_params_fx` for parameter `index` alone: a container's members each take theirs as their effect does
-    /// (`crate::chain`).
-    fn tick_params_at(&self, index: u32) -> bool {
-        let _ = index;
-        self.tick_params_fx()
-    }
-    /// [`Instrument::param_range`] for effects.
-    fn param_range_fx(&self, index: usize) -> Option<(f64, f64)> {
-        let _ = index;
-        None
-    }
     /// [`Instrument::transport`] for effects: the song position during the next `process_fx` call.
     fn transport_fx(&mut self, info: &TransportInfo) {
         let _ = info;
@@ -427,12 +439,6 @@ pub trait HostedEffect: Send {
     /// after `process_fx` (spec: audio/delay-compensation.md).
     fn reported_delay_fx(&self) -> u32 {
         0
-    }
-    /// A controller plugin's output `k` (0..1) as its last block left it, for the links that read it (spec:
-    /// plugins/lemon-peak-controller.md "Links"). `None`: no such output (yet).
-    fn control_fx(&self, k: usize) -> Option<f32> {
-        let _ = k;
-        None
     }
 }
 

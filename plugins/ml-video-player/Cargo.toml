@@ -1,0 +1,12 @@
+[package]
+name = "ml-video-player"
+description = "ML Studio transport-synchronized reference picture monitor"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+
+[dependencies]
+nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", default-features = false, features = ["vst3"] }
+nih_plug_egui = { git = "https://github.com/robbert-vdh/nih-plug.git" }
+os-plugkit = { path = "../../crates/os-plugkit" }
+os-theme = { path = "../../crates/os-theme" }

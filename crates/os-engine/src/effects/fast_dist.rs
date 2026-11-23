@@ -106,12 +106,19 @@ pub fn curve(threshold: i32, kind: i32) -> (i32, i32) {
 /// The curve table, times `wet`: `single(value / 32768) * wet` per entry, the product not rounded to single, and an
 /// 8193rd entry equal to the last.
 pub fn table(threshold: i32, kind: i32, wet: f32) -> Vec<f64> {
+    let mut output = vec![0.0; TABLE + 1];
+    fill_table(&mut output, threshold, kind, wet);
+    output
+}
+
+fn fill_table(output: &mut [f64], threshold: i32, kind: i32, wet: f32) {
     let (threshold, kind) = curve(threshold, kind);
     let step = 10 - threshold;
-    // `value / 32768` is exact as a single (a whole number below 2^15 over 2^15).
-    let mut t: Vec<f64> = (0..TABLE).map(|i| level(i, step, kind) / 32768.0 * f64::from(wet)).collect();
-    t.push(t[TABLE - 1]);
-    t
+    // value / 32768 is exact as a single (whole number below 2^15 over 2^15).
+    for (i, out) in output[..TABLE].iter_mut().enumerate() {
+        *out = level(i, step, kind) / 32768.0 * f64::from(wet);
+    }
+    output[TABLE] = output[TABLE - 1];
 }
 
 /// From `p = 2^31` on (and for NaN) the table's part of a sample is +0: FL's whole-number index overflows there (spec
@@ -130,9 +137,12 @@ pub fn chop(y: f64) -> f32 {
     }
 }
 
+#[derive(Clone)]
 pub struct FastDist {
     applied: [i32; PARAMS],
-    table: Vec<f64>,
+    curves: &'static [Vec<f64>; 20],
+    table: &'static [f64],
+    wet: f64,
     /// `pre * 8191`, not rounded to single.
     scale: f64,
     dry: f32,
@@ -144,7 +154,18 @@ impl FastDist {
     }
 
     pub fn with_settings(s: &Settings) -> FastDist {
-        let mut d = FastDist { applied: s.v, table: Vec::new(), scale: 0.0, dry: 0.0 };
+        // Build the twenty fixed transfer curves once at instance creation. Turning
+        // a knob then selects a curve without running 8192 log/pow pairs in process().
+        static CURVES: std::sync::OnceLock<[Vec<f64>; 20]> = std::sync::OnceLock::new();
+        let curves = CURVES.get_or_init(|| std::array::from_fn(|i| {
+            table((i % 10 + 1) as i32, (i / 10) as i32, 1.0)
+        }));
+        let mut d = FastDist {
+            applied: s.v,
+            curves, table: &curves[0], wet: 0.0,
+            scale: 0.0,
+            dry: 0.0,
+        };
         d.derive();
         d
     }
@@ -170,7 +191,9 @@ impl FastDist {
         let v = self.applied;
         let pre = knob(v[PRE]);
         let (wet, dry) = gains(pre, knob(v[MIX]), knob(v[POST]));
-        self.table = table(v[THRESHOLD], v[TYPE], wet);
+        let (threshold, kind) = curve(v[THRESHOLD], v[TYPE]);
+        self.table = &self.curves[(kind * 10 + threshold - 1) as usize];
+        self.wet = f64::from(wet);
         self.scale = f64::from(pre) * 8191.0;
         self.dry = dry;
     }
@@ -184,7 +207,7 @@ impl FastDist {
         let shaped = if p < OVERFLOW {
             let i = p.min(8191.0) as usize;
             let f = p - p.trunc();
-            let (a, b) = (self.table[i], self.table[i + 1]);
+            let (a, b) = (self.table[i] * self.wet, self.table[i + 1] * self.wet);
             (a + (b - a) * f).copysign(x64)
         } else {
             0.0

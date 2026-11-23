@@ -58,6 +58,73 @@ fn factory_presets() {
 }
 
 fn main() {
+    // The bundled JUCE and OpenGL editors resolve only this versioned display callback.
+    let export = match std::env::var("CARGO_CFG_TARGET_OS").as_deref() {
+        Ok("windows") if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") =>
+            "/EXPORT:ml_stock_editor_pixels_v1",
+        Ok("windows") => {
+            let def = PathBuf::from(std::env::var_os("OUT_DIR").unwrap()).join("stock-editor.def");
+            std::fs::write(&def, "EXPORTS\nml_stock_editor_pixels_v1\n").expect("stock editor export");
+            println!("cargo:rustc-link-arg-bin=lemonstudio={}", def.display());
+            ""
+        },
+        Ok("macos") => "-Wl,-exported_symbol,_ml_stock_editor_pixels_v1",
+        // The Windows release's Zig linker supports the general export flag.
+        Ok("linux") if std::env::var("HOST").is_ok_and(|host| host.contains("-windows-")) =>
+            "-Wl,--export-dynamic",
+        Ok("linux") => "-Wl,--export-dynamic-symbol=ml_stock_editor_pixels_v1",
+        _ => "",
+    };
+    if !export.is_empty() { println!("cargo:rustc-link-arg-bin=lemonstudio={export}"); }
+    println!("cargo:rerun-if-changed=vendor/minibpm");
+    cc::Build::new().cpp(true).std("c++11")
+        .file("vendor/minibpm/MiniBpm.cpp")
+        .file("vendor/minibpm/lemon_bridge.cpp")
+        .warnings(false).compile("lemon_minibpm");
+
+    println!("cargo:rerun-if-env-changed=LEMON_MASTER_BUNDLE");
+    println!("cargo:rerun-if-env-changed=LEMON_RELEASE");
+    let bundle = std::env::var_os("LEMON_MASTER_BUNDLE").map(PathBuf::from);
+    let bytes = bundle.as_ref().map(|p| {
+        println!("cargo:rerun-if-changed={}", p.display());
+        std::fs::read(p).expect("Cannot read Master Assistant bundle")
+    }).unwrap_or_default();
+    if std::env::var_os("LEMON_RELEASE").is_some() {
+        assert!(std::env::var_os("CARGO_FEATURE_MASTER_ASSISTANT").is_some() && !bytes.is_empty(),
+            "Release requires Master Assistant and LEMON_MASTER_BUNDLE");
+    }
+    std::fs::write(PathBuf::from(std::env::var_os("OUT_DIR").unwrap()).join("master-engine.zip"), bytes).unwrap();
+    let score_out = PathBuf::from(std::env::var_os("OUT_DIR").unwrap()).join("score-engine.zip");
+    println!("cargo:rerun-if-env-changed=LEMON_SCORE_BUNDLE");
+    if let Some(path) = std::env::var_os("LEMON_SCORE_BUNDLE") {
+        println!("cargo:rerun-if-changed={}", PathBuf::from(&path).display());
+        std::fs::copy(path, score_out).expect("Could not embed Verovio score bundle");
+    } else {
+        std::fs::write(score_out, []).unwrap();
+    }
+    println!("cargo:rerun-if-env-changed=LEMON_VISUALIZER_WORKER");
+    let worker_out = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("visualizer-worker.exe");
+    let windows_x64 = std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+        && std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("x86_64");
+    if let Some(path) = std::env::var_os("LEMON_VISUALIZER_WORKER").filter(|_| windows_x64) {
+        let path = PathBuf::from(path);
+        println!("cargo:rerun-if-changed={}", path.display());
+        std::fs::copy(path, worker_out).expect("Could not embed the Visualizer renderer");
+    } else {
+        std::fs::write(worker_out, []).unwrap();
+    }
+    match std::env::var("CARGO_CFG_TARGET_OS").as_deref() {
+        Ok("windows") => {
+            println!("cargo:rerun-if-changed=src/sample_drag_windows.cpp");
+            cc::Build::new().cpp(true).file("src/sample_drag_windows.cpp").compile("sample_drag");
+            for lib in ["shell32", "ole32", "uuid"] { println!("cargo:rustc-link-lib={lib}"); }
+        }
+        Ok("macos") => {
+            println!("cargo:rerun-if-changed=src/sample_drag_macos.m");
+            cc::Build::new().flag("-fobjc-arc").file("src/sample_drag_macos.m").compile("sample_drag");
+        }
+        _ => {}
+    }
     factory_presets();
     // `plugin_windows`: plugin editors open in Lemon Studio's frame windows (Win32 on Windows, X11 on Linux, AppKit on
     // macOS).
@@ -66,6 +133,7 @@ fn main() {
         println!("cargo::rustc-cfg=plugin_windows");
     }
     println!("cargo:rerun-if-changed=assets/lemonstudio.rc");
+    println!("cargo:rerun-if-changed=assets/lemonstudio.manifest");
     println!("cargo:rerun-if-changed=assets/lemonstudio.ico");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows")
         || std::env::var("CARGO_CFG_TARGET_ENV").as_deref() != Ok("msvc")
@@ -76,9 +144,21 @@ fn main() {
         println!("cargo:warning=rc.exe not found (Windows SDK); building without the app icon");
         return;
     };
-    let out = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("lemonstudio.res");
+    const VERSION_LABEL: &str = include_str!("../../packaging/product-version.txt");
+    println!("cargo:rerun-if-changed=../../packaging/product-version.txt");
+    let version = VERSION_LABEL.trim();
+    let mut numbers = version.split('.').map(|part| part.parse::<u16>().expect("Windows product version"));
+    let [major, minor, patch] = std::array::from_fn(|_| numbers.next().unwrap_or(0));
+    assert!(numbers.next().is_none(), "Windows product version has more than three components");
+    let directory = PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    std::fs::write(directory.join("product-version.h"), format!(
+        "#define ML_FILE_VERSION {major},{minor},{patch},0\n#define ML_PRODUCT_VERSION \"{version}\\0\"\n"
+    )).expect("Windows product version resource");
+    let out = directory.join("lemonstudio.res");
     let ok = Command::new(&rc)
-        .args(["/nologo", "/fo"])
+        .args(["/nologo", "/i"])
+        .arg(&directory)
+        .arg("/fo")
         .arg(&out)
         .arg("assets/lemonstudio.rc")
         .status()

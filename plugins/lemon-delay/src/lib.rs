@@ -69,8 +69,8 @@ impl LemonDelay {
 }
 
 impl Plugin for LemonDelay {
-    const NAME: &'static str = "Lemon Delay";
-    const VENDOR: &'static str = "Lemon Studio";
+    const NAME: &'static str = "ML Delay";
+    const VENDOR: &'static str = "ML Studio";
     const URL: &'static str = "";
     const EMAIL: &'static str = "";
     const VERSION: &'static str = env!("CARGO_PKG_VERSION");
@@ -102,6 +102,9 @@ impl Plugin for LemonDelay {
             }
             None => self.dsp = Some(Delay::with_settings(rate, &s, 120.0)),
         }
+        if let Some(delay) = &mut self.dsp {
+            delay.set_clean_echo(self.raw.ends_with(os_engine::effects::delay::CLEAN_ECHO_TAG));
+        }
         true
     }
 
@@ -115,6 +118,7 @@ impl Plugin for LemonDelay {
         let s = self.settings();
         let Some(dsp) = &mut self.dsp else { return ProcessStatus::Normal };
         dsp.set(&s);
+        dsp.set_clean_echo(self.raw.ends_with(os_engine::effects::delay::CLEAN_ECHO_TAG));
         if let Some(bpm) = ctx.transport().tempo {
             dsp.set_tempo(bpm);
         }
@@ -131,7 +135,7 @@ impl Plugin for LemonDelay {
 
 impl ClapPlugin for LemonDelay {
     const CLAP_ID: &'static str = "org.openstudio.lemon-delay";
-    const CLAP_DESCRIPTION: Option<&'static str> = Some("Lemon Studio's stereo delay");
+    const CLAP_DESCRIPTION: Option<&'static str> = Some("ML Studio's stereo delay");
     const CLAP_MANUAL_URL: Option<&'static str> = None;
     const CLAP_SUPPORT_URL: Option<&'static str> = None;
     const CLAP_FEATURES: &'static [ClapFeature] = &[ClapFeature::AudioEffect, ClapFeature::Delay, ClapFeature::Stereo];

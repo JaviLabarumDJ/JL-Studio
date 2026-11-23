@@ -1,5 +1,4 @@
 // Copyright (C) 2026 ItsAlphaNeon
-// Copyright (C) 2026 thacer13
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
@@ -15,7 +14,7 @@ use std::path::PathBuf;
 use os_ui::Rect;
 use winit::keyboard::{Key, NamedKey};
 
-use crate::app::{App, Drag};
+use crate::app::{Action, App, Drag};
 use crate::filedlg::{FileDlg, Focus, Outcome, SortBy, ROW_H};
 
 /// The icon of a message box.
@@ -55,18 +54,58 @@ fn accel(label: &str) -> char {
 /// The work that waits for a dialog's answer (`App::dialog_done`).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Then {
+    SupporterPrompt,
+    SupporterFile,
+    RecoverProject(PathBuf, String),
+    InputBindings(bool),
+    SplitPattern(u16),
+    MidiControllerPreset(String, bool),
+    VocalDownload(u16),
+    VisualizerInstall(crate::visualizer::Target),
+    VisualizerProgress,
+    VisualizerVideoFile(crate::visualizer_video::Request),
+    VisualizerVideoInstall(crate::visualizer_video::Request, PathBuf),
+    VisualizerVideoProgress,
+    VisualCover(crate::visual_scenes::Key),
+    MelliInstall,
+    MelliProgress,
+    MelliRemove,
+    WarpApply,
+    ReferenceVideo(f64),
+    ReferenceVideoSetup(Option<crate::scoring::video::setup::ImportFile>),
+    ReferenceVideoProgress,
+    RelinkVideo(os_model::timeline::Video),
+    SetDetectedProjectTempo(f64),
+    ResetMixerTracks(Vec<u16>),
+    DeleteAllPlaylistTracks(u16),
+    DeletePickerSelection(Vec<os_model::ClipSource>),
+    VocalReanalyse(u16),
+    TrashBrowserSample(PathBuf),
+    RemoveBrowserCollection(usize),
+    RemoveBrowserCollectionFolder(crate::views::browser::library::CollectionLocation),
     /// Nothing (an information box).
     Nothing,
+    StemDownload(usize, u8),
+    StemChoose(usize, u8),
+    StemCancel,
     /// The save-changes question before `Next`: Yes saves first, No goes on, Cancel stays.
     Discard(Next),
     /// Where to save the project (Save as, or Save of a project without a file), then `Next` once it is saved.
     SaveProject(Option<Next>),
     /// The Export form's folder button (`App::export_folder_chosen`).
     ExportFolder,
+    ReplaceAudioExport(Vec<PathBuf>),
+    ReplacePlaylistExport(Vec<PathBuf>),
     OpenProject,
     LoadTheme,
-    /// VIEW ▸ Background ▸ Set image wallpaper... (`App::set_wallpaper`).
-    Wallpaper,
+    ExportTheme,
+    ThemeWallpaper,
+    MixerSkinArt(crate::mixer_skin::Part),
+    ThemeFont,
+    PluginPicture(String),
+    ImportEffectChain,
+    ExportEffectChain(usize),
+    DeleteEffectChain(usize),
     /// The Arpeggiate dialog's folder button (spec: ui/piano-arpeggiate.md §1).
     ArpPattern,
     /// The Quantize dialog's folder button (spec: ui/piano-quantize.md §1).
@@ -76,14 +115,15 @@ pub enum Then {
     PluginFolder,
     /// The missing files box (`crate::missing`): Find samples... (Yes) or OK.
     MissingFiles,
+    ImportReport(usize),
+    SaveImportReport,
+    RelinkSample(usize,String),
     /// The folder the missing samples are looked for in.
     SampleFolder,
     /// FILE ▸ Export ▸ Zipped loop package...: the zip file (`crate::zipped`).
     ExportZip,
     /// Save preset as... for the plugin with this key (`plugins::Plugins::hosted`).
     SavePreset(usize),
-    /// Save channel state as... for this rack row (`crate::channel_states`).
-    SaveChannelState(usize),
     /// Import preset... for the plugin with this key.
     ImportPreset(usize),
     /// Rename preset... for the plugin with this key: its current preset file.
@@ -92,10 +132,14 @@ pub enum Then {
     DeletePreset(usize, PathBuf),
     /// Where to save the toolbar's layout as a preset (spec: ui/toolbar-menu.md §8).
     SaveToolbarPreset,
+    WorkspaceLayout(bool),
+    DeleteWorkspaceLayout(PathBuf),
+    MarkerProfile(u8),
     /// The delete question for this toolbar preset file: Yes deletes it.
     DeleteToolbarPreset(PathBuf),
     /// Load sample... for this rack row.
     RackSample(usize),
+    BrowserSample,
     /// The replace question of the Save dialog under it: Yes answers that dialog with this path.
     Replace(PathBuf),
     /// File ▸ Browser extra search folders: the folder for this row (`App::search_folder_chosen`).
@@ -112,41 +156,35 @@ pub enum Then {
     SongSignature(crate::timesig::SongSig, u8, u8),
     /// The project's data folder: its questions and folder pickers (`crate::data_folder`).
     DataFolder(crate::data_folder::DThen),
-    /// A control-plane client's proposal: Yes applies it, No discards it (`crate::control::propose`).
-    Proposal(u64),
-    /// A control-plane client asks to save the project to this file: Yes saves it.
-    ClientSave(PathBuf),
     /// The MIDI file to import (`crate::midi_file`); true: from the piano roll.
     MidiImport(bool),
     /// Where to export a MIDI file; true: the piano roll's channel.
     MidiExport(bool),
+    ScoreEdit,
+    ScoreExport(bool),
+    ScoreImport,
     /// File ▸ FL Studio factory content folder: the folder picked (`App::set_factory_folder`).
     FactoryFolder,
     /// FILE ▸ Save as template...: the template's name, from the save dialog (`crate::project_files`).
     SaveTemplate,
+    ReplaceTemplate(PathBuf),
+    UseStartupTemplate(String),
     /// FILE ▸ Save to new project folder...: the folder the new project folder goes in.
     NewProjectFolder,
     /// The Delete unused files question: Yes deletes these files, then saves the project.
     DeleteUnused(Vec<PathBuf>),
-    /// The External input question for this mixer track: Yes switches it to External input only (spec:
-    /// audio/track-io.md §1.4).
-    ExtInput(u16),
-    /// Prepare for performance mode's question: Ok opens Marker settings (spec: ui/performance-mode.md §1).
-    PerfConfirm,
-    /// Set up for MIDI export's question: Ok turns the channels into MIDI Out channels (spec: plugins/midi-out.md §6.6).
-    MidiExportConfirm,
-    /// Marker settings: Accept (Ok) prepares with this count and spacing.
-    PerfMarkers(u8, u8),
 }
 
 /// What waits for the save-changes question.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Next {
+    CollaborationJoin(String,String),
     /// Close the window (and the program).
     Close,
     /// macOS: Quit from the menu bar or the Dock (AppKit waits for the answer).
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Quit,
+    Update,
     NewProject,
     /// FILE > Open: the open dialog.
     OpenDialog,
@@ -158,6 +196,7 @@ pub enum Next {
     Revert(PathBuf),
     /// FILE ▸ New from template ▸: a new project from this template file (None: Empty).
     Template(Option<PathBuf>),
+    NoTracksTemplate,
 }
 
 /// A dialog's answer.
@@ -184,11 +223,13 @@ pub struct Msg {
     pub remember: Option<(&'static crate::messages::Message, bool)>,
     /// The buttons' own labels, in the order of `buttons` (empty: the answers' labels, "Yes", "No", ...).
     pub labels: Vec<&'static str>,
+    /// Actual completed/total bytes; None leaves ordinary message boxes unchanged.
+    pub progress: Option<(u64, u64)>,
 }
 
 impl Msg {
     pub fn new(kind: Kind, title: &str, text: Vec<(String, bool)>, buttons: &[Answer], then: Then) -> Msg {
-        Msg { kind, title: title.into(), text, buttons: buttons.to_vec(), focus: 0, then, remember: None, labels: Vec::new() }
+        Msg { kind, title: title.into(), text, buttons: buttons.to_vec(), focus: 0, then, remember: None, labels: Vec::new(), progress: None }
     }
 
     /// The same box with buttons labelled `labels` (in the order of its buttons) instead of the answers' names.
@@ -220,6 +261,19 @@ pub fn spans(parts: &[&str]) -> Vec<(String, bool)> {
 }
 
 pub enum Body {
+    Collaboration(crate::collaboration::Form),
+    NoteProperties(crate::piano_note_properties::Form),
+    ClipFx(u16,usize),
+    Patch(crate::ml_patch::Form),
+    Normalize(crate::clip_normalize::Form),
+    StripSilence(crate::strip_silence::Form),
+    VocalAlign(crate::vocal_align::Form),
+    Ai,
+    VoiceAssistant,
+    Headphones(crate::headphones::Form),
+    RoutePicker(crate::route_picker::Form),
+    MixAssistant(Box<crate::mix_assistant::Form>),
+    MixerInsert(crate::mixer::InsertTracks),
     Msg(Msg),
     File(Box<FileDlg>),
     /// General ▸ Input ▸ Manage shortcuts (`crate::shortcuts`).
@@ -228,8 +282,6 @@ pub enum Body {
     TimeSig(crate::timesig::SigForm),
     /// Rename project, Save as and New project (`crate::project_forms`).
     Project(crate::project_forms::Form),
-    /// Prepare for performance mode's Marker settings (`crate::perform`).
-    Markers(crate::perform::MarkerForm),
 }
 
 /// A dialog on the stack (`State::dialogs`, bottom to top; only the top one takes input).
@@ -247,9 +299,59 @@ impl Modal {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TextTarget { Name, Path, Project(u8), HeadphoneSearch, RouteSearch, MixerCount, Normalize, SigNumerator, NoteProperty(usize), Collaboration(usize) }
+
+fn text_field(body: &mut Body, target: TextTarget) -> Option<&mut Field> {
+    match (body, target) {
+        (Body::File(f), TextTarget::Name) => { f.focus=Focus::Name; f.list_focus=false; Some(&mut f.name) },
+        (Body::File(f), TextTarget::Path) => { f.focus=Focus::Path; f.list_focus=false; Some(&mut f.path) },
+        (Body::Project(crate::project_forms::Form::Save(f)), TextTarget::Project(i)) if i==0 || (f.info_open && i<=4) => {
+            f.focus=i; Some(if i==0 { &mut f.name } else { &mut f.info[usize::from(i)-1] })
+        },
+        (Body::Project(crate::project_forms::Form::Rename(f)), TextTarget::Project(i)) if i==0 || (i==1 && f.folder_editable()) => {
+            f.focus=i; Some(if i==0 { &mut f.name } else { &mut f.folder })
+        },
+        (Body::Project(crate::project_forms::Form::Export(f)), TextTarget::Project(0)) => Some(&mut f.name),
+        (Body::Headphones(f), TextTarget::HeadphoneSearch) => Some(&mut f.search),
+        (Body::RoutePicker(f), TextTarget::RouteSearch) => Some(&mut f.search),
+        (Body::MixerInsert(f), TextTarget::MixerCount) => Some(&mut f.field),
+        (Body::TimeSig(f), TextTarget::SigNumerator) => Some(&mut f.num),
+        (Body::Normalize(f), TextTarget::Normalize) => Some(&mut f.target),
+        (Body::NoteProperties(f), TextTarget::NoteProperty(i)) => f.focus_field(i),
+        (Body::Collaboration(f), TextTarget::Collaboration(i)) => f.focus_field(i),
+        _ => None,
+    }
+}
+
 /// The parts of a dialog that take clicks.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DHit {
+    TextCaret(TextTarget, usize),
+    Collaboration(crate::collaboration::Command),
+    NoteProperties(crate::piano_note_properties::Command),
+    ClipFx(crate::clip_effects::Command),
+    Patch(crate::ml_patch::Command),
+    Normalize(crate::clip_normalize::Command),
+    StripSilence(crate::strip_silence::Command),
+    VocalAlign(crate::vocal_align::Command),
+    AiEnable,
+    AiApprove(bool),
+    AiRemember,
+    AiForget,
+    AiSetup,
+    Voice(crate::voice_assistant::Button),
+    Headphone(usize),
+    HeadphoneToggle,
+    HeadphoneAutoGain,
+    HeadphonePage(bool),
+    HeadphoneSearch,
+    HeadphoneCredits,
+    RoutePick(u16),
+    MixAssistant(crate::mix_assistant::Hit),
+    RouteSearch,
+    MixerCount,
+    RoutePage(bool),
     /// The dialog itself (clicks on nothing in particular), its caption (drag), the caption's ×.
     Body,
     Caption,
@@ -258,6 +360,7 @@ pub enum DHit {
     Button(usize),
     /// A message box's Remember my choice check.
     Remember,
+    StemToggle(usize),
     /// File dialog: Back, Up, New folder, the path and name fields, a place, a row, a column header, the list's empty
     /// part, its scroll bar, the type combo and its entries, the main button and Cancel.
     Back,
@@ -275,111 +378,23 @@ pub enum DHit {
     Accept,
     Cancel,
     /// Manage shortcuts: a row's box (opens its list), an entry of the open list, Reset all and Apply.
+    SamplePreview,
+    CommandShortcut(usize),
+    CommandPage,
     Shortcut(usize),
     ShortcutChoice(usize),
     ResetAll,
     Apply,
     /// Time signature dialog: the denominator's value box (true) or the numerator's; Accept is `Accept`.
     SigValue(bool),
-    /// Marker settings: the Spacing box (true) or the Marker count box.
-    MarkerValue(bool),
+    SigNumerator,
     /// Rename project, Save as and New project: their parts (`crate::project_forms`).
     Form(crate::project_forms::FHit),
 }
 
-/// A one-line text field: the text, the caret (in characters) and whether all of it is selected (typing replaces it).
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct Field {
-    pub text: String,
-    pub caret: usize,
-    pub all: bool,
-}
-
-impl Field {
-    pub fn set(&mut self, s: &str) {
-        self.text = s.into();
-        self.caret = self.len();
-        self.all = false;
-    }
-
-    pub fn len(&self) -> usize {
-        self.text.chars().count()
-    }
-
-    pub fn select_all(&mut self) {
-        self.all = !self.text.is_empty();
-        self.caret = self.len();
-    }
-
-    /// Byte offset of character `i`.
-    fn at(&self, i: usize) -> usize {
-        self.text.char_indices().nth(i).map_or(self.text.len(), |(b, _)| b)
-    }
-
-    /// The text up to the caret (where it is drawn).
-    pub fn before_caret(&self) -> &str {
-        &self.text[..self.at(self.caret)]
-    }
-
-    /// Removes a selection; true when there was one.
-    fn take_all(&mut self) -> bool {
-        if !self.all {
-            return false;
-        }
-        self.text.clear();
-        self.caret = 0;
-        self.all = false;
-        true
-    }
-
-    pub fn insert(&mut self, s: &str) {
-        self.take_all();
-        let b = self.at(self.caret);
-        self.text.insert_str(b, s);
-        self.caret += s.chars().count();
-    }
-
-    /// The editing keys. True when the key was taken.
-    pub fn key(&mut self, key: &Key, ctrl: bool, alt: bool) -> bool {
-        match key {
-            Key::Named(NamedKey::Backspace) => {
-                if !self.take_all() && self.caret > 0 {
-                    self.caret -= 1;
-                    let b = self.at(self.caret);
-                    self.text.remove(b);
-                }
-            }
-            Key::Named(NamedKey::Delete) => {
-                if !self.take_all() && self.caret < self.len() {
-                    let b = self.at(self.caret);
-                    self.text.remove(b);
-                }
-            }
-            Key::Named(NamedKey::ArrowLeft) => {
-                self.caret = if self.all { 0 } else { self.caret.saturating_sub(1) };
-                self.all = false;
-            }
-            Key::Named(NamedKey::ArrowRight) => {
-                self.caret = if self.all { self.len() } else { (self.caret + 1).min(self.len()) };
-                self.all = false;
-            }
-            Key::Named(NamedKey::Home) => {
-                self.caret = 0;
-                self.all = false;
-            }
-            Key::Named(NamedKey::End) => {
-                self.caret = self.len();
-                self.all = false;
-            }
-            Key::Named(NamedKey::Space) => self.insert(" "),
-            Key::Character(c) if ctrl && !alt && c.eq_ignore_ascii_case("a") => self.select_all(),
-            // Ctrl+Alt is AltGr on Windows: it types characters.
-            Key::Character(c) if (!ctrl || alt) && !c.chars().any(char::is_control) => self.insert(c),
-            _ => return false,
-        }
-        true
-    }
-}
+#[path = "dialog_text.rs"]
+pub(crate) mod text;
+pub use text::Field;
 
 /// What a key did in the file dialog.
 enum FileKey {
@@ -388,8 +403,22 @@ enum FileKey {
     Cancel,
 }
 
-fn file_key(f: &mut FileDlg, key: &Key, ctrl: bool, alt: bool) -> FileKey {
+fn file_key(f: &mut FileDlg, key: &Key, ctrl: bool, alt: bool, shift: bool) -> FileKey {
     use NamedKey as N;
+    #[cfg(windows)]
+    if f.list_focus && !f.filter_open && !alt && crate::workspace_visibility::shown("visible_file-management") {
+        let action=match key {
+            Key::Character(c) if ctrl && c.eq_ignore_ascii_case("c")=>Some((false,"copy")),
+            Key::Character(c) if ctrl && c.eq_ignore_ascii_case("x")=>Some((false,"cut")),
+            Key::Character(c) if ctrl && c.eq_ignore_ascii_case("v")=>Some((true,"paste")),
+            Key::Named(N::Delete) if !ctrl && !shift=>Some((false,"delete")),
+            _=>None,
+        };
+        if let Some((background,verb))=action {f.explorer_action(background,Some(verb));return FileKey::Nothing;}
+        if matches!(key,Key::Named(N::ContextMenu)) || (shift && matches!(key,Key::Named(N::F10))) {
+            f.explorer_action(f.sel.is_none(),None);return FileKey::Nothing;
+        }
+    }
     if f.filter_open {
         match key {
             Key::Named(N::Escape | N::Enter) => f.filter_open = false,
@@ -404,10 +433,17 @@ fn file_key(f: &mut FileDlg, key: &Key, ctrl: bool, alt: bool) -> FileKey {
         return FileKey::Nothing;
     }
     match key {
+        Key::Character(c) if ctrl && !alt && c.eq_ignore_ascii_case("l") => {
+            f.focus = Focus::Path; f.list_focus = false; f.path.select_all();
+        }
+        Key::Character(c) if ctrl && shift && !alt && c.eq_ignore_ascii_case("n") => f.new_folder(),
+        Key::Named(N::F2) if f.list_focus && crate::workspace_visibility::shown("visible_file-management") => f.begin_rename(),
+        Key::Named(N::Escape) if f.cancel_rename() => {},
         Key::Named(N::Escape) => return FileKey::Cancel,
         Key::Named(N::Enter) if f.focus == Focus::Path => f.path_enter(),
         Key::Named(N::Enter) => return FileKey::Outcome(f.accept()),
         Key::Named(N::Tab) => {
+            f.list_focus=false;
             f.focus = if f.focus == Focus::Name { Focus::Path } else { Focus::Name };
             if f.focus == Focus::Path {
                 f.path.select_all();
@@ -423,11 +459,11 @@ fn file_key(f: &mut FileDlg, key: &Key, ctrl: bool, alt: bool) -> FileKey {
         Key::Named(N::End) if f.list_focus => f.step(1 << 40),
         Key::Named(N::F5) => f.reread(),
         // Backspace in an empty name field: the parent folder.
-        Key::Named(N::Backspace) if f.focus == Focus::Name && f.name.text.is_empty() => f.up(),
+        Key::Named(N::Backspace) if f.list_focus => f.up(),
         _ => {
             let name = f.focus == Focus::Name;
             let field = if name { &mut f.name } else { &mut f.path };
-            if field.key(key, ctrl, alt) {
+            if field.key_mod(key, ctrl, alt, shift) {
                 f.status = None;
                 if name {
                     f.list_focus = false;
@@ -439,6 +475,21 @@ fn file_key(f: &mut FileDlg, key: &Key, ctrl: bool, alt: bool) -> FileKey {
 }
 
 impl App {
+    pub(crate) fn file_context_menu(&mut self) {
+        if !crate::workspace_visibility::shown("visible_file-management") {return;}
+        #[cfg(windows)]
+        {
+            let action=self.top_hit(self.mouse.0,self.mouse.1).map(|h|h.action.clone());
+            if let Some(Modal{body:Body::File(f),..})=self.state.dialogs.last_mut() {
+                match action {
+                    Some(Action::Dlg(DHit::Row(i)))=>{f.select(i);f.explorer_action(false,None);}
+                    Some(Action::Dlg(DHit::List))=>{f.sel=None;f.explorer_action(true,None);}
+                    _=>return,
+                }
+                self.invalidate();
+            }
+        }
+    }
     /// A dialog is open: it takes every click, key, wheel turn and drop.
     pub fn modal_open(&self) -> bool {
         !self.state.dialogs.is_empty()
@@ -473,20 +524,20 @@ impl App {
     }
 
     /// Closes the top dialog with `reply` and carries out what waited for it.
-    fn answer(&mut self, reply: Reply) {
+    pub(crate) fn answer(&mut self, reply: Reply) {
         let Some(m) = self.state.dialogs.pop() else { return };
-        if matches!(self.drag, Some(Drag::Dialog { .. } | Drag::DialogBar { .. })) {
+        if matches!(self.drag, Some(Drag::Dialog { .. } | Drag::DialogBar { .. } | Drag::DialogText(_))) {
             self.drag = None;
         }
         self.modal_changed();
         let then = match m.body {
+            Body::VoiceAssistant => { crate::voice_assistant::close(self); return; }
+            Body::MixAssistant(_) => { crate::mix_assistant::closed(self); return; }
+            Body::VocalAlign(_) => { crate::vocal_align::closed(self); return; }
+            Body::Collaboration(_) | Body::NoteProperties(_) | Body::Normalize(_) | Body::StripSilence(_) | Body::Patch(_) | Body::ClipFx(..)=>{self.drag=None;return;},
             Body::Msg(m) => {
-                // The External input question remembers either answer (`prefs::EXTERNAL_INPUT`, Settings ▸ Recording).
-                if let (Then::ExtInput(_), Some((_, true)), Reply::Button(a @ (Answer::Yes | Answer::No))) = (&m.then, m.remember, &reply) {
-                    crate::prefs::set_choice(&crate::prefs::EXTERNAL_INPUT, if *a == Answer::Yes { 1 } else { 2 });
-                }
                 // Ok with Remember my choice ticked turns the message off; Cancel never does.
-                else if let Some((entry, true)) = m.remember {
+                if let Some((entry, true)) = m.remember {
                     if matches!(reply, Reply::Button(Answer::Ok | Answer::Yes)) {
                         crate::messages::set(entry, false);
                     }
@@ -494,6 +545,7 @@ impl App {
                 m.then
             }
             Body::File(f) => {
+                if matches!(f.then,Then::RackSample(_) | Then::BrowserSample) && f.preview_last.is_some(){crate::browser_preview::dismiss(self);}
                 if let Reply::File(Some(p)) = &reply {
                     f.remember(p);
                 }
@@ -501,17 +553,27 @@ impl App {
             }
             Body::Shortcuts(f) => return self.shortcuts_closed(&f, reply == Reply::Button(Answer::Ok)),
             Body::Project(f) => return self.form_closed(f, reply),
+            Body::MixerInsert(form) => {
+                if reply == Reply::Button(Answer::Ok) && let Some(count) = form.count() {
+                    crate::mixer::confirm_insert_tracks(self, form.after, count);
+                }
+                return;
+            }
+            Body::Headphones(_) | Body::RoutePicker(_) | Body::Ai => return,
             Body::TimeSig(f) => {
                 // Its value list goes with it.
                 self.state.playlist.popup = None;
-                match f.song {
-                    Some(at) => Then::SongSignature(at, f.num, f.den),
-                    None => Then::Signature(f.pattern, f.num, f.den),
+                let Some(num) = f.numerator().filter(|_| reply == Reply::Button(Answer::Ok)) else { return };
+                match f.target {
+                    crate::timesig::Target::Song(at) => Then::SongSignature(at, num, f.den),
+                    crate::timesig::Target::Pattern(n) => Then::Signature(n, num, f.den),
+                    crate::timesig::Target::Project => {
+                        let (_, steps) = self.state.project.bar();
+                        self.state.message = self.set_bar(u16::from(num), steps);
+                        self.sync_live();
+                        return;
+                    }
                 }
-            }
-            Body::Markers(f) => {
-                self.state.playlist.popup = None;
-                Then::PerfMarkers(f.count, f.spacing)
             }
         };
         // The replace question answers the Save dialog under it.
@@ -529,16 +591,16 @@ impl App {
         Some(match &self.state.dialogs.last()?.body {
             Body::Msg(m) => Reply::Button(m.escape()),
             Body::File(_) => Reply::File(None),
-            Body::Shortcuts(_) => Reply::Button(Answer::Cancel),
-            Body::TimeSig(_) | Body::Markers(_) => Reply::Button(Answer::Cancel),
-            Body::Project(_) => Reply::Button(Answer::Cancel),
+            Body::Collaboration(_) | Body::NoteProperties(_) | Body::Normalize(_) | Body::StripSilence(_) | Body::Patch(_) | Body::ClipFx(..) | Body::VocalAlign(_) | Body::Shortcuts(_) => Reply::Button(Answer::Cancel),
+            Body::TimeSig(_) => Reply::Button(Answer::Cancel),
+            Body::Project(_) | Body::Headphones(_) | Body::RoutePicker(_) | Body::MixAssistant(_) | Body::MixerInsert(_) | Body::Ai | Body::VoiceAssistant => Reply::Button(Answer::Cancel),
         })
     }
 
     fn top_file(&mut self) -> Option<&mut FileDlg> {
         match &mut self.state.dialogs.last_mut()?.body {
             Body::File(f) => Some(f),
-            Body::Msg(_) | Body::Shortcuts(_) | Body::TimeSig(_) | Body::Markers(_) | Body::Project(_) => None,
+            Body::Collaboration(_) | Body::NoteProperties(_) | Body::Normalize(_) | Body::StripSilence(_) | Body::Patch(_) | Body::ClipFx(..) | Body::VocalAlign(_) | Body::Msg(_) | Body::Shortcuts(_) | Body::TimeSig(_) | Body::Project(_) | Body::Headphones(_) | Body::RoutePicker(_) | Body::MixAssistant(_) | Body::MixerInsert(_) | Body::Ai | Body::VoiceAssistant => None,
         }
     }
 
@@ -553,6 +615,15 @@ impl App {
                 m.focus = 1;
                 self.show_msg(m);
             }
+        }
+    }
+
+    pub(crate) fn dialog_text_drag(&mut self, target: TextTarget, x: f32) {
+        let nearest = text::nearest(self, x, |action| match *action {
+            Action::Dlg(DHit::TextCaret(t, p)) if t == target => Some(p), _ => None,
+        });
+        if let (Some(pos),Some(m))=(nearest,self.state.dialogs.last_mut()) {
+            if let Some(f)=text_field(&mut m.body,target) { f.place(pos,true); }
         }
     }
 
@@ -577,12 +648,56 @@ impl App {
             }
         }
         match h {
+            DHit::TextCaret(target, pos) => {
+                if let Some(f)=text_field(&mut m.body,target) { f.place(pos,self.shift); self.drag=Some(Drag::DialogText(target)); }
+            },
+            DHit::Collaboration(c)=>crate::collaboration::command(self,c),
+            DHit::AiEnable=>crate::ai_control::enable(self),
+            DHit::AiApprove(yes)=>crate::ai_control::approve(self,yes),
+            DHit::AiRemember=>self.state.ai.remember=!self.state.ai.remember,
+            DHit::AiForget=>crate::ai_control::forget(self),
+            DHit::AiSetup=>crate::ai_control::setup(self),
+            DHit::Voice(button) => crate::voice_assistant::button(self, button),
+            DHit::MixAssistant(hit) => crate::mix_assistant::command(self, hit),
+            DHit::RoutePick(t)=>{
+                let target=if let Body::RoutePicker(f)=&m.body {Some((f.row, f.rack.clone()))} else {None};
+                if let Some((row, rack))=target {
+                    self.answer(Reply::Button(Answer::Ok));
+                    if let Some((rows, spread)) = rack {
+                        self.state.message = crate::rack_controls::route(&mut self.state, &rows, t, spread);
+                        self.sync_live(); self.invalidate();
+                    } else { self.route_sample_to(row,t); }
+                }
+            }
+            DHit::MixerCount => {
+                if let Body::MixerInsert(form) = &mut m.body {
+                    form.field.select_all();
+                }
+            }
+            DHit::RouteSearch=>{if let Body::RoutePicker(f)=&mut m.body {f.search.select_all();}}
+            DHit::RoutePage(next)=>{if let Body::RoutePicker(f)=&mut m.body {f.scroll(if next {4}else{-4});}}
+            DHit::HeadphoneCredits => self.tell(Kind::Info,"Headphone profile credits",spans(&[
+                "Behringer HPM1000: listening preset by SeokHwan-BAE1234.\nhttps://github.com/jaakkopasanen/AutoEq/issues/1053\n\n",
+                "ADAM Audio H200: Harman Target by oratory1990 via OPRA, an open headphone EQ database.\nhttps://github.com/opra-project/OPRA\nCC BY-SA 4.0: https://creativecommons.org/licenses/by-sa/4.0/\nML Studio converted the filter format and adjusted the preamp for monitoring headroom.\n\n",
+                include_str!("../assets/headphones/AutoEq-LICENSE.txt"),
+            ])),
+            DHit::Headphone(i) => crate::headphones::select(self,i),
+            DHit::HeadphoneToggle => crate::headphones::toggle(self),
+            DHit::HeadphoneAutoGain => crate::headphones::toggle_auto_gain(self),
+            DHit::HeadphoneSearch => {if let Body::Headphones(f)=&mut m.body {f.search.select_all();}},
+            DHit::HeadphonePage(next) => {if let Body::Headphones(f)=&mut m.body {f.scroll(if next {10}else{-10});}},
             DHit::Body | DHit::List if !matches!(m.body, Body::File(_)) => {}
             DHit::Caption => self.drag = Some(Drag::Dialog { dx: x - r.x, dy: y - r.y }),
             DHit::Close | DHit::Cancel => {
+                if crate::mix_assistant::is_open(self) {
+                    return crate::mix_assistant::command(self, crate::mix_assistant::Hit::Close);
+                }
                 if let Some(reply) = self.escape_reply() {
                     self.answer(reply);
                 }
+            }
+            DHit::StemToggle(n) => {
+                if let Body::Msg(msg)=&mut m.body { if let Then::StemChoose(_,selected)=&mut msg.then { crate::stem_separation::toggle(selected,n); } }
             }
             DHit::Remember => {
                 if let Body::Msg(Msg { remember: Some((_, ticked)), .. }) = &mut m.body {
@@ -591,8 +706,8 @@ impl App {
             }
             DHit::Button(i) => {
                 let a = match &m.body {
-                    Body::Msg(msg) => msg.buttons.get(i).copied(),
-                    Body::File(_) | Body::Shortcuts(_) | Body::TimeSig(_) | Body::Markers(_) | Body::Project(_) => None,
+                    Body::Msg(msg) => msg.buttons.get(i).copied().filter(|a| !(*a==Answer::Ok && matches!(msg.then,Then::StemChoose(_,0)))),
+                    Body::Collaboration(_) | Body::NoteProperties(_) | Body::Normalize(_) | Body::StripSilence(_) | Body::Patch(_) | Body::ClipFx(..) | Body::VocalAlign(_) | Body::File(_) | Body::Shortcuts(_) | Body::TimeSig(_) | Body::Project(_) | Body::Headphones(_) | Body::RoutePicker(_) | Body::MixAssistant(_) | Body::MixerInsert(_) | Body::Ai | Body::VoiceAssistant => None,
                 };
                 if let Some(a) = a {
                     self.answer(Reply::Button(a));
@@ -601,6 +716,17 @@ impl App {
             // Manage shortcuts: Apply keeps the form and closes; a box opens or closes its list; an entry is picked
             // (a swap within its group, `Form::pick`); Reset all fills in the defaults.
             DHit::Apply => self.answer(Reply::Button(Answer::Ok)),
+            DHit::ClipFx(c)=>crate::clip_effects::command(self,c),
+            DHit::Patch(c)=>crate::ml_patch::command(self,c),
+            DHit::NoteProperties(c)=>crate::piano_note_properties::command(self,c),
+            DHit::Normalize(c)=>crate::clip_normalize::command(self,c),
+            DHit::StripSilence(c)=>crate::strip_silence::command(self,c),
+            DHit::VocalAlign(c) => crate::vocal_align::command(self, c),
+            DHit::CommandShortcut(i)=>{if let Body::Shortcuts(f)=&mut m.body{f.capture=Some(i);f.open=None;f.notice="Press a shortcut. Backspace clears; Esc cancels.".into();}}
+            DHit::CommandPage=>{if let Body::Shortcuts(f)=&mut m.body{f.page=(f.page+1)%crate::shortcuts::COMMANDS.len().div_ceil(crate::shortcuts::COMMAND_PAGE);f.capture=None;}}
+            DHit::SamplePreview => {
+                if let Body::File(f)=&mut m.body {f.preview=!f.preview;if !f.preview {crate::browser_preview::dismiss(self);}else{f.preview_last=None;}}
+            }
             DHit::Shortcut(_) | DHit::ShortcutChoice(_) | DHit::ResetAll => {
                 let Body::Shortcuts(f) = &mut m.body else { return };
                 match h {
@@ -614,10 +740,15 @@ impl App {
                 }
             }
             // The time signature dialog (spec: ui/pattern-time-signature.md §1-2).
+            DHit::SigNumerator => {
+                if let Body::TimeSig(f) = &mut m.body {
+                    f.num.select_all();
+                }
+            }
             DHit::SigValue(den) => self.sig_list(den),
-            DHit::Accept if matches!(m.body, Body::TimeSig(_) | Body::Markers(_)) => self.answer(Reply::Button(Answer::Ok)),
-            // Prepare for performance mode's Marker settings (spec: ui/performance-mode.md §1).
-            DHit::MarkerValue(spacing) => self.marker_list(spacing),
+            DHit::Accept if matches!(&m.body, Body::MixerInsert(form) if form.count().is_some()) =>
+                self.answer(Reply::Button(Answer::Ok)),
+            DHit::Accept if matches!(&m.body, Body::TimeSig(f) if f.numerator().is_some()) => self.answer(Reply::Button(Answer::Ok)),
             // Rename project, Save as and New project: a part that closes the form answers it.
             DHit::Form(h) => {
                 if let Some(reply) = self.form_click(h) {
@@ -701,7 +832,55 @@ impl App {
         let shift = self.shift;
         let Some(m) = self.state.dialogs.last_mut() else { return };
         match &mut m.body {
+            Body::Collaboration(_)=>crate::collaboration::key(self,key,ctrl,alt),
+            Body::NoteProperties(_)=>{crate::piano_note_properties::key(self,key,ctrl,alt);}
+            Body::Normalize(_)=>{crate::clip_normalize::key(self,key,ctrl,alt);}
+            Body::StripSilence(_)=>{crate::strip_silence::key(self,key,ctrl,alt);}
+            Body::VocalAlign(_) => { if matches!(key, Key::Named(NamedKey::Escape)) { self.answer(Reply::Button(Answer::Cancel)); } }
+            Body::Patch(_)=>crate::ml_patch::key(self,key,ctrl,alt),
+            Body::ClipFx(..) | Body::Ai | Body::VoiceAssistant => {
+                if matches!(key, Key::Named(NamedKey::Escape)) { self.answer(Reply::Button(Answer::Cancel)); }
+            }
+            Body::MixerInsert(form) => match key {
+                Key::Named(NamedKey::Escape) => self.answer(Reply::Button(Answer::Cancel)),
+                Key::Named(NamedKey::Enter) if form.count().is_some() => self.answer(Reply::Button(Answer::Ok)),
+                Key::Character(c) if !ctrl && !c.bytes().all(|b| b.is_ascii_digit()) => {}
+                Key::Named(NamedKey::Space) => {}
+                _ => { form.field.key_mod(key, ctrl, alt, shift); }
+            },
+            Body::MixAssistant(_) => {
+                use crate::mix_assistant::Hit;
+                match key {
+                    Key::Named(NamedKey::Escape) => crate::mix_assistant::command(self, Hit::Close),
+                    Key::Named(NamedKey::Enter) => crate::mix_assistant::primary(self),
+                    Key::Named(NamedKey::PageDown) => crate::mix_assistant::command(self, Hit::Page(true)),
+                    Key::Named(NamedKey::PageUp) => crate::mix_assistant::command(self, Hit::Page(false)),
+                    _ => {}
+                }
+            }
+            Body::RoutePicker(f)=>{
+                if matches!(key,Key::Named(NamedKey::Escape)){self.answer(Reply::Button(Answer::Cancel));}
+                else if f.search.key_mod(key,ctrl,alt,shift){f.filter();}
+            }
+            Body::Headphones(f) => {
+                match key {
+                    Key::Named(NamedKey::Escape)=>self.answer(Reply::Button(Answer::Cancel)),
+                    Key::Named(NamedKey::Enter)=>{let i=f.results.get(f.selected).copied();if let Some(i)=i {crate::headphones::select(self,i);}},
+                    Key::Named(NamedKey::ArrowUp | NamedKey::ArrowDown | NamedKey::PageUp | NamedKey::PageDown)=>{
+                        let d=match key {Key::Named(NamedKey::ArrowUp)=>-1,Key::Named(NamedKey::ArrowDown)=>1,Key::Named(NamedKey::PageUp)=>-10,_=>10};
+                        f.selected=f.selected.saturating_add_signed(d).min(f.results.len().saturating_sub(1));
+                        if f.selected<f.scroll {f.scroll=f.selected;} else if f.selected>=f.scroll+10 {f.scroll=f.selected-9;}
+                    },
+                    _=>{if f.search.key_mod(key,ctrl,alt,shift) {f.filter();}}
+                }
+            }
             Body::Msg(msg) => {
+                if let Then::StemChoose(_,selected)=&mut msg.then {
+                    if let Key::Character(c)=key { if !ctrl && !alt {
+                        let n=match c.to_ascii_lowercase().as_str() {"1"=>Some(0),"2"=>Some(1),"3"=>Some(2),"4"=>Some(3),"a"=>Some(4),_=>None};
+                        if let Some(n)=n {crate::stem_separation::toggle(selected,n);return;}
+                    }}
+                }
                 let n = msg.buttons.len().max(1);
                 let press = match key {
                     Key::Named(NamedKey::Tab) => {
@@ -724,28 +903,33 @@ impl App {
                     }
                     _ => None,
                 };
-                if let Some(a) = press {
+                if let Some(a) = press.filter(|a| !(*a==Answer::Ok && matches!(msg.then,Then::StemChoose(_,0)))) {
                     self.answer(Reply::Button(a));
                 }
             }
-            Body::File(f) => match file_key(f, key, ctrl, alt) {
+            Body::File(f) => match file_key(f, key, ctrl, alt, shift) {
                 FileKey::Nothing => {}
                 FileKey::Outcome(o) => self.file_outcome(o),
                 FileKey::Cancel => self.answer(Reply::File(None)),
             },
             // Manage shortcuts: Esc closes an open list, else the window (as its ×).
             Body::Shortcuts(f) => {
+                if f.capture_key(key,ctrl,alt,shift){return;}
                 if matches!(key, Key::Named(NamedKey::Escape)) && f.open.take().is_none() {
                     self.answer(Reply::Button(Answer::Cancel));
                 }
             }
             // Esc closes an open value list first, then the dialog (as its ×); Enter presses Accept, its only button.
-            Body::TimeSig(_) | Body::Markers(_) => {
+            Body::TimeSig(f) => {
                 let list = self.state.playlist.popup.is_some();
                 match key {
                     Key::Named(NamedKey::Escape) if list => self.state.playlist.popup = None,
                     Key::Named(NamedKey::Escape) => self.answer(Reply::Button(Answer::Cancel)),
-                    Key::Named(NamedKey::Enter) if !list => self.answer(Reply::Button(Answer::Ok)),
+                    Key::Named(NamedKey::Enter) if !list && f.numerator().is_some() =>
+                        self.answer(Reply::Button(Answer::Ok)),
+                    Key::Character(c) if !ctrl && !c.bytes().all(|b| b.is_ascii_digit()) => {}
+                    Key::Named(NamedKey::Space) => {}
+                    _ if !list => { f.num.key_limited(key, ctrl, alt, shift, 8); }
                     _ => {}
                 }
             }
@@ -757,8 +941,28 @@ impl App {
         }
     }
 
+    pub(crate) fn sample_dialog_preview(&mut self) {
+        let Some(Modal{body:Body::File(f),..})=self.state.dialogs.last_mut() else{return};
+        if !matches!(f.then,Then::RackSample(_) | Then::BrowserSample)||!f.preview{return;}
+        let path=f.sel.and_then(|i|f.entries.get(i)).filter(|e|!e.dir).map(|e|f.dir.join(&e.name));
+        if path==f.preview_last{return;}
+        f.preview_last=path.clone();
+        if let Some(path)=path.filter(|p|p.extension().is_some_and(|e|["wav","mp3","flac","ogg","aif","aiff","wv","rx2","rex","rcy"].iter().any(|x|e.eq_ignore_ascii_case(x)))) {
+            self.preview_sample(&path.to_string_lossy());
+        }else{crate::browser_preview::dismiss(self);}
+    }
+
     /// The wheel over a dialog: scrolls the file list.
     pub(crate) fn dialog_wheel(&mut self, dy: f32) {
+        if let Some(Modal { body: Body::MixAssistant(form), .. }) = self.state.dialogs.last_mut() {
+            form.scroll((-dy * 3.0).round() as isize);
+            self.invalidate();
+            return;
+        }
+        if let Some(Modal{body:Body::RoutePicker(f),..})=self.state.dialogs.last_mut(){f.scroll((-dy).round() as isize);self.invalidate();return;}
+
+        if let Some(Modal{body:Body::Headphones(f),..})=self.state.dialogs.last_mut(){f.scroll((-dy*3.).round() as isize);self.invalidate();return;}
+
         if let Some(f) = self.top_file() {
             f.scroll -= dy * 3.0 * ROW_H;
             f.clamp_scroll();
@@ -798,7 +1002,7 @@ impl App {
     pub fn top_message(&self) -> Option<(String, String)> {
         match &self.state.dialogs.last()?.body {
             Body::Msg(m) => Some((m.title.clone(), m.plain())),
-            Body::File(_) | Body::Shortcuts(_) | Body::TimeSig(_) | Body::Markers(_) | Body::Project(_) => None,
+            Body::Collaboration(_) | Body::NoteProperties(_) | Body::Normalize(_) | Body::StripSilence(_) | Body::Patch(_) | Body::ClipFx(..) | Body::VocalAlign(_) | Body::File(_) | Body::Shortcuts(_) | Body::TimeSig(_) | Body::Project(_) | Body::Headphones(_) | Body::RoutePicker(_) | Body::MixAssistant(_) | Body::MixerInsert(_) | Body::Ai | Body::VoiceAssistant => None,
         }
     }
 }
@@ -851,3 +1055,24 @@ pub mod fake {
         })
     }
 }
+
+#[cfg(test)] mod community_preview_tests {
+    use super::*;
+    #[test] fn community_sampler_preview_cancel_keeps_channel() {
+        let mut app=App::new(None);app.state.project=crate::app::test_project();
+        let before=app.state.project.clone();
+        let mut f=crate::filedlg::FileDlg::new(crate::filedlg::Mode::Open,"Load sample","audio",Then::RackSample(0));
+        f.dir=std::env::temp_dir();f.entries=vec![crate::filedlg::Entry{name:"lemon-preview-test.wav".into(),dir:false,size:0,modified:None}];f.sel=Some(0);
+        app.state.dialogs.push(Modal::new(Body::File(Box::new(f))));
+        // Queue decoding only: never open an audio device in this test.
+        app.sample_dialog_preview();assert!(app.state.browser_preview.path.is_some());
+        assert_eq!(app.state.project,before);
+        app.answer(Reply::File(None));
+        assert!(app.state.browser_preview.path.is_none());assert!(!app.state.browser_preview.busy());
+        assert_eq!(app.state.project,before);assert!(app.state.sample_loads.is_empty());
+    }
+}
+
+#[cfg(test)]
+#[path = "dialog_workflow_tests.rs"]
+mod workflow_tests;

@@ -1,0 +1,66 @@
+{
+  "windows": {
+    "version": 6,
+    "archive": {
+      "name": "melli-windows-v6.zip",
+      "url": "https://michaellanemusic.de/lemon-studio/helper/6/melli-windows-v6.zip",
+      "sha256": "d0e1f8e42e086872af308d94fdba95f16ca12e95b69d78b11b14c8f4798c8080",
+      "size": 175085376
+    },
+    "model": {
+      "name": "Qwen3.5-0.8B-UD-Q3_K_XL.gguf",
+      "url": "https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/resolve/6ab461498e2023f6e3c1baea90a8f0fe38ab64d0/Qwen3.5-0.8B-UD-Q3_K_XL.gguf",
+      "sha256": "30a1353e67c9795e375dac8a19d25429ace0ec2b6ca55436406ee02d2603a218",
+      "size": 492216576
+    },
+    "unpacked_size": 460098960
+  },
+  "linux": {
+    "version": 6,
+    "archive": {
+      "name": "melli-linux-v6.zip",
+      "url": "https://michaellanemusic.de/lemon-studio/helper/6/melli-linux-v6.zip",
+      "sha256": "0f59ae0fe8a0294a2ac262d0a455829f65818bcd7e1604158a321206ab5b5ccf",
+      "size": 244107052
+    },
+    "model": {
+      "name": "Qwen3.5-0.8B-UD-Q3_K_XL.gguf",
+      "url": "https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/resolve/6ab461498e2023f6e3c1baea90a8f0fe38ab64d0/Qwen3.5-0.8B-UD-Q3_K_XL.gguf",
+      "sha256": "30a1353e67c9795e375dac8a19d25429ace0ec2b6ca55436406ee02d2603a218",
+      "size": 492216576
+    },
+    "unpacked_size": 669070306
+  },
+  "mac-arm64": {
+    "version": 6,
+    "archive": {
+      "name": "melli-mac-arm64-v6.zip",
+      "url": "https://michaellanemusic.de/lemon-studio/helper/6/melli-mac-arm64-v6.zip",
+      "sha256": "25e81d0ff354f9fde84a41eb50a8db3b976a71b5699b4cf8da626f36088b877e",
+      "size": 193524620
+    },
+    "model": {
+      "name": "Qwen3.5-0.8B-UD-Q3_K_XL.gguf",
+      "url": "https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/resolve/6ab461498e2023f6e3c1baea90a8f0fe38ab64d0/Qwen3.5-0.8B-UD-Q3_K_XL.gguf",
+      "sha256": "30a1353e67c9795e375dac8a19d25429ace0ec2b6ca55436406ee02d2603a218",
+      "size": 492216576
+    },
+    "unpacked_size": 547755622
+  },
+  "mac-x86_64": {
+    "version": 6,
+    "archive": {
+      "name": "melli-mac-x86_64-v6.zip",
+      "url": "https://michaellanemusic.de/lemon-studio/helper/6/melli-mac-x86_64-v6.zip",
+      "sha256": "127f4532219ae0faef31745a4ede0348bbbd469aec14c0c6cac02b3f0744be39",
+      "size": 187045839
+    },
+    "model": {
+      "name": "Qwen3.5-0.8B-UD-Q3_K_XL.gguf",
+      "url": "https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/resolve/6ab461498e2023f6e3c1baea90a8f0fe38ab64d0/Qwen3.5-0.8B-UD-Q3_K_XL.gguf",
+      "sha256": "30a1353e67c9795e375dac8a19d25429ace0ec2b6ca55436406ee02d2603a218",
+      "size": 492216576
+    },
+    "unpacked_size": 528208369
+  }
+}

@@ -1,0 +1,1880 @@
+{
+  "generated_articles": 467,
+  "guide_articles": 785,
+  "records": [
+    {
+      "title": "Visibility: Offer to use saved templates at startup (Project templates)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Host and join sessions (Collaboration)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Split by channel (Pattern tools)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Score Editor (Pattern tools)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Arrangement Score mode (Pattern tools)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Staff note entry (Pattern tools)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Score export buttons (Pattern tools)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Score notation tools (Pattern tools)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: MusicXML import (Pattern tools)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Hint panel (Toolbar panels)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Hint panel MIDI light (Toolbar panels)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Time display (Toolbar panels)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Output monitor (Toolbar panels)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Recording options (Toolbar panels)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Automation recording mode (Toolbar panels)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Automation clip recording option (Toolbar panels)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Mode buttons (Toolbar panels)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Utility buttons (Toolbar panels)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Main volume (Toolbar panels)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Varispeed (Toolbar panels)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Song position (Toolbar panels)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Global snap (Toolbar panels)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Pattern picker (Toolbar panels)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Toolbar logo (Toolbar panels)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Open-window highlights (Toolbar window shortcuts)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Playlist shortcut (Toolbar window shortcuts)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Piano Roll shortcut (Toolbar window shortcuts)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Channel Rack shortcut (Toolbar window shortcuts)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Mixer shortcut (Toolbar window shortcuts)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Browser shortcut (Toolbar window shortcuts)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Score Editor shortcut (Toolbar window shortcuts)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Project Picker shortcut (Toolbar window shortcuts)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Plugin Picker shortcut (Toolbar window shortcuts)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Tempo Tapper shortcut (Toolbar window shortcuts)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Touch Controller shortcut (Toolbar window shortcuts)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: ML Patch in plugin menus (Stock plugins)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: ML 11766 in plugin menus (Stock plugins)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: ML LA2AA in plugin menus (Stock plugins)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Advanced DSP controls (Stock plugins)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: MCP activity orb (Editor feedback)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Selected effect sidechain source (Editor feedback)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Detected sample tempo dialog (Editor feedback)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Elastic scrollbars (Editor feedback)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Adaptive horizontal scrollbars (Editor feedback)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Interface language (Language)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Appearance context shortcuts (Theme customization)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: ML Studio 3036 (Theme customization)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Global glow (Theme customization)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Glow spread (Theme customization)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: 3036 main colors (Theme customization)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: 3036 backgrounds (Theme customization)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Synthwave toggle (Theme customization)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: 3036 stock plugin appearance (Theme customization)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Traditional insert knob settings (Theme customization)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Traditional peak meter settings (Theme customization)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Record light customization (Theme customization)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Common color controls (Theme customization)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Area color adjustments (Theme customization)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Track & clip colors (Theme customization)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Typing keyboard octave menu (Input customization)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: MIDI controller setup (Input customization)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Smart disable setting (Input customization)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Advanced audio settings (Input customization)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Custom action buttons (Input customization)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Ctrl/Cmd+Shift drag range selection (Input customization)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: CPU and live monitor (Toolbar extras)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Vintage CPU meter (Toolbar extras)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Vintage output scope (Toolbar extras)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Vintage sync and MIDI lights (Toolbar extras)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: AI control button when inactive (Toolbar extras)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Local Voice Assistant (Toolbar extras)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Tesla shortcut (Toolbar extras)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: ML Tape in plugin menus (Toolbar extras)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: ML Hall in plugin menus (Toolbar extras)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: ML Video Player in plugin menus (Toolbar extras)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: ML Drums in plugin menus (Toolbar extras)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: ML Drums pad editor (Toolbar extras)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: ML Plasma in plugin menus (Toolbar extras)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Tesla time stretch and pitch shift (Toolbar extras)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Tesla audio cleanup / Playlist cleanup action (Toolbar extras)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Tesla Deverb / Playlist Deverb action (Toolbar extras)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Create ARA shortcuts in Mixer (Toolbar extras)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: 32-bit VST2 bridge setup (Toolbar extras)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Update button (Toolbar extras)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Report a Bug button (Toolbar extras)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Browser layout setting (Browser)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Empty-space file actions (Browser)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Plugin Downloads tab (Browser)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Plugin Downloads filters and favorites (Browser)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Favorites tab (Browser)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Collection folder controls (Browser)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Sample preview panel (Browser)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: File information panel (Browser)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Inspector EQ (Attached mixer inspector)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Inspector insert effects (Attached mixer inspector)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Inspector sends (Attached mixer inspector)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Inspector fader and strip (Attached mixer inspector)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Inspector input selector (Attached mixer inspector)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Inspector add slot button (Attached mixer inspector)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Inspector routing button (Attached mixer inspector)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Inspector FX bypass button (Attached mixer inspector)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Tempo track and Time Warp (Playlist)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Chord chart and extraction (Playlist)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Reference video track (Playlist)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Visuals lane (Playlist)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Visual scene fade handles (Playlist)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Visual scene automation controls (Playlist)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Playlist Tracks menu (Playlist)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Marker timebase controls (Playlist)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Instrument keyboard and note activity (Playlist)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Sample drop choices (Playlist)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Add button below Playlist tracks (Playlist)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Track drag destination (Playlist)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Playlist clip brightness (Playlist)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Vocal tuning button (Playlist)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Vocal editor resize grip (Playlist)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Audio warp editor (Playlist)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Audio timing detection sensitivity (Playlist)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Attached mixer inspector (Playlist)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Attach to Playlist button in Mixer (Playlist)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Attached track record buttons (Playlist)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Playlist record and instrument buttons (Playlist)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Clip pitch and timing history (Playlist)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Transpose selected clips menu (Playlist)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Drag audio clip routing to Mixer (Playlist)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Preview audio timing in Playlist playback (Playlist)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Arrangement mini-map (Playlist)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Playlist grid line controls (Playlist)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Follow new clips at the timeline end (Playlist)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Playlist scrollbar style (Playlist)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Bounce audio menu (Playlist)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Bounce routing preference (Playlist)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Fit dropped samples preference (Playlist)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Audio clip waveforms (Playlist)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Stretch button (Playlist)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Comping button (Playlist)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Clip picker preview buttons (Playlist)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Clip Picker preview loop switch (Playlist)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Clip Picker resize handle (Playlist)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Clip picker usage filters (Playlist)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Clip picker color strips (Playlist)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Clips picker button (Playlist)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Add instrument button (Playlist)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Clip color picker and custom swatches (Playlist)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Custom track header color command (Playlist)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Vocal Align command (Playlist)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Vocal Align review markers (Playlist)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Keyboard width menu (Piano Roll)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Vertical zoom control (Piano Roll)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Zoom shortcut setting (Piano Roll)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Note mini-map (Piano Roll)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Ghost notes from other channels (Piano Roll)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Tools menu shortcut (Piano Roll)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Pitch Draw button (Piano Roll)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Chord Workspace shortcut (Piano Roll)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Undo button (Piano Roll)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Place Pattern to Playlist button (Piano Roll)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Step grid (Channel Rack)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Mixer routing menu (Channel Rack)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Live MIDI note glow (Channel Rack)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Loop mode button (Channel Rack)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Graph editor shortcut (Channel Rack)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Channel selection slot (Channel Rack)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Channel selection outline (Channel Rack)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Effect bypass button (Plugin windows)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Detach button (Plugin windows)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Sampler note effects (Plugin windows)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Sampler Mixer track menu (Plugin windows)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Effect Chain multi-selection and dragging (Plugin Picker)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: SSL 360 Link in Channel Strip picker (Mixer)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: SSL 360 Link section pages (Mixer)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Custom plug-in pages in Channel Strip Mixer (Mixer)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: ML Visualizer in Mixer effect menus (Mixer)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Visualizer video export in plugin windows and Mixer slots (Mixer)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: ML Visualizer workspace (Mixer)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Mixer recording pickup button (Mixer)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Full Mixer size selector (Mixer)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Mixer channel lock buttons (Mixer)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Channel Strip control size (Mixer)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Mix Assistant (Mixer)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Headphone correction Auto gain switch (Mixer)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Group lock option in Mixer padlock menu (Mixer)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Insert Multiple Tracks menu item (Mixer)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Delete extra effect slots button (Mixer)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Mixer section shortcuts (Mixer)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Mixer section collapse controls (Mixer)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Mixer separator color (Mixer)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Drag to reorder effects (Mixer)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Stereo separation on Full Mixer strips (Mixer)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Scroll to Drums button (Mixer)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Scroll to Instruments button (Mixer)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Scroll to Vocals button (Mixer)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Scroll to Effects button (Mixer)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Scroll to Buses button (Mixer)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Routing cables (Mixer)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Channel meters (Mixer)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Mini EQ panel (Mixer)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Mixer hardware output selector (Mixer)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Mini EQ bypass button (Mixer)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Update preferences (Workspace)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: File management actions (Workspace)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Custom window layout menu (Workspace)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Double-click resets faders and knobs (Workspace)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Open menus on hover (Workspace)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Cursor size (Workspace)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Solo Playlist tracks export (Workspace)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Advanced Export tab (Workspace)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Auto-number duplicate exports (Workspace)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: User Guide menu item (Workspace)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: ML Studio Helper companion (Workspace)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: User Guide: Detach button (Workspace)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Change Log (Workspace)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: User Guide: Show me where (Workspace)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Background logo and version (Workspace)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Vintage 0 dB markers (Workspace)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Vintage startup sound (Workspace)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Theme tab (Settings tabs)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Project tab (Settings tabs)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Info tab (Settings tabs)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Debug tab (Settings tabs)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: About tab (Settings tabs)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Menus tab and customization shortcut (Settings tabs)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Controls tab (Settings tabs)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Band controls card (ML EQ)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Band overview and quick actions (ML EQ)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Right-click modulation controls (ML Wave)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Phase FM and ring modulation controls (ML Wave)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Visibility: Plasma wavetable library (ML Wave)",
+      "source": "crates/os-app/src/workspace_visibility.rs"
+    },
+    {
+      "title": "Setting: Auto-route Channel Rack samples and instruments",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Main GUI scaling",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Pop-ups scaling",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Toolbars scaling",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Colorful waveforms",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Mixer style",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Playlist scrollbar style",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Interface language",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Note names",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Black notes",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Autosave",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Location",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Maximum",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Restore previous state after solo",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Select first channel with notes when the pattern changes",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Auto zoom in piano roll",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Brighter Playlist clips",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Small scrollbars in editors",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Auto zip empty channels",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Monophonic painting in piano roll",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Enable automatic crossfades in new projects",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Play truncated notes on transport",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Reset plugins on transport",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Alternate meter scale",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Create automation clips at the playback position",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Auto select linked modules",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Hide plugin window toolbar by default",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Auto name channels",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Auto name effect slots",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Detach all new plugins",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Open detached plugins with the main window",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Disable typing keyboard priority by default",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Limit the number of open plugin editors",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Show startup splash screen",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Silent startup",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Use both mouse buttons in step sequencer",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Startup project",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Click-and-hold & special gesture functions",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Maximum undo levels",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Undo knob tweaks",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Alternate undo mode",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Put undone recordings in the recycle bin",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Show undo history in the browser when undoing changes",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Show recent changes at the top",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Read sample root note",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Read sample tempo information",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Animation refresh rate",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Don't limit windows to screen",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Initialize controls automatically",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Fast sample preview",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Auto keep long audio on disk",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Threaded project sample loading",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Cursor size",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Legacy scaling",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: High visibility",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Force refreshes",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Thick lines",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Transparent menus",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Transparent windows",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Optimize for",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Invert pencil buttons",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Auto close",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Smart disable",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Align tick lengths",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Multithreaded generator processing",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Multithreaded mixer processing",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Plugin delay compensation during playback",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Audio worker limit",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Audio processing priority",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Recording format",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Recording offset",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Playback resampling quality",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Project data size warning",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Ask for data folder",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Copy used samples to the project folder",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Pickup (takeover mode)",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Auto accept detected controller",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Foot pedal controls note off",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Toggle on release",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Link note on velocity to",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Link release velocity to",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Controller type",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Synchronization type",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Omni preview MIDI channel",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Song marker jump MIDI channel",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Generator muting MIDI channel",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Double-click resets faders and knobs",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Use legacy browser",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Open menus on hover",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Bounce to next free Mixer insert",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Fit dropped Playlist samples to project tempo",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Automatically check for updates",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Automatically download program updates",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Synthwave",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Piano Roll zoom keys",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Vertical scrolling speed",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Horizontal scrolling speed",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Global glow",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Synthwave sensitivity",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Glow spread",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Background brightness",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Extra header brightness",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Smoothing",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Browser preview track",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Metronome track",
+      "source": "crates/os-app/src/prefs.rs"
+    },
+    {
+      "title": "Setting: Toggle browser",
+      "source": "crates/os-app/src/shortcuts.rs"
+    },
+    {
+      "title": "Setting: Toggle plugin picker",
+      "source": "crates/os-app/src/shortcuts.rs"
+    },
+    {
+      "title": "Setting: Toggle project picker",
+      "source": "crates/os-app/src/shortcuts.rs"
+    },
+    {
+      "title": "Setting: Show plugin database",
+      "source": "crates/os-app/src/shortcuts.rs"
+    },
+    {
+      "title": "Setting: Show when necessary",
+      "source": "crates/os-app/src/shortcuts.rs"
+    },
+    {
+      "title": "Setting: Show every time",
+      "source": "crates/os-app/src/shortcuts.rs"
+    },
+    {
+      "title": "Setting: Don't show",
+      "source": "crates/os-app/src/shortcuts.rs"
+    },
+    {
+      "title": "Setting: Show clip properties",
+      "source": "crates/os-app/src/shortcuts.rs"
+    },
+    {
+      "title": "Setting: Show channel settings",
+      "source": "crates/os-app/src/shortcuts.rs"
+    },
+    {
+      "title": "Advanced Theme - control hints 1",
+      "source": "crates/os-app/src/advanced_theme.rs"
+    },
+    {
+      "title": "App - menu labels 1",
+      "source": "crates/os-app/src/app.rs"
+    },
+    {
+      "title": "Ara - menu labels 1",
+      "source": "crates/os-app/src/ara.rs"
+    },
+    {
+      "title": "Browser - menu labels 1",
+      "source": "crates/os-app/src/browser.rs"
+    },
+    {
+      "title": "Browser Preview - control hints 1",
+      "source": "crates/os-app/src/browser_preview.rs"
+    },
+    {
+      "title": "Community Regressions - menu labels 1",
+      "source": "crates/os-app/src/community_regressions.rs"
+    },
+    {
+      "title": "Harmony - control hints 1",
+      "source": "crates/os-app/src/harmony.rs"
+    },
+    {
+      "title": "Changelog - control hints 1",
+      "source": "crates/os-app/src/help/changelog.rs"
+    },
+    {
+      "title": "Wiki - control hints 1",
+      "source": "crates/os-app/src/help/wiki.rs"
+    },
+    {
+      "title": "Import Report - menu labels 1",
+      "source": "crates/os-app/src/import_report.rs"
+    },
+    {
+      "title": "Instrument Stack - menu labels 1",
+      "source": "crates/os-app/src/instrument_stack.rs"
+    },
+    {
+      "title": "Knobs - menu labels 1",
+      "source": "crates/os-app/src/knobs.rs"
+    },
+    {
+      "title": "Loop Fit - menu labels 1",
+      "source": "crates/os-app/src/loop_fit.rs"
+    },
+    {
+      "title": "Menu Layout - menu labels 1",
+      "source": "crates/os-app/src/menu_layout.rs"
+    },
+    {
+      "title": "Messages - menu labels 1",
+      "source": "crates/os-app/src/messages.rs"
+    },
+    {
+      "title": "Midi Play - menu labels 1",
+      "source": "crates/os-app/src/midi_play.rs"
+    },
+    {
+      "title": "Mini Eq - control hints 1",
+      "source": "crates/os-app/src/mini_eq.rs"
+    },
+    {
+      "title": "Misc - menu labels 1",
+      "source": "crates/os-app/src/misc.rs"
+    },
+    {
+      "title": "Mixer - menu labels 1",
+      "source": "crates/os-app/src/mixer.rs"
+    },
+    {
+      "title": "Mixer - menu labels 2",
+      "source": "crates/os-app/src/mixer.rs"
+    },
+    {
+      "title": "Mixer - menu labels 3",
+      "source": "crates/os-app/src/mixer.rs"
+    },
+    {
+      "title": "Mixer - menu labels 4",
+      "source": "crates/os-app/src/mixer.rs"
+    },
+    {
+      "title": "Mixer - unavailable menu placeholders 1",
+      "source": "crates/os-app/src/mixer.rs"
+    },
+    {
+      "title": "Mixer - unavailable menu placeholders 2",
+      "source": "crates/os-app/src/mixer.rs"
+    },
+    {
+      "title": "Mixer Recording - menu labels 1",
+      "source": "crates/os-app/src/mixer_recording.rs"
+    },
+    {
+      "title": "Mpe - menu labels 1",
+      "source": "crates/os-app/src/mpe.rs"
+    },
+    {
+      "title": "Marks - menu labels 1",
+      "source": "crates/os-app/src/notation/marks.rs"
+    },
+    {
+      "title": "Notation - control hints 1",
+      "source": "crates/os-app/src/notation.rs"
+    },
+    {
+      "title": "One Click - menu labels 1",
+      "source": "crates/os-app/src/one_click.rs"
+    },
+    {
+      "title": "Params - menu labels 1",
+      "source": "crates/os-app/src/params.rs"
+    },
+    {
+      "title": "Params - unavailable menu placeholders 1",
+      "source": "crates/os-app/src/params.rs"
+    },
+    {
+      "title": "Peak Link - menu labels 1",
+      "source": "crates/os-app/src/peak_link.rs"
+    },
+    {
+      "title": "Piano Note Mode - control hints 1",
+      "source": "crates/os-app/src/piano_note_mode.rs"
+    },
+    {
+      "title": "Piano Note Mode - menu labels 1",
+      "source": "crates/os-app/src/piano_note_mode.rs"
+    },
+    {
+      "title": "Piano Tools - menu labels 1",
+      "source": "crates/os-app/src/piano_tools.rs"
+    },
+    {
+      "title": "Piano Tools - menu labels 2",
+      "source": "crates/os-app/src/piano_tools.rs"
+    },
+    {
+      "title": "Piano Tools - unavailable menu placeholders 1",
+      "source": "crates/os-app/src/piano_tools.rs"
+    },
+    {
+      "title": "Playlist - menu labels 1",
+      "source": "crates/os-app/src/playlist.rs"
+    },
+    {
+      "title": "Playlist - menu labels 2",
+      "source": "crates/os-app/src/playlist.rs"
+    },
+    {
+      "title": "Playlist - menu labels 3",
+      "source": "crates/os-app/src/playlist.rs"
+    },
+    {
+      "title": "Playlist - menu labels 4",
+      "source": "crates/os-app/src/playlist.rs"
+    },
+    {
+      "title": "Playlist - menu labels 5",
+      "source": "crates/os-app/src/playlist.rs"
+    },
+    {
+      "title": "Playlist - menu labels 6",
+      "source": "crates/os-app/src/playlist.rs"
+    },
+    {
+      "title": "Playlist - menu labels 7",
+      "source": "crates/os-app/src/playlist.rs"
+    },
+    {
+      "title": "Playlist - menu labels 8",
+      "source": "crates/os-app/src/playlist.rs"
+    },
+    {
+      "title": "Playlist - menu labels 9",
+      "source": "crates/os-app/src/playlist.rs"
+    },
+    {
+      "title": "Playlist - unavailable menu placeholders 1",
+      "source": "crates/os-app/src/playlist.rs"
+    },
+    {
+      "title": "Playlist - unavailable menu placeholders 2",
+      "source": "crates/os-app/src/playlist.rs"
+    },
+    {
+      "title": "Playlist Controls - menu labels 1",
+      "source": "crates/os-app/src/playlist_controls.rs"
+    },
+    {
+      "title": "Playlist Links - menu labels 1",
+      "source": "crates/os-app/src/playlist_links.rs"
+    },
+    {
+      "title": "Playlist Tools - menu labels 1",
+      "source": "crates/os-app/src/playlist_tools.rs"
+    },
+    {
+      "title": "Drops - menu labels 1",
+      "source": "crates/os-app/src/playlist_tracks/drops.rs"
+    },
+    {
+      "title": "Plugin Downloads - control hints 1",
+      "source": "crates/os-app/src/plugin_downloads.rs"
+    },
+    {
+      "title": "Plugin Menu - menu labels 1",
+      "source": "crates/os-app/src/plugin_menu.rs"
+    },
+    {
+      "title": "Plugin Picker - control hints 1",
+      "source": "crates/os-app/src/plugin_picker.rs"
+    },
+    {
+      "title": "Presets - menu labels 1",
+      "source": "crates/os-app/src/presets.rs"
+    },
+    {
+      "title": "Project Info - control hints 1",
+      "source": "crates/os-app/src/project_info.rs"
+    },
+    {
+      "title": "Project Picker - menu labels 1",
+      "source": "crates/os-app/src/project_picker.rs"
+    },
+    {
+      "title": "Rack - menu labels 1",
+      "source": "crates/os-app/src/rack.rs"
+    },
+    {
+      "title": "Rack - menu labels 2",
+      "source": "crates/os-app/src/rack.rs"
+    },
+    {
+      "title": "Rack - unavailable menu placeholders 1",
+      "source": "crates/os-app/src/rack.rs"
+    },
+    {
+      "title": "Rack Controls - menu labels 1",
+      "source": "crates/os-app/src/rack_controls.rs"
+    },
+    {
+      "title": "Channel Strip mixer - control hints 1",
+      "source": "crates/os-app/src/rack_mixer.rs"
+    },
+    {
+      "title": "Channel Strip mixer - menu labels 1",
+      "source": "crates/os-app/src/rack_mixer.rs"
+    },
+    {
+      "title": "Record - menu labels 1",
+      "source": "crates/os-app/src/record.rs"
+    },
+    {
+      "title": "Record Lead - menu labels 1",
+      "source": "crates/os-app/src/record_lead.rs"
+    },
+    {
+      "title": "Remote - menu labels 1",
+      "source": "crates/os-app/src/remote.rs"
+    },
+    {
+      "title": "Route Picker - menu labels 1",
+      "source": "crates/os-app/src/route_picker.rs"
+    },
+    {
+      "title": "Video - control hints 1",
+      "source": "crates/os-app/src/scoring/video.rs"
+    },
+    {
+      "title": "Scoring - menu labels 1",
+      "source": "crates/os-app/src/scoring.rs"
+    },
+    {
+      "title": "Strip Layout - control hints 1",
+      "source": "crates/os-app/src/strip_layout.rs"
+    },
+    {
+      "title": "Theme Library - menu labels 1",
+      "source": "crates/os-app/src/theme_library.rs"
+    },
+    {
+      "title": "Arpeggiate view - control hints 1",
+      "source": "crates/os-app/src/views/arpeggiate.rs"
+    },
+    {
+      "title": "Library view - control hints 1",
+      "source": "crates/os-app/src/views/browser/library.rs"
+    },
+    {
+      "title": "Library view - menu labels 1",
+      "source": "crates/os-app/src/views/browser/library.rs"
+    },
+    {
+      "title": "Browser view - control hints 1",
+      "source": "crates/os-app/src/views/browser.rs"
+    },
+    {
+      "title": "Cabledebug view - control hints 1",
+      "source": "crates/os-app/src/views/cabledebug.rs"
+    },
+    {
+      "title": "Channel Win view - control hints 1",
+      "source": "crates/os-app/src/views/channel_win.rs"
+    },
+    {
+      "title": "Dialog view - control hints 1",
+      "source": "crates/os-app/src/views/dialog.rs"
+    },
+    {
+      "title": "Menus view - control hints 1",
+      "source": "crates/os-app/src/views/menus.rs"
+    },
+    {
+      "title": "Menus view - menu labels 1",
+      "source": "crates/os-app/src/views/menus.rs"
+    },
+    {
+      "title": "Midi Form view - control hints 1",
+      "source": "crates/os-app/src/views/midi_form.rs"
+    },
+    {
+      "title": "Midi Page view - control hints 1",
+      "source": "crates/os-app/src/views/midi_page.rs"
+    },
+    {
+      "title": "Traditional view - control hints 1",
+      "source": "crates/os-app/src/views/mixer/traditional.rs"
+    },
+    {
+      "title": "Vintage Compact view - control hints 1",
+      "source": "crates/os-app/src/views/mixer/vintage_compact.rs"
+    },
+    {
+      "title": "Mixer view - control hints 1",
+      "source": "crates/os-app/src/views/mixer.rs"
+    },
+    {
+      "title": "Mixer view - control hints 2",
+      "source": "crates/os-app/src/views/mixer.rs"
+    },
+    {
+      "title": "Mod view - control hints 1",
+      "source": "crates/os-app/src/views/mod.rs"
+    },
+    {
+      "title": "Mondebug view - control hints 1",
+      "source": "crates/os-app/src/views/mondebug.rs"
+    },
+    {
+      "title": "Patterns view - control hints 1",
+      "source": "crates/os-app/src/views/patterns.rs"
+    },
+    {
+      "title": "Perf view - control hints 1",
+      "source": "crates/os-app/src/views/perf.rs"
+    },
+    {
+      "title": "Piano Roll view - control hints 1",
+      "source": "crates/os-app/src/views/piano.rs"
+    },
+    {
+      "title": "Piano Dlg view - control hints 1",
+      "source": "crates/os-app/src/views/piano_dlg.rs"
+    },
+    {
+      "title": "Playlist view - control hints 1",
+      "source": "crates/os-app/src/views/playlist.rs"
+    },
+    {
+      "title": "Playlist view - control hints 2",
+      "source": "crates/os-app/src/views/playlist.rs"
+    },
+    {
+      "title": "Project Forms view - control hints 1",
+      "source": "crates/os-app/src/views/project_forms.rs"
+    },
+    {
+      "title": "Studio view - control hints 1",
+      "source": "crates/os-app/src/views/rack/studio.rs"
+    },
+    {
+      "title": "Rack view - control hints 1",
+      "source": "crates/os-app/src/views/rack.rs"
+    },
+    {
+      "title": "Rack view - control hints 2",
+      "source": "crates/os-app/src/views/rack.rs"
+    },
+    {
+      "title": "Settings view - control hints 1",
+      "source": "crates/os-app/src/views/settings.rs"
+    },
+    {
+      "title": "Settings view - control hints 2",
+      "source": "crates/os-app/src/views/settings.rs"
+    },
+    {
+      "title": "Strum view - control hints 1",
+      "source": "crates/os-app/src/views/strum.rs"
+    },
+    {
+      "title": "Tapper view - control hints 1",
+      "source": "crates/os-app/src/views/tapper.rs"
+    },
+    {
+      "title": "Toolbar view - control hints 1",
+      "source": "crates/os-app/src/views/toolbar.rs"
+    },
+    {
+      "title": "Toolbar view - control hints 2",
+      "source": "crates/os-app/src/views/toolbar.rs"
+    },
+    {
+      "title": "Typein view - control hints 1",
+      "source": "crates/os-app/src/views/typein.rs"
+    },
+    {
+      "title": "Vintage Toolbar view - control hints 1",
+      "source": "crates/os-app/src/views/vintage_toolbar.rs"
+    },
+    {
+      "title": "Visual Scenes - menu labels 1",
+      "source": "crates/os-app/src/visual_scenes.rs"
+    },
+    {
+      "title": "Visualizer Video - menu labels 1",
+      "source": "crates/os-app/src/visualizer_video.rs"
+    },
+    {
+      "title": "View - control hints 1",
+      "source": "crates/os-app/src/vocal/view.rs"
+    },
+    {
+      "title": "Warp - control hints 1",
+      "source": "crates/os-app/src/warp.rs"
+    },
+    {
+      "title": "Workspace Layout - menu labels 1",
+      "source": "crates/os-app/src/workspace_layout.rs"
+    },
+    {
+      "title": "Configurable command shortcuts - exact defaults",
+      "source": "crates/os-app/src/shortcuts.rs"
+    },
+    {
+      "title": "Citrus - parameter names 1",
+      "source": "plugins/citrus"
+    },
+    {
+      "title": "ML Delay - parameter names 1",
+      "source": "plugins/lemon-delay"
+    },
+    {
+      "title": "ML Delay - parameter names 2",
+      "source": "plugins/lemon-delay"
+    },
+    {
+      "title": "ML Limiter - parameter names 1",
+      "source": "plugins/lemon-limiter"
+    },
+    {
+      "title": "ML Reverb - parameter names 1",
+      "source": "plugins/lemon-reverb"
+    },
+    {
+      "title": "ML Sampler - parameter names 1",
+      "source": "plugins/lemon-sampler"
+    },
+    {
+      "title": "ML Sampler - parameter names 2",
+      "source": "plugins/lemon-sampler"
+    },
+    {
+      "title": "Small Fx - parameter names 1",
+      "source": "plugins/lemon-small-fx"
+    },
+    {
+      "title": "ML Stereo Shaper - parameter names 1",
+      "source": "plugins/lemon-small-fx"
+    },
+    {
+      "title": "ML Wave - parameter names 1",
+      "source": "plugins/lemon-wave"
+    },
+    {
+      "title": "Ml Drums - parameter names 1",
+      "source": "plugins/ml-drums"
+    },
+    {
+      "title": "ML Tesla - parameter names 1",
+      "source": "plugins/tesla"
+    }
+  ],
+  "explicit_exclusions": {
+    "settings_comments_needing_reverification": 15,
+    "dynamic_or_nonliteral_hints": 595,
+    "dynamic_menu_labels": 218
+  },
+  "scope": "Static preference declarations, direct editor hints, literal menu labels, configurable command shortcuts and constructor parameter names. Dynamic controls and behavioral completeness require manual review; catalog presence is not a claim that every feature is fully documented."
+}

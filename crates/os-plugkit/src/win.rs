@@ -175,6 +175,7 @@ unsafe extern "system" fn pop_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             let (hdc, ps) = begin_paint(hwnd);
             if !p.is_null() {
                 let pop = &mut *p;
+                pop.canvas.sync_stock_editor_theme();
                 pop.canvas.begin_frame(None);
                 kmenu::paint(&mut pop.canvas, &pop.palette, &pop.items, &pop.layout, pop.style, 0.0, 0.0, pop.hover, pop.current);
                 let (w, h) = ((pop.layout.w * pop.scale).ceil() as u32, (pop.layout.h * pop.scale).ceil() as u32);
@@ -221,6 +222,7 @@ fn popup_at<C: Clone>(owner: HWND, x: i32, y: i32, def: &MenuDef<C>, pal: &Palet
     unsafe {
         let class = register("OpenStudioPluginPopup", Some(pop_proc));
         let mut measure = Canvas::new(8, 8, scale).expect("canvas");
+        measure.sync_stock_editor_theme();
         let layout = kmenu::layout(&mut measure, &def.items, def.style);
         let (w, h) = ((layout.w * scale).ceil() as i32, (layout.h * scale).ceil() as i32);
         let wa = work_area(x, y);

@@ -49,7 +49,7 @@ pub const TARGET_COLORS: [(u32, u32, u32); 5] = [
     (0xf29a48, 0xf0792b, 0xce833c),
     (0xf64d70, 0xf13f37, 0xe2415f),
 ];
-pub const TARGET_NAMES: [&str; 5] = ["Panning", "Volume", "Mod A", "Mod B", "Pitch"];
+pub const TARGET_NAMES: [&str; 5] = ["Panning", "Volume", "Mod X", "Mod Y", "Pitch"];
 /// Parameter id prefixes of the five records (state order).
 pub const ENV_PREFIX: [&str; 5] = ["pan", "vol", "cut", "res", "pitch"];
 
@@ -121,6 +121,7 @@ pub enum Target {
     Flag(usize),
     /// Choice list: opens the list menu.
     List(String),
+    OscEnv(usize),
     Tab(u8),
     SubTab(u8),
     /// Envelope graph node: 0 delay end, 1 attack end, 2 hold end, 3 decay end (sustain), 4 release end.
@@ -185,6 +186,7 @@ impl PartialEq for SampleView {
 /// Editor-only state (not saved).
 #[derive(Clone, Debug, PartialEq)]
 pub struct ViewState {
+    pub osc_env: Option<usize>,
     /// 0 oscillators, 1 envelopes, 2 the custom shape's sample.
     pub tab: u8,
     /// Envelope target: 0 Panning, 1 Volume, 2 Mod X, 3 Mod Y, 4 Pitch.
@@ -196,7 +198,7 @@ pub struct ViewState {
 
 impl Default for ViewState {
     fn default() -> Self {
-        ViewState { tab: 0, sub: 1, mouse: None, pressed: None, sample: SampleView::default() }
+        ViewState { osc_env:None, tab: 0, sub: 1, mouse: None, pressed: None, sample: SampleView::default() }
     }
 }
 
@@ -442,7 +444,7 @@ fn osc_page(ui: &mut Ui) {
         metal_knob(ui, &id("coarse"), 342.0, cy, 22.0, 25, true);
         metal_knob(ui, &id("fine"), 405.0, cy, 16.0, 5, false);
         metal_knob(ui, &id("pan"), 467.0, cy, 16.0, 5, false);
-        if n > 0 {
+        if n > 0 || os_plugkit::visibility::stock_dsp_controls() {
             metal_knob(ui, &format!("o{o}_mix"), 527.0, cy, 21.0, 5, false);
         }
         // Captions on one line inside the card, each centred under its control: the fader pair around the stereo
@@ -451,6 +453,13 @@ fn osc_page(ui: &mut Ui) {
         let cap_y = y(cy + CAP_DY);
         let lh = ui.c.line_height(CAP);
         let ty = (cap_y - lh / 2.0).round();
+        if os_plugkit::visibility::stock_dsp_controls() {
+            let rect=Rect::new(32.,ty-2.,102.,18.);
+            lemon::plug_panel(ui.c,rect);
+            ui.c.text_center(CAP,rect,ink,if ui.st.osc_env==Some(n){"ADSR  ^"}else{"ADSR  v"});
+            ui.hit(rect,Target::OscEnv(n));
+            if n==0 {ui.c.text(CAP,510.,ty,ink,"VOLUME");}
+        }
         let gap = 251.0 - 236.0 - 7.0;
         let wl = ui.c.text_width(CAP, "PHASE OFS");
         ui.c.text(CAP, (251.0 - gap - wl).round(), ty, ink, "PHASE OFS");
@@ -486,16 +495,26 @@ fn osc_page(ui: &mut Ui) {
     bowtie(ui.c, 206.0, by, plug::DIM);
     inst::label(ui.c, t, 214.0, by, "PHASE RAND", false);
     wordmark(ui.c, 552.5, y(BAND_Y - 20.0));
+    if let Some(n)=ui.st.osc_env.filter(|_|os_plugkit::visibility::stock_dsp_controls()) {
+        let top=y(row_y(n)+49.).min(H as f32-71.);
+        let rect=Rect::new(26.,top,283.,69.);
+        lemon::plug_panel(ui.c,rect);ui.hit(rect,Target::OscEnv(n));
+        for (i,(key,label)) in [("a","Attack"),("d","Decay"),("s","Sustain"),("r","Release")].iter().enumerate() {
+            let x=61.+i as f32*68.;
+            metal_knob(ui,&format!("o{}_{key}",n+1),x,top+27.+OY,13.,5,false);
+            ui.c.text_center(CAP,Rect::new(x-30.,top+48.,60.,17.),ink,label);
+        }
+    }
 }
 
-/// The lemon mark and "LEMON" over a large "TRIO" right-aligned at `right`, `top` = top of the small line. "LEMON"
+/// The lemon mark and "ML" over a large "TRIO" right-aligned at `right`, `top` = top of the small line. "ML"
 /// starts over the name's left edge, close above it (concept A "Pith"): TRIO's capitals start 3 px under LEMON's
 /// (they start 8 px into the big cell; LEMON's end 9 px into the small one), not over them.
 fn wordmark(c: &mut Canvas, right: f32, top: f32) {
     let (big, small) = (Font::condensed(38, 16).bold(), Font::condensed(11, 0));
     let x0 = right - lemon::spaced_width(c, big, "TRIO", 3.0);
     lemon::lemon_mark(c, x0 + 6.0, top + 6.0, 4.5, brand::MAIN);
-    lemon::spaced(c, small, x0 + 13.0, top, brand::MAIN, "LEMON", 3.0);
+    lemon::spaced(c, small, x0 + 13.0, top, brand::MAIN, "ML", 3.0);
     lemon::spaced(c, big, x0, top + 5.0, plug::WORDMARK, "TRIO", 3.0);
 }
 
@@ -866,6 +885,7 @@ pub fn hint(t: &Target, m: &dyn Model, st: &ViewState, names: &dyn Fn(&str) -> S
         Target::Set(id, v) => format!("{}: {}", names(id), LFO_SHAPES.get(*v as usize).copied().unwrap_or("")),
         Target::Flag(AM_BYTE) => "Oscillator 3 = amplitude modulation".into(),
         Target::Flag(n) => format!("Invert osc {}", n + 1),
+        Target::OscEnv(n) => format!("Oscillator {} amplitude envelope",n+1),
         Target::Tab(0) => "Oscillators".into(),
         Target::Tab(1) => "Envelopes, LFOs and filter".into(),
         Target::Tab(_) => "Custom shape sample".into(),

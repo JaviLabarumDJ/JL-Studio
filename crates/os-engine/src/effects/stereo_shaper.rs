@@ -14,7 +14,7 @@
 use os_dsp::glide::{plugin_limit, Glide};
 
 use super::stereo_enhancer::rate_factor;
-use super::Effect;
+use super::{delay_line::DelayLine, Effect};
 
 /// The settings, in the saved state's order (after the version field).
 pub const PARAMS: usize = 8;
@@ -35,8 +35,7 @@ pub const RANGES: [(i32, i32); PARAMS] =
 /// FL's "Default" preset (what a new Stereo Shaper holds): the levels at 100 %, nothing else, the effects "post".
 pub const DEFAULTS: [i32; PARAMS] = [0, 12800, 12800, 0, 0, 0, 0, 1];
 
-/// Effects positions. The editor's Off (-1, and any value below 0) plays as Pre: FL 2026's exports of such states put
-/// the delay and the phase before the matrix (spec "FL 2026 null test").
+/// Effects positions.
 pub const OFF: i32 = -1;
 pub const PRE: i32 = 0;
 pub const POST: i32 = 1;
@@ -138,32 +137,7 @@ impl AllPass {
     }
 }
 
-/// A delay line of exactly `d` samples (empty: zeros).
-#[derive(Clone, Debug, Default)]
-struct Line {
-    buf: Vec<f32>,
-    pos: usize,
-}
-
-impl Line {
-    fn new(d: usize) -> Line {
-        Line { buf: vec![0.0; d], pos: 0 }
-    }
-
-    #[inline]
-    fn run(&mut self, x: f32) -> f32 {
-        if self.buf.is_empty() {
-            return x;
-        }
-        let y = std::mem::replace(&mut self.buf[self.pos], x);
-        self.pos += 1;
-        if self.pos == self.buf.len() {
-            self.pos = 0;
-        }
-        y
-    }
-}
-
+#[derive(Clone)]
 pub struct StereoShaper {
     applied: [i32; PARAMS],
     target: [f32; 4],
@@ -172,7 +146,7 @@ pub struct StereoShaper {
     rate: u32,
     /// The rate factor in force when the delay is set.
     c: f32,
-    line: Line,
+    line: DelayLine<f32>,
     /// The delayed channel, and the channel the all-pass acts on: 0 left, 1 right.
     delayed: usize,
     phased: usize,
@@ -186,6 +160,24 @@ pub struct StereoShaper {
 }
 
 impl StereoShaper {
+    /// Snapshot into an already prepared bank for a live control crossfade.
+    pub fn copy_state_from(&mut self, source: &Self) {
+        self.applied = source.applied;
+        self.target = source.target;
+        self.gains = source.gains;
+        self.limit = source.limit;
+        self.rate = source.rate;
+        self.c = source.c;
+        self.line.copy_state_from(&source.line);
+        self.delayed = source.delayed;
+        self.phased = source.phased;
+        self.allpass = source.allpass;
+        self.mem = source.mem;
+        self.primed = source.primed;
+        // The linked stereo insert uses only the main outputs. Difference output is scratch.
+        self.diff.clear();
+    }
+
     /// A new instance, the rate known: the editor defaults, the matrix at zero (it has not rendered anything yet).
     pub fn new(rate: u32) -> StereoShaper {
         StereoShaper {
@@ -195,7 +187,7 @@ impl StereoShaper {
             limit: plugin_limit(rate),
             rate,
             c: rate_factor(rate),
-            line: Line::default(),
+            line: DelayLine::new(rate as usize / 2 + 1),
             delayed: 1,
             phased: 1,
             allpass: None,
@@ -238,7 +230,7 @@ impl StereoShaper {
         self.applied[k] = v;
         match k {
             DELAY => {
-                self.line = Line::new(delay_samples(v, self.c));
+                self.line.set_length(delay_samples(v, self.c));
                 self.delayed = side(v);
             }
             PHASE => {
@@ -257,6 +249,7 @@ impl StereoShaper {
         self.rate = rate;
         self.limit = plugin_limit(rate);
         self.c = rate_factor(rate);
+        self.line.prepare(rate as usize / 2 + 1);
         self.apply(DELAY, self.applied[DELAY]);
         self.allpass = AllPass::new(self.applied[PHASE], rate);
     }
@@ -268,13 +261,13 @@ impl StereoShaper {
 
     /// The delay line and the all-pass memory emptied.
     pub fn clear(&mut self) {
-        self.line = Line::new(self.line.buf.len());
+        self.line.clear();
         self.mem = [0.0; 4];
     }
 
     /// The delay in samples (tests and the editor).
     pub fn delay(&self) -> usize {
-        self.line.buf.len()
+        self.line.len()
     }
 
     /// The all-pass in force (tests and the editor).
@@ -287,16 +280,20 @@ impl StereoShaper {
         self.gains.map(|g| g.current)
     }
 
-    /// The delay and the all-pass act before the matrix (0 and below), or after it (above 0).
-    fn pre(&self) -> bool {
-        self.applied[POSITION] <= PRE
+    /// Where the delay and the all-pass act: before the matrix (`Some(true)`), after it, or not at all.
+    fn pre(&self) -> Option<bool> {
+        match self.applied[POSITION] {
+            p if p < 0 => None,
+            0 => Some(true),
+            _ => Some(false),
+        }
     }
 
     /// The delay, then the all-pass, on one frame.
     #[inline]
     fn effects(&mut self, x: &mut [f32; 2]) {
         let d = self.delayed;
-        x[d] = self.line.run(x[d]);
+        x[d] = self.line.push(x[d]);
         if let Some(ap) = self.allpass {
             let [x1, x2, y1, y2] = self.mem;
             let s = f64::from(x[self.phased]);
@@ -329,12 +326,12 @@ impl StereoShaper {
         for (i, (l, r)) in frames.enumerate() {
             let input = [*l, *r];
             let mut x = input;
-            if pre {
+            if pre == Some(true) {
                 self.effects(&mut x);
             }
             let (gl, gr, grl, glr) = (l_.next(), r_.next(), rl_.next(), lr_.next());
             let mut y = if straight { [gl * x[0], gr * x[1]] } else { [gl * x[0] + grl * x[1], gr * x[1] + glr * x[0]] };
-            if !pre {
+            if pre == Some(false) {
                 self.effects(&mut y);
             }
             (*l, *r) = (y[0], y[1]);
@@ -497,8 +494,8 @@ mod tests {
         (buf.iter().step_by(2).copied().collect(), buf.iter().skip(1).step_by(2).copied().collect())
     }
 
-    /// Samples against an independent reading of the page (bit for bit): delay and phase before the matrix and after
-    /// it; the editor's Off plays as before the matrix.
+    /// Samples against an independent reading of the page (bit for bit): delay and phase before the matrix, after it,
+    /// and off.
     #[test]
     fn samples_match_the_reading_of_the_page() {
         let at = [0, 1, 2, 3, 100, 500, 1000, 1999, 2500, 2999];
@@ -507,9 +504,8 @@ mod tests {
             ([0, 12800, 12800, 0, 1408, -2496, 0, 1], &STEREOIZE_3),
             // Mixed levels with the effects first: delay -300 on the left, phase 1744 on the right.
             ([-3000, 9000, 15000, 4000, -300, 1744, 0, 0], &MIXED_PRE),
-            // The same with the position at Off (-1) and far below.
-            ([-3000, 9000, 15000, 4000, -300, 1744, 0, -1], &MIXED_PRE),
-            ([-3000, 9000, 15000, 4000, -300, 1744, 0, -1000], &MIXED_PRE),
+            // The same with the effects off.
+            ([-3000, 9000, 15000, 4000, -300, 1744, 0, -1], &MIXED_OFF),
         ] {
             let (l, r) = run(v);
             for (k, &i) in at.iter().enumerate() {
@@ -522,6 +518,8 @@ mod tests {
     const STEREOIZE_3: [(u32, u32); 10] = [(0x0, 0x0), (0x3cc56016, 0x0), (0x3d3dec0e, 0x0), (0x3d88de5c, 0x0), (0x3e2c6613, 0x0), (0x3ef497b8, 0xbdc0a238), (0x3ee803d8, 0x3d981447), (0x3ebafee0, 0x3d367ebc), (0x3eabe7ef, 0xbed7720f), (0x3e869232, 0x3ec32b17)];
     #[rustfmt::skip]
     const MIXED_PRE: [(u32, u32); 10] = [(0x3d7e138f, 0xbf0ddbc8), (0xbb8ea8cf, 0x3d1f4d57), (0xbd54beb6, 0x3eed905a), (0x3d2561d5, 0xbeb8acfb), (0xbe8ceac2, 0x3d1cbc1a), (0xbe334a56, 0xbf0666d1), (0xbe537256, 0xbee82434), (0xbe7c4945, 0xbeda2914), (0xbeb24b5b, 0x3ee123b5), (0xbe9cefea, 0x3d0e0abe)];
+    #[rustfmt::skip]
+    const MIXED_OFF: [(u32, u32); 10] = [(0x3d965c9d, 0xbf27e72d), (0x3d0c04e9, 0xbe2e4c8c), (0xbba6ac80, 0x3ea18022), (0x3dd1bb1a, 0xbf02bcc2), (0xbe990e02, 0x3d9df8ba), (0x3c265978, 0xbee5b3a4), (0xbd56c544, 0xbe76f35b), (0xbe06aa68, 0xbe9e717a), (0xbe6b1a6e, 0x3ec51cd6), (0xbe74f707, 0x3de49c45)];
 
     #[test]
     fn delay_and_phase_settings() {

@@ -1,0 +1,290 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+//! Visibility filters the presentation without rewriting toolbar layouts or projects.
+
+use crate::settings_file;
+
+pub(crate) const GROUPS: &[(&str, &[(&str, &str)])] = &[
+    ("Project templates", &[("Offer to use saved templates at startup", crate::project_files::STARTUP_PROMPT_VISIBILITY)]),
+    ("Collaboration", &[("Host and join sessions", crate::collaboration::VISIBLE)]),
+    ("Pattern tools", &[
+        ("Split by channel", crate::patterns::SPLIT_VISIBILITY),
+        ("Score Editor", crate::notation::VISIBILITY),
+        ("Arrangement Score mode", crate::notation::ARRANGEMENT_VISIBILITY),
+        ("Staff note entry", crate::notation::ENTRY_VISIBILITY),
+        ("Score export buttons", crate::notation::EXPORT_VISIBILITY),
+        ("Score notation tools", crate::notation::MARKS_VISIBILITY),
+        ("MusicXML import", crate::notation::IMPORT_VISIBILITY),
+    ]),
+    ("Toolbar panels", &[
+        ("Hint panel", "visible_hint"),
+        ("Hint panel MIDI light", crate::midi_play::HINT_ACTIVITY),
+        ("Time display", "visible_time"),
+        ("Output monitor", "visible_monitor"),
+        ("Recording options", "visible_recording"),
+        ("Automation recording mode", crate::smart_recording::MODE_VISIBILITY),
+        ("Automation clip recording option", crate::smart_recording::CLIPS_VISIBILITY),
+        ("Mode buttons", "visible_modes"),
+        ("Utility buttons", "visible_utilities"),
+        ("Main volume", "visible_volume"),
+        ("Varispeed", "visible_pitch"),
+        ("Song position", "visible_song-position"),
+        ("Global snap", "visible_snap"),
+        ("Pattern picker", "visible_pattern"),
+        ("Toolbar logo", "visible_logo"),
+    ]),
+    ("Toolbar window shortcuts", &[
+        ("Open-window highlights", crate::views::toolbar::OPEN_HIGHLIGHTS),
+        ("Playlist shortcut", "visible_win-playlist"),
+        ("Piano Roll shortcut", "visible_win-piano"),
+        ("Channel Rack shortcut", "visible_win-rack"),
+        ("Mixer shortcut", "visible_win-mixer"),
+        ("Browser shortcut", "visible_win-browser"),
+        ("Score Editor shortcut", crate::notation::SHORTCUT_VISIBILITY),
+        ("Project Picker shortcut", "visible_win-project"),
+        ("Plugin Picker shortcut", "visible_win-plugin"),
+        ("Tempo Tapper shortcut", "visible_win-tapper"),
+        ("Touch Controller shortcut", "visible_win-touch"),
+    ]),
+    ("Stock plugins", &[
+        ("ML Patch in plugin menus", crate::ml_patch::VISIBILITY),
+        ("ML 11766 in plugin menus", ml_utility_core::compressorlab::ml11766::VISIBILITY),
+        ("ML LA2AA in plugin menus", ml_utility_core::compressorlab::ml_la2aa::VISIBILITY),
+        ("Advanced DSP controls", lemon_small_fx::STOCK_DSP_CONTROLS),
+    ]),
+    ("Editor feedback", &[
+        ("MCP activity orb", crate::ai_control::ACTIVITY_ORB_VISIBILITY),
+        ("Selected effect sidechain source", crate::mixer::SIDECHAIN_SOURCE_VISIBILITY),
+        ("Detected sample tempo dialog", crate::loop_fit::TEMPO_RESULT_VISIBILITY),
+        ("Elastic scrollbars", crate::elastic_scroll::VISIBILITY),
+        ("Adaptive horizontal scrollbars", crate::elastic_scroll::ADAPTIVE),
+    ]),
+    ("Language", &[
+        (crate::prefs::INTERFACE_LANGUAGE.label, crate::prefs::language::VISIBILITY),
+    ]),
+    ("Theme customization", &[("Appearance context shortcuts", crate::advanced_theme::CONTEXT_VISIBILITY), (crate::vintage::NEON_LABEL, crate::vintage::NEON_VISIBILITY), (crate::prefs::NEON_GLOW.label, crate::prefs::NEON_GLOW_VISIBILITY), (crate::prefs::NEON_SPREAD.label, crate::prefs::NEON_SPREAD_VISIBILITY), ("3036 main colors",crate::vintage::INKS_VISIBILITY), ("3036 backgrounds", crate::vintage::BACKGROUND_VISIBILITY), ("Synthwave toggle", crate::synthwave::VISIBILITY), ("3036 stock plugin appearance", crate::vintage::EDITORS_VISIBILITY), ("Traditional insert knob settings", crate::advanced_theme::INSERT_VISIBILITY), ("Traditional peak meter settings", crate::advanced_theme::METER_VISIBILITY), ("Record light customization", crate::advanced_theme::RECORD_LIGHT_VISIBILITY), ("Common color controls", crate::advanced_theme::QUICK_COLORS_VISIBILITY), ("Area color adjustments", crate::advanced_theme::AREA_VISIBILITY), (crate::advanced_theme::ASSIGNED_COLOR_SECTION, crate::advanced_theme::ASSIGNED_COLOR_VISIBILITY)]),
+    ("Input customization", &[
+        ("Typing keyboard octave menu", crate::typing_layout::OCTAVE_VISIBILITY),
+        ("MIDI controller setup", crate::controller::VISIBILITY),
+        ("Smart disable setting", "visible_smart-disable"),
+        ("Advanced audio settings", crate::views::settings::AUDIO_ADVANCED_VISIBILITY),
+        ("Custom action buttons", "visible_custom-actions"),
+        ("Ctrl/Cmd+Shift drag range selection", crate::playlist_tools::RANGE_SELECTION_VISIBILITY),
+    ]),
+    ("Toolbar extras", &[
+        ("CPU and live monitor", "visible_cpu"),
+        ("Vintage CPU meter", "visible_vintage_cpu"),
+        ("Vintage output scope", "visible_vintage_scope"),
+        ("Vintage sync and MIDI lights", "visible_vintage_activity"),
+        ("AI control button when inactive", "visible_ai"),
+        ("Local Voice Assistant", crate::voice_assistant::VISIBILITY),
+        ("Tesla shortcut", "visible_tesla"),
+        ("ML Tape in plugin menus", "visible_plugin-tape"),
+        ("ML Hall in plugin menus", "visible_plugin-hall"),
+        ("ML Video Player in plugin menus", ml_video_player::VISIBILITY),
+        ("ML Drums in plugin menus", ml_drums::VISIBILITY),
+        ("ML Drums pad editor", ml_drums::PAD_EDITOR_VISIBILITY),
+        ("ML Plasma in plugin menus", ml_plasma::VISIBILITY),
+        ("Tesla time stretch and pitch shift", "visible_tesla-stretch"),
+        ("Tesla audio cleanup / Playlist cleanup action", "visible_tesla-cleanup"),
+        ("Tesla Deverb / Playlist Deverb action", tesla::cleanup::DEVERB_VISIBILITY),
+        ("Create ARA shortcuts in Mixer", crate::ara::MIXER_LINK_VISIBILITY),
+        #[cfg(all(windows, target_arch = "x86_64"))]
+        ("32-bit VST2 bridge setup", crate::legacy_vst::VISIBILITY),
+        ("Update button", "visible_update"),
+        ("Report a Bug button", "visible_feedback"),
+    ]),
+    ("Browser", &[
+        ("Browser layout setting", crate::views::browser::library::VISIBILITY),
+        ("Empty-space file actions", crate::browser::EMPTY_ACTIONS),
+        ("Plugin Downloads tab", "visible_browser-downloads"),
+        ("Plugin Downloads filters and favorites", crate::plugin_downloads::DISCOVERY_VISIBILITY),
+        ("Favorites tab", "visible_browser-favorites"),
+        ("Collection folder controls", crate::views::browser::library::FOLDER_CONTROLS),
+        ("Sample preview panel", "visible_browser-preview"),
+        ("File information panel", "visible_browser-info"),
+    ]),
+    ("Attached mixer inspector", crate::attached_mixer::INSPECTOR_VISIBILITY),
+    ("Playlist", &[
+        ("Tempo track and Time Warp", crate::scoring::TEMPO),
+        ("Chord chart and extraction", crate::scoring::CHORDS),
+        ("Reference video track", crate::scoring::VIDEO),
+        ("Visuals lane", crate::visual_scenes::LANE_VISIBILITY),
+        ("Visual scene fade handles", crate::visual_scenes::FADES_VISIBILITY),
+        ("Visual scene automation controls", crate::visual_scenes::AUTOMATION_VISIBILITY),
+        ("Playlist Tracks menu", crate::scoring::TRACKS_MENU),
+        ("Marker timebase controls", crate::scoring::MARKERS),
+        ("Instrument keyboard and note activity", crate::playlist_tracks::INSTRUMENT_FEEDBACK),
+        ("Sample drop choices", "visible_playlist-header-drop-options"),
+        ("Add button below Playlist tracks", "visible_playlist-add-track"),
+        ("Track drag destination", "visible_playlist-track-destination"),
+        (crate::theme_adjust::PLAYLIST_BRIGHTNESS, crate::theme_adjust::PLAYLIST_BRIGHTNESS_VISIBILITY),
+        ("Vocal tuning button", "visible_playlist-vocal-tuning"),
+        ("Vocal editor resize grip", crate::vocal::resize::VISIBILITY),
+        ("Audio warp editor", "visible_playlist-warp"),
+        ("Audio timing detection sensitivity", crate::warp::SENSITIVITY_VISIBILITY),
+        ("Attached mixer inspector", crate::attached_mixer::VISIBILITY),
+        ("Attach to Playlist button in Mixer", crate::attached_mixer::BUTTON_VISIBILITY),
+        ("Attached track record buttons", crate::attached_mixer::RECORD_VISIBILITY),
+        ("Playlist record and instrument buttons", crate::playlist_tracks::VISIBILITY),
+        ("Clip pitch and timing history", "visible_clip-edit-history"),
+        ("Transpose selected clips menu", crate::playlist::TRANSPOSE_VISIBILITY),
+        ("Drag audio clip routing to Mixer", crate::playlist::CLIP_ROUTE_DRAG_VISIBILITY),
+        ("Preview audio timing in Playlist playback", crate::warp::PREVIEW_VISIBILITY),
+        ("Arrangement mini-map", "visible_playlist-map"),
+        ("Playlist grid line controls", crate::playlist_grid::VISIBILITY),
+        ("Follow new clips at the timeline end", crate::playlist::FOLLOW_PLACEMENT_VISIBILITY),
+        (crate::prefs::PLAYLIST_SCROLLBAR_STYLE.label, crate::prefs::PLAYLIST_SCROLLBAR_STYLE_VISIBILITY),
+        ("Bounce audio menu", crate::track_render::VISIBILITY),
+        ("Bounce routing preference", "visible_bounce-route-setting"),
+        ("Fit dropped samples preference", "visible_playlist-fit-drops-setting"),
+        ("Audio clip waveforms", "visible_playlist-waves"),
+        ("Stretch button", "visible_playlist-stretch"),
+        ("Comping button", "visible_playlist-comp"),
+        ("Clip picker preview buttons", "visible_playlist-picker-preview"),
+        ("Clip Picker preview loop switch", crate::clip_picker::LOOP_VISIBILITY),
+        ("Clip Picker resize handle", crate::clip_picker::RESIZE_VISIBILITY),
+        ("Clip picker usage filters", crate::clip_picker::FILTER_VISIBILITY),
+        ("Clip picker color strips", crate::clip_picker::COLOR_VISIBILITY),
+        ("Clips picker button", "visible_playlist-clips"),
+        ("Add instrument button", "visible_playlist-add-instrument"),
+        ("Clip color picker and custom swatches", "visible_playlist-custom-swatches"),
+        ("Custom track header color command", crate::playlist::TRACK_CUSTOM_COLOR_VISIBILITY),
+        ("Vocal Align command", "visible_playlist-vocal-align"),
+        ("Vocal Align review markers", "visible_playlist-vocal-align-review"),
+    ]),
+    ("Piano Roll", &[
+        ("Keyboard width menu", "visible_piano-keyboard-width"),
+        ("Vertical zoom control", "visible_piano-row-zoom"),
+        ("Zoom shortcut setting", "visible_piano-zoom-keys"),
+        ("Note mini-map", "visible_piano-map"),
+        ("Ghost notes from other channels", "visible_piano-ghost"),
+        ("Tools menu shortcut", "visible_piano-tools"),
+        ("Pitch Draw button", crate::piano_pitch::VISIBILITY),
+        ("Chord Workspace shortcut", "visible_piano-chords"),
+        ("Undo button", "visible_piano-undo"),
+        ("Place Pattern to Playlist button", "visible_piano-place-pattern"),
+    ]),
+    ("Channel Rack", &[
+        ("Step grid", crate::rack::STEP_GRID_VISIBILITY),
+        ("Mixer routing menu", crate::rack_controls::ROUTING_VISIBILITY),
+        ("Live MIDI note glow", crate::midi_play::RACK_ACTIVITY),
+        ("Loop mode button", "visible_rack-loop"),
+        ("Graph editor shortcut", "visible_rack-graph"),
+        ("Channel selection slot", crate::rack::SELECTION_SLOT_VISIBILITY),
+        ("Channel selection outline", crate::rack_drag::OVERLAY_VISIBILITY),
+    ]),
+    #[cfg(plugin_windows)]
+    ("Plugin windows", &[
+        ("Effect bypass button", "visible_plugin-effect-bypass"),
+        ("Detach button", crate::plugin_window::DETACH_VISIBILITY),
+        ("Sampler note effects", crate::misc_page::NOTE_EFFECTS_VISIBILITY),
+        ("Sampler Mixer track menu", crate::plugin_window::SAMPLER_TRACK_MENU_VISIBILITY),
+    ]),
+    ("Plugin Picker", &[
+        ("Effect Chain multi-selection and dragging", crate::plugin_picker::chains::BATCH_VISIBILITY),
+    ]),
+    ("Mixer", &[
+        ("SSL 360 Link in Channel Strip picker", crate::rack_mixer::LINK_VISIBILITY),
+        ("SSL 360 Link section pages", crate::rack_mixer::LINK_PAGER_VISIBILITY),
+        ("Custom plug-in pages in Channel Strip Mixer", crate::strip_layout::VISIBILITY),
+        ("ML Visualizer in Mixer effect menus", crate::visualizer::VISIBILITY),
+        ("Visualizer video export in plugin windows and Mixer slots", crate::visualizer_video::VISIBILITY),
+        ("ML Visualizer workspace", crate::visual_scenes::VISIBILITY),
+        ("Mixer recording pickup button", crate::recording_pickup::VISIBILITY),
+        ("Full Mixer size selector", crate::mixer::FULL_SIZE_VISIBILITY),
+        ("Mixer channel lock buttons", "visible_mixer-channel-lock"),
+        ("Channel Strip control size", "visible_mixer-strip-control-size"),
+        ("Mix Assistant", crate::mix_assistant::VISIBILITY),
+        ("Headphone correction Auto gain switch", crate::headphones::AUTO_GAIN_VISIBILITY),
+        ("Group lock option in Mixer padlock menu", crate::mixer::GROUP_LOCK_VISIBILITY),
+        ("Insert Multiple Tracks menu item", crate::mixer::INSERT_MULTIPLE_VISIBILITY),
+        ("Delete extra effect slots button", crate::mixer::DELETE_EXTRA_SLOT_VISIBILITY),
+        ("Mixer section shortcuts", crate::views::mixer::SECTION_SHORTCUTS),
+        ("Mixer section collapse controls", crate::views::mixer::SECTION_COLLAPSE),
+        ("Mixer separator color", crate::advanced_theme::SEPARATOR_COLOR_VISIBILITY),
+        ("Drag to reorder effects", crate::mixer::EFFECT_DRAG_VISIBILITY),
+        ("Stereo separation on Full Mixer strips", crate::views::mixer::STEREO_SEPARATION),
+        ("Scroll to Drums button", crate::mixer::Section::Drums.visibility()),
+        ("Scroll to Instruments button", crate::mixer::Section::Instruments.visibility()),
+        ("Scroll to Vocals button", crate::mixer::Section::Vocals.visibility()),
+        ("Scroll to Effects button", crate::mixer::Section::Effects.visibility()),
+        ("Scroll to Buses button", crate::mixer::Section::Buses.visibility()),
+        ("Routing cables", "visible_mixer-cables"),
+        ("Channel meters", "visible_mixer-meters"),
+        ("Mini EQ panel", "visible_mixer-eq"),
+        ("Mixer hardware output selector", crate::mixer::HARDWARE_OUTPUT_VISIBILITY),
+        ("Mini EQ bypass button", crate::mini_eq::BYPASS_VISIBILITY),
+    ]),
+    ("Workspace", &[
+        ("Update preferences", crate::updates::SETTINGS_VISIBILITY),
+        ("File management actions", "visible_file-management"),
+        ("Custom window layout menu", crate::workspace_layout::VISIBILITY),
+        (crate::prefs::DOUBLE_CLICK_RESET.label, "visible_double-click-reset"),
+        (crate::prefs::HOVER_MENUS.label, "visible_hover-main-menus"),
+        (crate::prefs::CURSORS_SCALING.label, "visible_cursor-size"),
+        ("Solo Playlist tracks export", crate::export_form::SOLO_VISIBILITY),
+        ("Advanced Export tab", crate::export_form::ADVANCED_VISIBILITY),
+        ("Auto-number duplicate exports", crate::export_form::NUMBER_VISIBILITY),
+        ("User Guide menu item", crate::help::VISIBILITY),
+        ("ML Studio Helper companion", crate::studio_helper::VISIBILITY),
+        ("User Guide: Detach button", crate::help::DETACH_VISIBILITY),
+        (crate::change_log::LABEL, crate::change_log::VISIBILITY),
+        ("User Guide: Show me where", crate::help::SPOTLIGHT_VISIBILITY),
+        ("Background logo and version", "visible_watermark"),
+        ("Vintage 0 dB markers", crate::vintage::GAIN_MARKS),
+        ("Vintage startup sound", crate::startup_sound::VINTAGE_SOUND),
+    ]),
+    ("Settings tabs", &[
+        ("Theme tab", "visible_settings-theme"),
+        ("Project tab", "visible_settings-project"),
+        ("Info tab", "visible_settings-info"),
+        ("Debug tab", "visible_settings-debug"),
+        ("About tab", "visible_settings-about"),
+        ("Menus tab and customization shortcut", crate::menu_layout::VISIBILITY),
+        ("Controls tab", crate::input_bindings::VISIBILITY),
+    ]),
+    ("ML EQ", &[
+        ("Band controls card", lemon_parametric_eq_2::visibility::BAND_CARD),
+        ("Band overview and quick actions", lemon_parametric_eq_2::visibility::BAND_OVERVIEW),
+    ]),
+    ("ML Wave", &[
+        ("Right-click modulation controls", lemon_wave::visibility::MODULATION_MENU),
+        ("Phase FM and ring modulation controls", lemon_wave::visibility::HARMONIC_CONTROLS),
+        ("Plasma wavetable library", lemon_wave::visibility::PLASMA_WAVETABLES),
+    ]),
+];
+
+pub(crate) const RESET: &str = "Restore default visibility";
+
+const DEFAULT_HIDDEN: &[&str] = &[
+    "visible_settings-debug",
+    crate::playlist_tracks::VISIBILITY,
+    crate::notation::SHORTCUT_VISIBILITY,
+];
+
+pub(crate) fn default_shown(key: &str) -> bool {
+    !DEFAULT_HIDDEN.contains(&key)
+}
+
+pub(crate) fn shown(key: &str) -> bool {
+    if key == "visible_donate" { return !crate::donate::active(); }
+    settings_file::flag(key, default_shown(key))
+}
+
+pub(crate) fn toggle(key: &str) {
+    if key == "visible_donate" { return; }
+    settings_file::set_flag(key, !shown(key));
+}
+
+pub(crate) fn reset() {
+    let defaults = GROUPS.iter().flat_map(|(_, rows)| *rows)
+        .map(|&(_, key)| (key.into(), String::new())).collect::<Vec<_>>();
+    settings_file::write_all(&defaults);
+}
+
+pub(crate) const WINDOW_BUTTONS: [&str; 9] = [
+    "visible_win-playlist", "visible_win-piano", "visible_win-rack", "visible_win-mixer",
+    "visible_win-browser", "visible_win-project", "visible_win-plugin", "visible_win-tapper",
+    "visible_win-touch",
+];

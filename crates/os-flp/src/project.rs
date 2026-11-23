@@ -1,5 +1,4 @@
 // Copyright (C) 2026 ItsAlphaNeon
-// Copyright (C) 2026 thacer13
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
@@ -13,17 +12,13 @@
 
 use std::collections::BTreeMap;
 
-use os_model::clip_lfo::ClipLfo;
 use os_model::{
     Arrangement, AutoMode, AutoPoint, Automation, Channel, ChannelKind, ChannelMisc, ChannelRack, ChannelSound, Clip, ClipSource, ControlPoint,
     DataFolder, Envelope, InitControl, MixerTrack,
-    Note, Pattern, PerfSettings, PlaylistTrack, PlaylistView, TrackLink, Project, ProjectInfo, Rgb, SampleFx, SlotPlugin, TimeMarker, WorkTime, CLIP_RECORD_LEN,
+    Note, Pattern, PlaylistTrack, PlaylistView, Project, ProjectInfo, Rgb, SampleFx, SlotPlugin, TimeMarker, WorkTime, CLIP_RECORD_LEN,
 };
 
 use crate::{Chunk, ChunkBody, Event, FlpFile, Header, Tag, Value};
-
-mod legacy;
-pub use legacy::{is_legacy, upgrade};
 
 // Event IDs (see the specs for meanings).
 mod id {
@@ -86,16 +81,12 @@ mod id {
     pub const PANNING_LAW: u8 = 23;
     pub const AUTO_CROSSFADES: u8 = 44;
     pub const FAST_DECLICK: u8 = 40;
-    /// Performance mode, after event 40 (spec: ui/performance-mode.md §5).
-    pub const PERFORMANCE: u8 = 31;
     /// The project's main pitch, cents as a signed 16-bit value (spec: flp/engine-events.md "Project").
     pub const MAIN_PITCH: u8 = 80;
     /// Channel fine tune, cents (spec: audio/voice-levels.md).
     pub const CH_FINE: u8 = 142;
     /// Channel settings the engine reads (spec: flp/engine-events.md "A channel").
     pub const CH_SWING_SHARE: u8 = 97;
-    /// Truncate swing notes, 0 or 1 (spec: audio/swing.md).
-    pub const CH_TRUNCATE_SWING: u8 = 48;
     /// Time shift, 0..=1024 (spec: audio/channel-misc.md "Settings").
     pub const CH_TIME_SHIFT: u8 = 89;
     pub const CH_ROOT: u8 = 135;
@@ -161,17 +152,11 @@ mod id {
     pub const MARKER_NAME: u8 = 205;
     /// A key marker's scale (spec: flp/events/playlist.md "Time markers").
     pub const MARKER_SCALE: u8 = 101;
-    /// A key marker's root note, flag (1 on Default) and scale list index (−1 Default, −2 Black notes).
-    pub const MARKER_ROOT: u8 = 46;
-    pub const MARKER_FLAG: u8 = 45;
-    pub const MARKER_SCALE_INDEX: u8 = 168;
     pub const MARKER_IDS: [u8; 8] = [148, 33, 34, 46, 45, 168, 101, 205];
     /// Automation clip points (in the channel block) and links (before the first channel)
     /// (spec: flp/events/automation.md).
     pub const AUTO_DATA: u8 = 234;
     pub const AUTO_LINK: u8 = 227;
-    /// A link's mapping formula, right after its event 227 (spec: flp/events/automation.md "Controller links").
-    pub const LINK_FORMULA: u8 = 230;
 
     pub const MX_COLOR: u8 = 149;
     pub const MX_COLOR_FLAG: u8 = 42;
@@ -182,23 +167,15 @@ mod id {
     pub const MX_SLOT: u8 = 98;
     pub const MX_ROUTES: u8 = 235;
     pub const MX_PARAMS: u8 = 225;
-    /// After the routes: record source, monitor mode, audio input and audio output, u32s read as signed (spec:
-    /// audio/track-io.md §1.6).
-    pub const MX_REC_SOURCE: u8 = 165;
-    pub const MX_MONITOR: u8 = 166;
-    pub const MX_INPUT: u8 = 154;
-    pub const MX_OUTPUT: u8 = 147;
     /// Number of stored mixer tracks, just before the first track (spec: flp/events/mixer.md).
     pub const MX_COUNT: u8 = 103;
 }
 
 const NOTE_LEN: usize = 24;
-/// Clip record lengths: 88 bytes in files of FL 26, 80 bytes in files of FL 24.2 to 25, 60 bytes in files of FL 21
-/// to 24.1 (20.99 betas included), 32 bytes up to FL 20 (spec: flp/layouts.md, "Playlist clip records").
+/// Clip record lengths: 88 bytes in files of FL 26, 80 bytes in files of FL 24.2 to 25 (spec: flp/layouts.md,
+/// "Playlist clip records").
 const CLIP_LEN: usize = 88;
 const CLIP_LEN_25: usize = 80;
-const CLIP_LEN_21: usize = 60;
-const CLIP_LEN_20: usize = 32;
 const MIXER_REC_LEN: usize = 12;
 const NOTE_FLAGS_DEFAULT: u16 = 0x4000;
 const PATTERN_COLOR_DEFAULT: u32 = 0x002D_2C29;
@@ -212,9 +189,9 @@ pub enum ProjectError {
     NoHeader,
     #[error("{0}")]
     Structure(String),
-    /// A stream in an older generation's layout (channel blocks without event 51) that [`upgrade`] has not converted,
-    /// or could not (spec: flp/layouts.md).
-    #[error("project in an older file layout (saved by {0}) that could not be converted")]
+    /// Files saved before FL 24.2 use a channel layout that isn't specified yet
+    /// (specs REQUESTS.md #4).
+    #[error("legacy project layout (saved by {0}) is not supported yet")]
     LegacyLayout(String),
     #[error("model does not match the file layout: {0}")]
     Mismatch(String),
@@ -314,8 +291,6 @@ struct ChannelLoc {
     end: usize,
     name: Option<usize>,
     plugin_rec: Option<usize>,
-    /// Event 21, the channel type (spec: flp/events/channels.md).
-    kind: Option<usize>,
     /// Events 201 (plugin name) and 213 (plugin state) (spec: flp/events/plugins.md).
     plugin_name: Option<usize>,
     state: Option<usize>,
@@ -380,11 +355,6 @@ struct MixerLoc {
     name: Option<usize>,
     flags: Option<usize>,
     routes: Option<usize>,
-    /// Events 165, 166, 154 and 147 (`id::MX_REC_SOURCE` ..).
-    rec_source: Option<usize>,
-    monitor: Option<usize>,
-    input: Option<usize>,
-    output: Option<usize>,
 }
 
 #[derive(Debug, Default)]
@@ -417,9 +387,6 @@ struct Layout {
     mixer_params: Option<usize>,
     /// Automation links (event 227 with a zero first field), in the prelude.
     links: Vec<usize>,
-    /// Controller links (event 227 with the bit 0x8000 in its first field), in the prelude, each with the formula event
-    /// (230) right after it.
-    ctl_links: Vec<(usize, Option<usize>)>,
     swing: Option<usize>,
     /// Time signature and "play truncated notes" (spec: flp/engine-events.md "Project").
     time_num: Option<usize>,
@@ -432,8 +399,6 @@ struct Layout {
     unread_settings: Vec<(u8, usize)>,
     /// Fast declick for cut groups (event 40), after event 100.
     fast_declick: Option<usize>,
-    /// Performance mode (event 31), after event 100.
-    performance: Option<usize>,
     groups: Vec<usize>,
     current_group: Option<usize>,
     /// Event 216, the initial values.
@@ -497,8 +462,7 @@ fn scan(events: &[Event]) -> Result<Layout, ProjectError> {
             (Region::Prelude | Region::Channels, id::CH_START) => {
                 region = Region::Channels;
                 // spec: flp/events/channels.md "Version scope": blocks end with 51 only in
-                // files saved by FL 24.2+; a block reaching the next 64 without one is in an older layout,
-                // which [`upgrade`] converts first (spec: flp/layouts.md).
+                // files saved by FL 24.2+; a block reaching the next 64 without one is legacy.
                 let end = (i + 1..events.len())
                     .take_while(|&k| events[k].id != id::CH_START && events[k].id != id::ARR_START)
                     .find(|&k| events[k].id == id::CH_END)
@@ -567,12 +531,6 @@ fn scan(events: &[Event]) -> Result<Layout, ProjectError> {
             }
             (Region::Prelude, _) => match e.id {
                 id::AUTO_LINK if e.data().is_some_and(|d| d.len() >= 20 && d[0] == 0 && d[1] == 0) => l.links.push(i),
-                id::AUTO_LINK if e.data().and_then(os_model::ControllerLink::from_bytes).is_some() => l.ctl_links.push((i, None)),
-                id::LINK_FORMULA => {
-                    if let Some(c) = l.ctl_links.last_mut().filter(|c| c.0 + 1 == i) {
-                        c.1 = Some(i);
-                    }
-                }
                 id::VERSION => l.version = Some(i),
                 id::TEMPO => l.tempo = Some(i),
                 id::TITLE => l.title = Some(i),
@@ -637,7 +595,6 @@ fn scan(events: &[Event]) -> Result<Layout, ProjectError> {
             (Region::Arrangements, id::FAST_DECLICK) if l.current_arrangement.is_some() && l.fast_declick.is_none() => {
                 l.fast_declick = Some(i)
             }
-            (Region::Arrangements, id::PERFORMANCE) if l.current_arrangement.is_some() && l.performance.is_none() => l.performance = Some(i),
             (Region::Arrangements | Region::Mixer, id::PLAYLIST_VIEW) => l.playlist_view = Some(i),
             (Region::Arrangements, id::PL_NAME) => {
                 if let Some(t) = l.arrangements.last_mut().and_then(|a| a.tracks.last_mut()) {
@@ -682,17 +639,6 @@ fn scan(events: &[Event]) -> Result<Layout, ProjectError> {
                     m.routes = Some(i);
                 }
             }
-            (Region::Mixer, id::MX_REC_SOURCE | id::MX_MONITOR | id::MX_INPUT | id::MX_OUTPUT) => {
-                if let Some(m) = l.mixer.last_mut().filter(|m| m.routes.is_some()) {
-                    let at = match e.id {
-                        id::MX_REC_SOURCE => &mut m.rec_source,
-                        id::MX_MONITOR => &mut m.monitor,
-                        id::MX_INPUT => &mut m.input,
-                        _ => &mut m.output,
-                    };
-                    *at = Some(i);
-                }
-            }
             (Region::Mixer, id::MX_PARAMS) => l.mixer_params = Some(i),
             _ => {}
         }
@@ -707,7 +653,6 @@ fn scan_channel(events: &[Event], start: usize, end: usize) -> ChannelLoc {
         match events[k].id {
             id::DISPLAY_NAME => c.name = Some(k),
             id::PLUGIN_REC => c.plugin_rec = Some(k),
-            id::CH_TYPE if c.kind.is_none() => c.kind = Some(k),
             id::PLUGIN_NAME => c.plugin_name = Some(k),
             id::PLUGIN_STATE => c.state = Some(k),
             id::COLOR => c.color = Some(k),
@@ -751,10 +696,9 @@ fn text_enc(events: &[Event], version: Option<usize>) -> TextEnc {
     if major_version(events, version) <= 11 { TextEnc::Ansi } else { TextEnc::Utf16 }
 }
 
-/// The record length a clip list fits: a whole number of records, each with `00 50` at byte 4, trying 88, 80, 60
-/// and 32 bytes (spec: flp/layouts.md, "How to tell the generation").
+/// The record length a clip list fits: a whole number of records, each with `00 50` at byte 4.
 fn list_clip_len(data: &[u8]) -> Option<usize> {
-    [CLIP_LEN, CLIP_LEN_25, CLIP_LEN_21, CLIP_LEN_20]
+    [CLIP_LEN, CLIP_LEN_25]
         .into_iter()
         .find(|&n| !data.is_empty() && data.len() % n == 0 && data.chunks_exact(n).all(|r| r[4..6] == [0x00, 0x50]))
 }
@@ -775,13 +719,6 @@ fn clip_len(events: &[Event], version: Option<usize>) -> usize {
 /// Reads the typed project from a parsed file.
 pub fn load(file: &FlpFile) -> Result<Project, ProjectError> {
     let events = events_of(file)?;
-    // A file of an older generation is read as its conversion to the current layout (spec: flp/layouts.md); [`apply`]
-    // needs the converted file itself ([`upgrade`]).
-    if is_legacy(events) {
-        let mut current = file.clone();
-        upgrade(&mut current)?;
-        return load(&current);
-    }
     let header = file.header().ok_or(ProjectError::NoHeader)?;
     let mut l = scan(events)?;
     let enc = text_enc(events, l.version);
@@ -820,11 +757,11 @@ pub fn load(file: &FlpFile) -> Result<Project, ProjectError> {
         play_truncated: l.truncated.is_some_and(|i| int(&events[i]) != 0),
         panning_law: l.setting(id::PANNING_LAW).map(|i| int(&events[i]) as u8),
         fast_declick: l.fast_declick.map(|i| int(&events[i]) != 0),
-        performance: l.performance.map(|i| int(&events[i]) != 0),
         auto_crossfades: l.setting(id::AUTO_CROSSFADES).map(|i| int(&events[i]) != 0),
         main_pitch: l.main_pitch.map(|i| int(&events[i]) as u16 as i16),
         main_volume: main_volume(l.mixer_params.and_then(|i| events[i].data()).unwrap_or(&[])),
         playlist_view: l.playlist_view.and_then(|i| events[i].data()).and_then(PlaylistView::from_bytes),
+        playlist_loop: read_playlist_loop(file),
         work_time: l.work_time.and_then(|i| events[i].data()).and_then(work_time_from),
         show_info: l.show_info.map(|i| int(&events[i]) != 0),
         // Events 167 and 202 (spec: ui/data-folder.md §2); 202 is read as it is, empty or not.
@@ -833,15 +770,6 @@ pub fn load(file: &FlpFile) -> Result<Project, ProjectError> {
             folder: l.info_202.and_then(|i| events[i].data()).map(|d| decode_text(d, enc)).unwrap_or_default(),
         }),
         init_controls,
-        controller_links: l
-            .ctl_links
-            .iter()
-            .filter_map(|&(i, f)| {
-                let mut c = events[i].data().and_then(os_model::ControllerLink::from_bytes)?;
-                c.formula = f.and_then(|f| events[f].data()).map(|d| decode_text(d, enc));
-                Some(c)
-            })
-            .collect(),
         ..Default::default()
     };
 
@@ -869,7 +797,6 @@ pub fn load(file: &FlpFile) -> Result<Project, ProjectError> {
         let mut markers = decode_markers(events, &loc.markers, enc);
         markers.retain(|m| !(u32::from(m.kind) == LENGTH_MARKER_KIND && Some(m.position) == length));
         p.patterns.push(Pattern {
-            id: os_model::Id::NONE,
             number,
             name: text(loc.name),
             color: loc.color.map(|i| int(&events[i])).filter(|v| v >> 24 == 0xFF).map(rgb_from_bgr),
@@ -912,6 +839,37 @@ pub fn load(file: &FlpFile) -> Result<Project, ProjectError> {
         }
     }
     p.mixer = load_mixer(events, &l, enc);
+    read_strip_chunk(file, &mut p);
+    read_parametric_chunk(file, &mut p);
+    read_pitch_controls(file,&mut p);
+    read_output_routing(file,&mut p);
+    read_peak_links(file,&mut p);
+    read_channel_layouts(file,&mut p);
+    read_strip_bypass(file,&mut p);
+    read_mixer_locks(file, &mut p);
+    read_mixer_separator_names(file, &mut p);
+    read_track_folders(file,&mut p);read_track_heights(file,&mut p);
+    read_comp_groups(file, &mut p);
+    read_attached_lanes(file, &mut p);
+    read_attached_order(file, &mut p);
+    read_playlist_sizes(file, &mut p);
+    read_frozen_tracks(file, &mut p);
+    read_extra_fx(file, &mut p);
+    read_audio_warps(file,&mut p);
+    read_vocals(file,&mut p);
+    read_audio_edits(file,&mut p);
+    read_rack_strips(file,&mut p);
+    read_hardware_outputs(file, &mut p);
+    read_instrument_lanes(file,&mut p);
+    read_pattern_speeds(file,&mut p);
+    read_marker_colors(file,&mut p);
+    read_timeline(file, &mut p);
+    read_clip_appearance(file, &mut p);
+    read_clip_picker_order(file, &mut p);
+    read_clip_fx_owners(file,&mut p);
+    read_note_drive(file,&mut p);read_mpe(file,&mut p);
+    read_staff_notation(file, &mut p);
+    for c in &file.chunks {if c.tag==Tag(*b"LSHK") {if let ChunkBody::Raw(d)=&c.body {if d.len()==4&&d[0]==1&&d[1]<12&&(67..=88).contains(&d[2]) {p.harmony=Some((d[1],d[2],d[3]&31));}}}}
     Ok(p)
 }
 
@@ -931,7 +889,6 @@ fn load_channel(events: &[Event], loc: &ChannelLoc, enc: TextEnc) -> Channel {
     let i32_at = |o: usize| levels.get(o..o + 4).map(|b| i32::from_le_bytes(b.try_into().unwrap()));
     let custom = loc.color_flag.is_some_and(|i| int(&events[i]) != 0);
     Channel {
-        id: os_model::Id::NONE,
         index: int(&block[0]) as u16,
         kind,
         name: loc.name.and_then(|i| events[i].data()).map(|d| decode_text(d, enc)),
@@ -959,7 +916,6 @@ fn load_channel(events: &[Event], loc: &ChannelLoc, enc: TextEnc) -> Channel {
             zipped: loc.zipped.is_some_and(|i| int(&events[i]) != 0),
             group: loc.group.map_or(0, |i| int(&events[i])),
             stored_color: loc.color.map(|i| rgb_from_bgr(int(&events[i]))),
-            icon: find(id::PLUGIN_ICON).map_or(0, int),
         },
         misc: load_misc(block),
         sound: load_sound(block, &i32_at),
@@ -977,18 +933,13 @@ fn load_channel(events: &[Event], loc: &ChannelLoc, enc: TextEnc) -> Channel {
 fn load_misc(block: &[Event]) -> ChannelMisc {
     let find = |id: u8| block.iter().find(|e| e.id == id);
     let mut m = ChannelMisc::default();
-    if let Some(c) = find(id::PLUGIN_REC).and_then(|e| plugin_cpu(e.data())) {
-        m.cpu = c;
-    }
+    m.pitch_range = 2; // Older files without a range retain the historical default.
     if let Some(d) = find(id::CH_ADJUST).and_then(Event::data).filter(|d| d.len() >= 20) {
         let v = |i: usize| i32::from_le_bytes(d[4 * i..4 * i + 4].try_into().unwrap()) as f32;
         m.levels = [v(0) / 6400.0, (v(1) - 12800.0) / 12800.0, v(3) / 256.0, v(4) / 256.0];
     }
     if let Some(e) = find(id::CH_SWING_SHARE) {
         m.swing = int(e) as f32 / 128.0;
-    }
-    if let Some(e) = find(id::CH_TRUNCATE_SWING) {
-        m.truncate_swing = int(e) != 0;
     }
     if let Some(e) = find(id::CH_ROOT) {
         m.root = int(e).min(127) as u8;
@@ -1186,12 +1137,6 @@ fn write_misc(block: &mut [Event], ch: &Channel, old: &ChannelMisc) -> Vec<Event
         return add;
     }
     let find = |block: &[Event], id: u8| block.iter().position(|e| e.id == id);
-    // The plugin's CPU switches, in its window record (a channel without one keeps the defaults).
-    if m.cpu != n.cpu {
-        if let Some(i) = find(block, id::PLUGIN_REC) {
-            patch_cpu(&mut block[i], m.cpu);
-        }
-    }
     let ints = |v: &[i32]| v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>();
     // Level adjustments (229): pan offset, volume multiplier, -, mod X offset, mod Y offset.
     let adjust = |l: &[f32; 4]| {
@@ -1212,7 +1157,6 @@ fn write_misc(block: &mut [Event], ch: &Channel, old: &ChannelMisc) -> Vec<Event
     let cuts = |m: &ChannelMisc| m.cut & 0xffff | m.cut_by << 16;
     for (eid, v, was) in [
         (id::CH_SWING_SHARE, (m.swing * 128.0).round() as u32, (n.swing * 128.0).round() as u32),
-        (id::CH_TRUNCATE_SWING, u32::from(m.truncate_swing), u32::from(n.truncate_swing)),
         (id::CH_TIME_SHIFT, (m.shift * 1024.0).round() as u32, (n.shift * 1024.0).round() as u32),
         (id::CH_CUT_GROUPS, cuts(m), cuts(n)),
         (id::CH_LAYER_FLAGS, m.layer.flags, n.layer.flags),
@@ -1435,6 +1379,8 @@ fn decode_note(r: &[u8]) -> Note {
     let u16_at = |o: usize| u16::from_le_bytes([r[o], r[o + 1]]);
     let u32_at = |o: usize| u32::from_le_bytes(r[o..o + 4].try_into().unwrap());
     Note {
+        notation: Default::default(),
+        drive:0,expression:0,
         position: u32_at(0),
         channel: u16_at(6),
         length: u32_at(8),
@@ -1522,7 +1468,10 @@ fn decode_clip(r: &[u8]) -> Clip {
     let n = r.len().min(CLIP_RECORD_LEN);
     raw[..n].copy_from_slice(&r[..n]);
     Clip {
-        id: os_model::Id::NONE,
+        name: None,
+        color: None,
+        pattern_speed:1.0,
+        independent_automation: false,
         position: u32_at(0),
         length: u32_at(8),
         track: 499u16.saturating_sub(u16_at(12)),
@@ -1609,9 +1558,6 @@ fn decode_markers(events: &[Event], idx: &[usize], enc: TextEnc) -> Vec<TimeMark
             id::MARKER_NUM => out.last_mut().into_iter().for_each(|m| m.numerator = int(e) as u8),
             id::MARKER_SCALE => out.last_mut().into_iter().for_each(|m| m.scale = int(e) as u16),
             id::MARKER_DEN => out.last_mut().into_iter().for_each(|m| m.denominator = int(e) as u8),
-            id::MARKER_ROOT => out.last_mut().into_iter().for_each(|m| m.root = int(e) as u8),
-            id::MARKER_FLAG => out.last_mut().into_iter().for_each(|m| m.flag = int(e) as u8),
-            id::MARKER_SCALE_INDEX => out.last_mut().into_iter().for_each(|m| m.scale_index = int(e) as i32),
             id::MARKER_NAME => {
                 let name = e.data().map(|d| decode_text(d, enc)).unwrap_or_default();
                 out.last_mut().into_iter().for_each(|m| m.name = name.clone());
@@ -1627,9 +1573,9 @@ fn marker_events(m: &TimeMarker, enc: TextEnc) -> Vec<Event> {
         Event::new(id::MARKER_POS, Value::U32(m.position & 0x00FF_FFFF | u32::from(m.kind) << 24)),
         Event::new(id::MARKER_NUM, Value::U8(m.numerator)),
         Event::new(id::MARKER_DEN, Value::U8(m.denominator)),
-        Event::new(id::MARKER_ROOT, Value::U8(m.root)),
-        Event::new(id::MARKER_FLAG, Value::U8(m.flag)),
-        Event::new(id::MARKER_SCALE_INDEX, Value::U32(m.scale_index as u32)),
+        Event::new(46, Value::U8(0)),
+        Event::new(45, Value::U8(0)),
+        Event::new(168, Value::U32(0)),
         Event::new(id::MARKER_SCALE, Value::U16(m.scale)),
         Event::new(id::MARKER_NAME, Value::var(encode_text(&m.name, enc))),
     ]
@@ -1637,26 +1583,20 @@ fn marker_events(m: &TimeMarker, enc: TextEnc) -> Vec<Event> {
 
 const AUTO_HEADER_LEN: usize = 21;
 const AUTO_POINT_LEN: usize = 24;
-/// Behind the curve's points: where the count of the LFO envelope's points sits, and its points begin (spec:
-/// flp/layouts.md "An automation clip's record").
-const LFO_ENV_COUNT: usize = 44;
-const LFO_ENV_POINTS: usize = 48;
-/// Behind the envelope's points: the LFO's flags byte, 3 unused bytes, its switch, three ints, speed, tension, skew,
-/// pulse width and phase offset.
-const LFO_VALUES_LEN: usize = 40;
 
-/// A new automation clip's event-234 header and tail (spec: flp/layouts.md "An automation clip's record"), with the
-/// fields written from the points and the LFO left at 0: the curve's head (kind 4, version 3), the curve's flags byte 1
-/// and its four ints at -1, the four ints 128, 128, 0, 128, the LFO envelope's head (kind 5, version 3), the LFO's
-/// three ints at -1.
-fn auto_template() -> (Vec<u8>, Vec<u8>) {
-    let h = vec![1, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0];
+/// A new automation clip's event-234 header (count patched in on writing) and tail (spec: flp/events/automation.md).
+fn auto_template(bipolar: bool) -> (Vec<u8>, Vec<u8>) {
+    let h = vec![1, 0, 0, 0, 0x40, 0, 0, 0, u8::from(bipolar), 4, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0];
     let mut t = vec![1, 0, 0, 0];
     t.extend([0xff; 16]);
-    t.extend([0x80, 0, 0, 0, 0x80, 0, 0, 0, 0, 0, 0, 0, 0x80, 0, 0, 0, 5, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0]);
+    t.extend([0x80, 0, 0, 0, 0x80, 0, 0, 0, 0, 0, 0, 0, 0x80, 0, 0, 0, 5, 0, 0, 0, 3, 0, 0, 0, 1, 0, 0, 0]);
+    t.extend([0; 14]);
+    t.extend([0xf0, 0x3f]);
     t.extend([0; 8]);
+    t.extend([1, 0, 0, 0, 0, 0, 0, 0]);
     t.extend([0xff; 12]);
-    t.extend([0; 20]);
+    t.extend([0xfb, 0xb2]);
+    t.extend([0; 18]);
     (h, t)
 }
 
@@ -1666,104 +1606,16 @@ pub fn new_automation(channel: u16, target: u32, value: f64, beats: f64) -> Auto
 }
 
 /// ADD > Automation clip's data (spec: ui/add-clip-channels.md §2): a flat line at `value` over `beats` and no target
-/// (no event 227); FL stored header byte 8 (the LFO's mode) as 1 for it.
+/// (no event 227); FL stored header byte 8 as 1 for it.
 pub fn untargeted_automation(channel: u16, value: f64, beats: f64) -> Automation {
     flat_automation(channel, Vec::new(), true, value, beats)
 }
 
-/// A flat line; a bipolar target's LFO adds (FL stores the LFO's mode as 1 for one).
 fn flat_automation(channel: u16, targets: Vec<u32>, bipolar: bool, value: f64, beats: f64) -> Automation {
-    let (header, tail) = auto_template();
+    let (header, tail) = auto_template(bipolar);
     let mut first = AutoPoint::new(0.0, value);
     first.flag = 0;
-    let lfo = ClipLfo { mode: u8::from(bipolar), ..ClipLfo::default() };
-    Automation { channel, targets, points: vec![first, AutoPoint::new(beats.max(0.0), value)], header, tail, lfo }
-}
-
-fn le_i32(d: &[u8], o: usize) -> i32 {
-    i32::from_le_bytes(d[o..o + 4].try_into().unwrap())
-}
-
-/// `n` point records (24 bytes each), positions made absolute (stored: the distance from the previous point).
-fn decode_points(d: &[u8]) -> Vec<AutoPoint> {
-    let mut beat = 0.0;
-    d.chunks_exact(AUTO_POINT_LEN)
-        .map(|r| {
-            beat += f64::from_le_bytes(r[0..8].try_into().unwrap());
-            AutoPoint {
-                beat,
-                value: f64::from_le_bytes(r[8..16].try_into().unwrap()),
-                tension: f32::from_le_bytes(r[16..20].try_into().unwrap()),
-                mode: AutoMode::from_byte(r[20]),
-                flag: r[23],
-            }
-        })
-        .collect()
-}
-
-fn encode_points(d: &mut Vec<u8>, pts: &[AutoPoint]) {
-    let mut prev = 0.0;
-    for p in pts {
-        d.extend_from_slice(&(p.beat - prev).max(0.0).to_le_bytes());
-        prev = p.beat;
-        d.extend_from_slice(&p.value.to_le_bytes());
-        d.extend_from_slice(&p.tension.to_le_bytes());
-        d.extend([p.mode.byte(), 0, 0, p.flag]);
-    }
-}
-
-/// Where the LFO's values begin in `tail` (the bytes behind the curve's points), if the tail holds the whole layout.
-fn lfo_values_at(tail: &[u8]) -> Option<usize> {
-    let m = u32::from_le_bytes(tail.get(LFO_ENV_COUNT..LFO_ENV_POINTS)?.try_into().unwrap()) as usize;
-    let o = LFO_ENV_POINTS.checked_add(m.checked_mul(AUTO_POINT_LEN)?)?;
-    (tail.len() >= o.checked_add(LFO_VALUES_LEN)?).then_some(o)
-}
-
-/// The LFO read out of an event-234 `header` and `tail`, and both with what was read zeroed and the envelope's points
-/// taken out (they are written from the model's `lfo`). A tail without the whole layout keeps the defaults.
-fn split_lfo(header: &mut [u8], tail: &[u8]) -> (ClipLfo, Vec<u8>) {
-    let mut lfo = ClipLfo { amount: le_i32(header, 4), mode: header[8], ..ClipLfo::default() };
-    header[4..9].fill(0);
-    let Some(o) = lfo_values_at(tail) else { return (lfo, tail.to_vec()) };
-    lfo.envelope = decode_points(&tail[LFO_ENV_POINTS..o]);
-    let v = &tail[o..o + LFO_VALUES_LEN];
-    (lfo.flags, lfo.switch, lfo.speed) = (v[0], le_i32(v, 4), le_i32(v, 20));
-    (lfo.tension, lfo.skew, lfo.pulse_width, lfo.phase) = (le_i32(v, 24), le_i32(v, 28), le_i32(v, 32), le_i32(v, 36));
-    let mut rest = tail[..LFO_ENV_COUNT].to_vec();
-    rest.extend([0; 4]);
-    let mut v = v.to_vec();
-    v[0] = 0;
-    for f in [4, 20, 24, 28, 32, 36] {
-        v[f..f + 4].fill(0);
-    }
-    rest.extend(v);
-    rest.extend_from_slice(&tail[o + LFO_VALUES_LEN..]);
-    (lfo, rest)
-}
-
-/// `tail` with the LFO `lfo` written into it: its envelope's count and points, its values. A tail without the layout
-/// is written as it is while the LFO is at its defaults, else the template's tail is used.
-fn join_lfo(tail: &[u8], lfo: &ClipLfo) -> Vec<u8> {
-    let template;
-    let (tail, o) = match lfo_values_at(tail) {
-        Some(o) => (tail, o),
-        None if *lfo == ClipLfo::default() => return tail.to_vec(),
-        None => {
-            template = auto_template().1;
-            (&template[..], LFO_ENV_POINTS)
-        }
-    };
-    let mut d = tail[..LFO_ENV_COUNT].to_vec();
-    d.extend_from_slice(&(lfo.envelope.len() as u32).to_le_bytes());
-    encode_points(&mut d, &lfo.envelope);
-    let mut v = tail[o..o + LFO_VALUES_LEN].to_vec();
-    v[0] = lfo.flags;
-    for (f, x) in [(4, lfo.switch), (20, lfo.speed), (24, lfo.tension), (28, lfo.skew), (32, lfo.pulse_width), (36, lfo.phase)] {
-        v[f..f + 4].copy_from_slice(&x.to_le_bytes());
-    }
-    d.extend(v);
-    d.extend_from_slice(&tail[o + LFO_VALUES_LEN..]);
-    d
+    Automation { channel, targets, points: vec![first, AutoPoint::new(beats.max(0.0), value)], header, tail }
 }
 
 fn decode_automation(channel: u16, d: &[u8]) -> Option<Automation> {
@@ -1775,21 +1627,39 @@ fn decode_automation(channel: u16, d: &[u8]) -> Option<Automation> {
     if d.len() < end {
         return None;
     }
-    let points = decode_points(&d[AUTO_HEADER_LEN..end]);
+    let mut beat = 0.0;
+    let points = d[AUTO_HEADER_LEN..end]
+        .chunks_exact(AUTO_POINT_LEN)
+        .map(|r| {
+            // Positions are stored as the distance from the previous point.
+            beat += f64::from_le_bytes(r[0..8].try_into().unwrap());
+            AutoPoint {
+                beat,
+                value: f64::from_le_bytes(r[8..16].try_into().unwrap()),
+                tension: f32::from_le_bytes(r[16..20].try_into().unwrap()),
+                mode: AutoMode::from_byte(r[20]),
+                flag: r[23],
+            }
+        })
+        .collect();
     let mut header = d[..AUTO_HEADER_LEN].to_vec();
     header[17..21].fill(0); // the count is written from the points
-    let (lfo, tail) = split_lfo(&mut header, &d[end..]);
-    Some(Automation { channel, targets: Vec::new(), points, header, tail, lfo })
+    Some(Automation { channel, targets: Vec::new(), points, header, tail: d[end..].to_vec() })
 }
 
 fn encode_automation(a: &Automation) -> Vec<u8> {
     let mut d = a.header.clone();
     d.resize(AUTO_HEADER_LEN, 0);
-    d[4..8].copy_from_slice(&a.lfo.amount.to_le_bytes());
-    d[8] = a.lfo.mode;
     d[17..21].copy_from_slice(&(a.points.len() as u32).to_le_bytes());
-    encode_points(&mut d, &a.points);
-    d.extend(join_lfo(&a.tail, &a.lfo));
+    let mut prev = 0.0;
+    for p in &a.points {
+        d.extend_from_slice(&(p.beat - prev).max(0.0).to_le_bytes());
+        prev = p.beat;
+        d.extend_from_slice(&p.value.to_le_bytes());
+        d.extend_from_slice(&p.tension.to_le_bytes());
+        d.extend([p.mode.byte(), 0, 0, p.flag]);
+    }
+    d.extend_from_slice(&a.tail);
     d
 }
 
@@ -1807,6 +1677,12 @@ fn load_pl_track(events: &[Event], t: &PlTrackLoc, enc: TextEnc) -> PlaylistTrac
     let r = events[t.record].data().unwrap_or(&[]);
     let custom = t.color_flag.is_some_and(|i| int(&events[i]) != 0);
     PlaylistTrack {
+        mode: os_model::PlaylistTrackMode::Legacy,
+        height:None,
+        folder:false,
+        frozen: None,
+        comp: None,
+        attached_mixer: None,
         number: r.get(0..4).map_or(0, |b| u32::from_le_bytes(b.try_into().unwrap())),
         name: t.name.and_then(|i| events[i].data()).map(|d| decode_text(d, enc)),
         color: r
@@ -1817,59 +1693,7 @@ fn load_pl_track(events: &[Event], t: &PlTrackLoc, enc: TextEnc) -> PlaylistTrac
         grouped: r.get(46).is_some_and(|&b| b != 0),
         collapsed: r.get(61).is_some_and(|&b| b == 0),
         locked: r.get(47).is_some_and(|&b| b != 0),
-        clip_lock: None,
-        perf: perf_settings(r),
-        link: track_link(r),
     }
-}
-
-/// A track record's link, bytes 49 to 60: kind (u32), mixer track and channel (i32, −1 = none); spec:
-/// flp/events/playlist.md "Event 238 layout". A short record is unlinked.
-fn track_link(r: &[u8]) -> TrackLink {
-    let at = |o: usize| r.get(o..o + 4).map(|b| i32::from_le_bytes(b.try_into().unwrap()));
-    let (Some(kind), Some(mixer), Some(channel)) = (at(49), at(53), at(57)) else { return TrackLink::NONE };
-    let opt = |v: i32| u16::try_from(v).ok();
-    TrackLink { kind: kind as u32, mixer: opt(mixer), channel: opt(channel) }
-}
-
-/// `track_link`'s 12 bytes.
-fn link_bytes(l: &TrackLink) -> [u8; 12] {
-    let mut b = [0u8; 12];
-    b[0..4].copy_from_slice(&l.kind.to_le_bytes());
-    b[4..8].copy_from_slice(&l.mixer.map_or(-1, i32::from).to_le_bytes());
-    b[8..12].copy_from_slice(&l.channel.map_or(-1, i32::from).to_le_bytes());
-    b
-}
-
-/// A track record's Performance settings, u32s at 22, 26, 30, 34, 38 and 42 (spec: ui/performance-mode.md §5); a
-/// short record or a value out of range keeps the default.
-fn perf_settings(r: &[u8]) -> PerfSettings {
-    let at = |o: usize| r.get(o..o + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()));
-    let pick = |o: usize, n: usize, d: u8| at(o).filter(|&v| (v as usize) < n).map_or(d, |v| v as u8);
-    let d = PerfSettings::default();
-    PerfSettings {
-        motion: pick(22, PerfSettings::MOTIONS.len(), d.motion),
-        press: pick(26, PerfSettings::PRESSES.len(), d.press),
-        trigger_sync: pick(30, PerfSettings::SYNCS.len(), d.trigger_sync),
-        queue: at(34).map_or(d.queue, |v| v != 0),
-        tolerant: at(38).map_or(d.tolerant, |v| v != 0),
-        position_sync: pick(42, PerfSettings::SYNCS.len(), d.position_sync),
-    }
-}
-
-/// The record bytes 22..46 for `p`.
-fn perf_bytes(p: &PerfSettings) -> [u8; 24] {
-    let mut b = [0u8; 24];
-    for (k, v) in [p.motion.into(), p.press.into(), p.trigger_sync.into(), u32::from(p.queue), u32::from(p.tolerant), p.position_sync.into()].into_iter().enumerate() {
-        b[4 * k..4 * k + 4].copy_from_slice(&u32::to_le_bytes(v));
-    }
-    b
-}
-
-/// The slot a slot marker (98) closes: its low byte. Files hold the slot's number there; a few (an FL 20.8 file and its
-/// resaves) have 0x106 and 0x107 for slots 6 and 7 (spec: flp/layouts.md "Older files").
-fn slot_number(e: &Event) -> usize {
-    (int(e) & 0xFF) as usize
 }
 
 fn mixer_param_records(data: &[u8]) -> impl Iterator<Item = (usize, u8, u8, u16, i32)> + '_ {
@@ -1896,11 +1720,6 @@ const MX_EQ_WIDTH: u8 = 0xE0;
 /// Per mixer track, the plugin-state event (213) of each slot 0-9 that holds a plugin (spec: flp/events/mixer.md
 /// "Slot sub-block": a slot's plugin events come before its 98 marker). Track ranges as in `load_mixer`.
 fn slot_state_events(events: &[Event], l: &Layout) -> Vec<[Option<usize>; 10]> {
-    slot_events(events, l, id::PLUGIN_STATE)
-}
-
-/// Per stored track, per slot: the slot plugin's event `want` (its state 213 or window record 212).
-fn slot_events(events: &[Event], l: &Layout, want: u8) -> Vec<[Option<usize>; 10]> {
     let starts: Vec<usize> = l.mixer.iter().map(|m| m.color.or(m.color_flag).or(m.name).or(m.flags).unwrap_or(0)).collect();
     (0..l.mixer.len())
         .map(|n| {
@@ -1910,13 +1729,13 @@ fn slot_events(events: &[Event], l: &Layout, want: u8) -> Vec<[Option<usize>; 10
             for (i, e) in events.iter().enumerate().take(to).skip(starts[n]) {
                 match e.id {
                     id::PLUGIN_NAME => pending = Some(None),
-                    x if x == want => {
+                    id::PLUGIN_STATE => {
                         if let Some(p) = pending.as_mut() {
                             *p = Some(i);
                         }
                     }
                     id::MX_SLOT => {
-                        if let (Some(o), Some(p)) = (out.get_mut(slot_number(e)), pending.take()) {
+                        if let (Some(o), Some(p)) = (out.get_mut(int(e) as usize), pending.take()) {
                             *o = p;
                         }
                     }
@@ -1956,9 +1775,11 @@ fn set_param_record(data: &mut Vec<u8>, loc: u16, pid: u8, v: i32) {
 
 /// Sets the record (`kind`, `pid`) at `loc`, or adds it before the first record of a later location.
 fn set_record(data: &mut Vec<u8>, kind: u8, loc: u16, pid: u8, v: i32) {
-    let found = mixer_param_records(data).find(|&(_, p, k, at, _)| k == kind && p == pid && at == loc).map(|r| r.0);
-    if let Some(off) = found {
-        data[off + 8..off + 12].copy_from_slice(&v.to_le_bytes());
+    // Some FL projects repeat a control record. The reader takes the final slot value;
+    // update every matching record so a later duplicate cannot undo the user's edit.
+    let found:Vec<_> = mixer_param_records(data).filter(|&(_, p, k, at, _)| k == kind && p == pid && at == loc).map(|r| r.0).collect();
+    if !found.is_empty() {
+        for off in found {data[off + 8..off + 12].copy_from_slice(&v.to_le_bytes());}
         return;
     }
     let at = mixer_param_records(data)
@@ -2001,24 +1822,14 @@ fn send_dest(kind: u8, pid: u8) -> u16 {
 }
 
 /// Event 236 flags (spec: flp/layouts.md "A mixer track's record (event 236)"): reverse polarity, swap left / right,
-/// effect slots enabled, track on, threaded processing not allowed, docking (two bits: 0 left, 1 middle, 2 right) and,
-/// in the next byte, the separator. A 5-byte record (FL 10 and 11) holds no flags: all at their defaults.
+/// effect slots enabled, track on. A 5-byte record (FL 10 and 11) holds no flags: all at their defaults.
 const MX_FLAG_POLARITY: u8 = 0x01;
 const MX_FLAG_SWAP: u8 = 0x02;
 const MX_FLAG_SLOTS: u8 = 0x04;
 const MX_FLAG_ON: u8 = 0x08;
-const MX_FLAG_UNTHREADED: u8 = 0x10;
-const MX_FLAG_DOCK: u8 = 0xC0;
-const MX_FLAG_DOCK_SHIFT: u8 = 6;
-const MX_FLAG5_SEPARATOR: u8 = 0x04;
 
 fn track_flags(d: Option<&[u8]>) -> Option<u8> {
     d.filter(|d| d.len() >= 8).map(|d| d[4])
-}
-
-/// The second flag byte (the separator) of a record that has flags.
-fn track_flags5(d: Option<&[u8]>) -> Option<u8> {
-    d.filter(|d| d.len() >= 8).map(|d| d[5])
 }
 
 /// Flag 0x20 of a record written before FL 12.8: its one latency value is the output setting.
@@ -2068,30 +1879,14 @@ fn with_latency(d: &[u8], old: bool, (out, inp): (f32, f32)) -> Vec<u8> {
     r
 }
 
-/// Flag byte `b` with the track's switches. `last`: the file's last ("current") track, whose docking stays as stored
-/// (the track is not shown; FL writes it docked left, as the master).
-fn with_flags(b: u8, m: &MixerTrack, last: bool) -> u8 {
-    let mut b = b & !(MX_FLAG_POLARITY | MX_FLAG_SWAP | MX_FLAG_SLOTS | MX_FLAG_ON | MX_FLAG_UNTHREADED);
-    for (on, f) in [
-        (m.polarity, MX_FLAG_POLARITY),
-        (m.swap, MX_FLAG_SWAP),
-        (m.slots_enabled, MX_FLAG_SLOTS),
-        (m.enabled, MX_FLAG_ON),
-        (!m.threaded, MX_FLAG_UNTHREADED),
-    ] {
+fn with_flags(b: u8, m: &MixerTrack) -> u8 {
+    let mut b = b & !(MX_FLAG_POLARITY | MX_FLAG_SWAP | MX_FLAG_SLOTS | MX_FLAG_ON);
+    for (on, f) in [(m.polarity, MX_FLAG_POLARITY), (m.swap, MX_FLAG_SWAP), (m.slots_enabled, MX_FLAG_SLOTS), (m.enabled, MX_FLAG_ON)] {
         if on {
             b |= f;
         }
     }
-    if !last {
-        b = (b & !MX_FLAG_DOCK) | ((m.dock.min(os_model::DOCK_RIGHT) << MX_FLAG_DOCK_SHIFT) & MX_FLAG_DOCK);
-    }
     b
-}
-
-/// The second flag byte with the track's separator.
-fn with_flags5(b: u8, m: &MixerTrack) -> u8 {
-    if m.separator { b | MX_FLAG5_SEPARATOR } else { b & !MX_FLAG5_SEPARATOR }
 }
 
 /// A mixer track's slot area (spec: flp/events/mixer.md "Slot sub-block"): the events between its flags (236) and its
@@ -2116,7 +1911,7 @@ fn slot_areas(events: &[Event], l: &Layout) -> Vec<Option<SlotArea>> {
                 match e.id {
                     id::PLUGIN_NAME => start = Some(i),
                     id::MX_SLOT => {
-                        if let (Some(r), Some(s)) = (runs.get_mut(slot_number(e)), start.take()) {
+                        if let (Some(r), Some(s)) = (runs.get_mut(int(e) as usize), start.take()) {
                             *r = Some((s, i));
                         }
                     }
@@ -2150,7 +1945,7 @@ fn file_slot_runs(file: &FlpFile) -> Result<(Vec<SlotRun>, usize), ProjectError>
             let run = &events[s..e];
             let name = run[0].data().map(|d| decode_text(d, enc)).unwrap_or_default();
             let state = run.iter().find(|e| e.id == id::PLUGIN_STATE).and_then(Event::data).map(<[u8]>::to_vec).unwrap_or_default();
-            out.push(SlotRun { track, slot, plugin: SlotPlugin { id: os_model::Id::NONE, name, state }, events: run.to_vec(), used: false });
+            out.push(SlotRun { track, slot, plugin: SlotPlugin { name, state }, events: run.to_vec(), used: false });
         }
     }
     Ok((out, l.mixer.len()))
@@ -2186,13 +1981,11 @@ fn take_runs(pool: &mut [SlotRun], wanted: &[(usize, Option<usize>, &SlotPlugin)
 
 /// A slot plugin's events (spec: flp/events/plugins.md §2): the file's own events when it had the plugin (window
 /// record moved to the new place, state replaced), else new ones.
-fn slot_plugin_events(p: &SlotPlugin, cpu: os_model::PluginCpu, track: u16, slot: u8, run: Option<Vec<Event>>, enc: TextEnc) -> Vec<Event> {
+fn slot_plugin_events(p: &SlotPlugin, track: u16, slot: u8, run: Option<Vec<Event>>, enc: TextEnc) -> Vec<Event> {
     let Some(mut ev) = run else {
-        let mut rec = Event::new(id::PLUGIN_REC, Value::var(plugin_record(Some((track, slot)))));
-        patch_cpu(&mut rec, cpu);
         let mut ev = vec![
             Event::new(id::PLUGIN_NAME, Value::var(encode_text(&p.name, enc))),
-            rec,
+            Event::new(id::PLUGIN_REC, Value::var(plugin_record(Some((track, slot))))),
             Event::new(id::PLUGIN_ICON, Value::U32(0)),
             Event::new(id::COLOR, Value::U32(SLOT_COLOR_DEFAULT)),
             Event::new(id::CH_COLOR_FLAG, Value::U8(0)),
@@ -2208,7 +2001,6 @@ fn slot_plugin_events(p: &SlotPlugin, cpu: os_model::PluginCpu, track: u16, slot
         at[0..4].copy_from_slice(&u32::from(track).to_le_bytes());
         at[4..8].copy_from_slice(&u32::from(slot).to_le_bytes());
         patch_bytes(e, 0, &at);
-        patch_cpu(e, cpu);
     }
     match ev.iter().position(|e| e.id == id::PLUGIN_STATE) {
         Some(i) => set_data(&mut ev[i], p.state.clone()),
@@ -2222,29 +2014,6 @@ fn slot_plugin_events(p: &SlotPlugin, cpu: os_model::PluginCpu, track: u16, slot
 const PLUGIN_REC_LEN: usize = 52;
 /// Colour FL stores for most slot plugins (spec: flp/events/plugins.md §1, corpus).
 const SLOT_COLOR_DEFAULT: u32 = 0x0056_5148;
-
-/// A plugin window record's CPU switches (event 212, flags at byte 16: 0x40 threaded processing allowed, 0x20 smart
-/// disable; spec: flp/events/plugins.md §3, checked in FL 26 by save and diff on a channel and a slot).
-const PLUGIN_THREADED: u8 = 0x40;
-const PLUGIN_SMART_DISABLE: u8 = 0x20;
-
-fn plugin_cpu(d: Option<&[u8]>) -> Option<os_model::PluginCpu> {
-    let b = *d?.get(16)?;
-    Some(os_model::PluginCpu { threaded: b & PLUGIN_THREADED != 0, smart_disable: b & PLUGIN_SMART_DISABLE != 0 })
-}
-
-/// Window record `e` with the CPU switches `c` (its other flags kept).
-fn patch_cpu(e: &mut Event, c: os_model::PluginCpu) {
-    let Some(&b) = e.data().and_then(|d| d.get(16)) else { return };
-    let mut b = b & !(PLUGIN_THREADED | PLUGIN_SMART_DISABLE);
-    if c.threaded {
-        b |= PLUGIN_THREADED;
-    }
-    if c.smart_disable {
-        b |= PLUGIN_SMART_DISABLE;
-    }
-    patch_bytes(e, 16, &[b]);
-}
 
 /// A new plugin window record (event 212, spec: flp/events/plugins.md §3): `+8 = 2`; channels flags 0x50
 /// (generator, threaded); mixer slots carry their track and slot, flags 0x140.
@@ -2263,25 +2032,6 @@ fn plugin_record(slot: Option<(u16, u8)>) -> Vec<u8> {
     r
 }
 
-/// `t` with the track's audio input and output, record source and monitor mode from its block (a file without them
-/// keeps the defaults; spec: audio/track-io.md §1.6).
-fn io_of(events: &[Event], m: &MixerLoc, mut t: MixerTrack) -> MixerTrack {
-    let at = |i: Option<usize>| i.map(|i| int(&events[i]));
-    if let Some(v) = at(m.input) {
-        t.audio_in = (v as i32).max(-1);
-    }
-    if let Some(v) = at(m.output) {
-        t.audio_out = (v as i32).max(-1);
-    }
-    if let Some(v) = at(m.rec_source) {
-        t.rec_source = v.min(255) as u8;
-    }
-    if let Some(v) = at(m.monitor) {
-        t.monitor = v.min(255) as u8;
-    }
-    t
-}
-
 fn load_mixer(events: &[Event], l: &Layout, enc: TextEnc) -> Vec<MixerTrack> {
     let params = l.mixer_params.and_then(|i| events[i].data()).unwrap_or(&[]);
     let old = before_12_8(events, l.version);
@@ -2296,18 +2046,14 @@ fn load_mixer(events: &[Event], l: &Layout, enc: TextEnc) -> Vec<MixerTrack> {
         let index = n as u16;
         let from = starts[n];
         let to = starts.get(n + 1).copied().or(l.mixer_params).unwrap_or(events.len());
-        let mut slots: [Option<SlotPlugin>; 10] = Default::default();
+        let mut slots: [Option<SlotPlugin>; 64] = std::array::from_fn(|_|None);
         let mut pending_plugin: Option<SlotPlugin> = None;
-        let mut slot_cpu = [os_model::PluginCpu::default(); 10];
-        let mut pending_cpu = None;
         let mut routes = Vec::new();
         for e in &events[from..to] {
             match e.id {
                 id::PLUGIN_NAME => {
-                    pending_plugin = e.data().map(|d| SlotPlugin { id: os_model::Id::NONE, name: decode_text(d, enc), state: Vec::new() });
-                    pending_cpu = None;
+                    pending_plugin = e.data().map(|d| SlotPlugin { name: decode_text(d, enc), state: Vec::new() });
                 }
-                id::PLUGIN_REC => pending_cpu = plugin_cpu(e.data()),
                 // spec: flp/events/mixer.md (slot sub-block: 213 = plugin state)
                 id::PLUGIN_STATE => {
                     if let (Some(p), Some(d)) = (pending_plugin.as_mut(), e.data()) {
@@ -2315,12 +2061,8 @@ fn load_mixer(events: &[Event], l: &Layout, enc: TextEnc) -> Vec<MixerTrack> {
                     }
                 }
                 id::MX_SLOT => {
-                    let k = slot_number(e);
-                    if let Some(s) = slots.get_mut(k) {
+                    if let Some(s) = slots.get_mut(int(e) as usize) {
                         *s = pending_plugin.take();
-                        if let (Some(c), Some(_)) = (pending_cpu.take(), s.as_ref()) {
-                            slot_cpu[k] = c;
-                        }
                     }
                 }
                 id::MX_ROUTES => {
@@ -2338,8 +2080,8 @@ fn load_mixer(events: &[Event], l: &Layout, enc: TextEnc) -> Vec<MixerTrack> {
         }
         let custom = m.color_flag.is_some_and(|i| int(&events[i]) != 0);
         // Slot LED and mix (spec: flp/events/plugins.md §5).
-        let mut slot_on = [true; 10];
-        let mut slot_mix = [1.0; 10];
+        let mut slot_on = [true; 64];
+        let mut slot_mix = [1.0; 64];
         let rt = record_track(index, l.mixer.len());
         let base = mixer_location(rt, 0);
         // The stored switch and mix level; the initial values' records for them are set by the app on opening in song
@@ -2370,11 +2112,6 @@ fn load_mixer(events: &[Event], l: &Layout, enc: TextEnc) -> Vec<MixerTrack> {
         }
         let flags = track_flags(m.flags.and_then(|i| events[i].data()));
         let flag = |f: u8, default: bool| flags.map_or(default, |b| b & f != 0);
-        let fresh = MixerTrack::new(index);
-        // The last ("current") track keeps a new track's docking (`with_flags`).
-        let last = index > 0 && n + 1 == l.mixer.len();
-        let dock = flags.filter(|_| !last).map_or(fresh.dock, |b| ((b & MX_FLAG_DOCK) >> MX_FLAG_DOCK_SHIFT).min(os_model::DOCK_RIGHT));
-        let separator = track_flags5(m.flags.and_then(|i| events[i].data())).is_some_and(|b| b & MX_FLAG5_SEPARATOR != 0);
         let (latency_out, latency_in) = m.flags.and_then(|i| events[i].data()).map_or((0.0, 0.0), |d| track_latency(d, old));
         out.push(MixerTrack {
             index,
@@ -2384,9 +2121,8 @@ fn load_mixer(events: &[Event], l: &Layout, enc: TextEnc) -> Vec<MixerTrack> {
             polarity: flag(MX_FLAG_POLARITY, false),
             swap: flag(MX_FLAG_SWAP, false),
             slots_enabled: flag(MX_FLAG_SLOTS, true),
-            threaded: !flag(MX_FLAG_UNTHREADED, false),
-            dock,
-            separator,
+            strip: [0; 7],
+            separator: m.flags.and_then(|i| events[i].data()).is_some_and(|d| d.len() >= 8 && d[5] & 4 != 0),
             slots,
             routes,
             send_levels: mixer_param_records(params)
@@ -2399,12 +2135,12 @@ fn load_mixer(events: &[Event], l: &Layout, enc: TextEnc) -> Vec<MixerTrack> {
             slot_on,
             slot_mix,
             eq,
+            hardware_output: None,
             latency_out,
             latency_in,
             icon: m.icon.map(|i| int(&events[i]) as u16),
-            slot_cpu,
             origin: Some(index),
-            ..io_of(events, m, fresh)
+            ..MixerTrack::new(index)
         });
     }
     out
@@ -2459,8 +2195,28 @@ fn int_event(id: u8, v: u32) -> Event {
 
 /// One 68-byte envelope record (the inverse of `decode_envelopes`).
 fn encode_envelope(e: &Envelope) -> [u8; 68] {
+    let ints = [
+        e.flags,
+        // FL writes -1 for an envelope that is on (spec: audio/envelopes-and-lfos.md).
+        -i32::from(e.enabled),
+        e.delay,
+        e.attack,
+        e.hold,
+        e.decay,
+        e.sustain,
+        e.release,
+        e.amount,
+        e.lfo_delay,
+        e.lfo_attack,
+        e.lfo_amount,
+        e.lfo_speed,
+        e.lfo_shape,
+        e.attack_tension,
+        e.decay_tension,
+        e.release_tension,
+    ];
     let mut d = [0u8; 68];
-    for (k, v) in e.fields().iter().enumerate() {
+    for (k, v) in ints.iter().enumerate() {
         d[4 * k..4 * k + 4].copy_from_slice(&v.to_le_bytes());
     }
     d
@@ -2592,10 +2348,8 @@ fn write_sampler(
 /// Writes the model back into `file`, changing only the events that hold modeled values
 /// that differ from what's stored. Returns an error when the model's shape (number of
 /// channels, patterns with notes, mixer tracks, …) doesn't match the file: adding or
-/// removing objects isn't supported yet. A file of an older generation is first converted to the current layout
-/// ([`upgrade`]), which is the layout it is saved in.
+/// removing objects isn't supported yet.
 pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> {
-    upgrade(file)?;
     restructure(project, file)?;
     // The file's effect slots as they are before inserts are added or removed: a renumbered track takes its own.
     let (file_slots, file_tracks) = file_slot_runs(file)?;
@@ -2721,14 +2475,6 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
     }
     if let (Some(i), Some(v)) = (l.current_arrangement, project.current_arrangement.filter(|&v| Some(v) != current.current_arrangement)) {
         set_int(&mut events[i], v.into());
-    }
-    // Performance mode (event 31): in place, else behind 40 or 100 (spec: ui/performance-mode.md §5).
-    if let Some(on) = project.performance.filter(|&on| Some(on) != current.performance) {
-        match (l.performance, l.fast_declick.or(l.current_arrangement)) {
-            (Some(i), _) => set_int(&mut events[i], u32::from(on)),
-            (None, Some(at)) => inserts.push((at + 1, Event::new(id::PERFORMANCE, Value::U8(u8::from(on))))),
-            (None, None) => {}
-        }
     }
 
     // Project settings the file lacks (11, 80, 17, 18, 30) go where FL 26 writes them (spec: flp/engine-events.md
@@ -2908,6 +2654,15 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
 
     // Channels.
     for (loc, (ch, old)) in l.channels.iter().zip(project.channels.iter().zip(&current.channels)) {
+        // Replacing a generator preserves the channel's origin, so restructure keeps its
+        // original block. Update the type as well as the plugin identity in that block.
+        if ch.kind != old.kind {
+            if let Some(k) = (loc.start + 1..loc.end).find(|&k| events[k].id == id::CH_TYPE) {
+                set_int(&mut events[k], u32::from(channel_type_code(ch.kind)));
+            } else {
+                inserts.push((loc.start + 1, Event::new(id::CH_TYPE, Value::U8(channel_type_code(ch.kind)))));
+            }
+        }
         // Stretch settings: event 215 ints 24..27 of the channel's block (spec: audio/audio-clips.md "Settings").
         if ch.sound.stretch != old.sound.stretch {
             let mut k = loc.start + 1;
@@ -3012,25 +2767,19 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
         }
         // A plugin channel's plugin (201) and state (213) (spec: flp/events/plugins.md §1-2). A state for a channel
         // that had none goes after the colour flag (41), where FL keeps it.
-        // A channel that changed type (a sampler turned into a plugin channel: Set up for MIDI export, Replace) has its
-        // type event rewritten; a plugin name the block lacks goes right after it, where FL writes it.
-        if ch.kind != old.kind {
-            if let Some(i) = loc.kind {
-                set_int(&mut events[i], channel_type_code(ch.kind).into());
-            }
-        }
-        if ch.kind == ChannelKind::Plugin && ch.plugin != old.plugin {
-            match (loc.plugin_name, &ch.plugin, loc.kind) {
-                (Some(i), Some(n), _) => set_data(&mut events[i], encode_text(n, enc)),
-                (None, Some(n), Some(k)) => inserts.push((k + 1, Event::new(id::PLUGIN_NAME, Value::var(encode_text(n, enc))))),
-                _ => {}
+        if ch.plugin != old.plugin {
+            if let Some(i) = loc.plugin_name {
+                set_data(&mut events[i], encode_text(ch.plugin.as_deref().unwrap_or(""), enc));
+            } else if let Some(name) = &ch.plugin {
+                inserts.push((loc.start + 2, Event::new(id::PLUGIN_NAME, Value::var(encode_text(name, enc)))));
             }
         }
         if ch.plugin_state != old.plugin_state {
+            if ch.plugin_state.is_none() {if let Some(i)=loc.state {removals.push(i);}}
             if let Some(st) = &ch.plugin_state {
                 match loc.state {
                     Some(i) => set_data(&mut events[i], st.clone()),
-                    None if ch.kind == ChannelKind::Plugin => {
+                    None if ch.kind == ChannelKind::Plugin || ara_channel(ch) => {
                         let at = loc.color_flag.or(loc.color).or(loc.name).or(loc.plugin_rec).map_or(loc.start + 2, |i| i + 1);
                         inserts.push((at, Event::new(id::PLUGIN_STATE, Value::var(st.clone()))));
                     }
@@ -3048,33 +2797,6 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
             block.extend(channel_block_events(ch, project.automation(ch.index), enc)?);
         }
         inserts.extend(block.into_iter().rev().map(|e| (at, e)));
-    }
-
-    // Controller links (spec: flp/events/automation.md "Controller links"): the k-th link event takes the model's k-th
-    // link and its formula (event 230 right after it), links beyond the file's go after its last one (before the first
-    // channel block when it has none), events beyond the model's go. Unchanged, the events stay as they are.
-    if project.controller_links != current.controller_links {
-        let formula = |s: &str| Event::new(id::LINK_FORMULA, Value::var(encode_text(s, enc)));
-        for (&(i, f), c) in l.ctl_links.iter().zip(&project.controller_links) {
-            set_data(&mut events[i], c.bytes.to_vec());
-            match (f, &c.formula) {
-                (Some(f), Some(s)) => set_data(&mut events[f], encode_text(s, enc)),
-                (Some(f), None) => removals.push(f),
-                (None, Some(s)) => inserts.push((i + 1, formula(s))),
-                (None, None) => {}
-            }
-        }
-        let at = l.ctl_links.last().map_or_else(|| l.channels.first().map_or(0, |c| c.start), |&(i, f)| f.unwrap_or(i) + 1);
-        for c in project.controller_links.iter().skip(l.ctl_links.len()).rev() {
-            if let Some(s) = &c.formula {
-                inserts.push((at, formula(s)));
-            }
-            inserts.push((at, Event::new(id::AUTO_LINK, Value::var(c.bytes.to_vec()))));
-        }
-        for &(i, f) in l.ctl_links.iter().skip(project.controller_links.len()) {
-            removals.push(i);
-            removals.extend(f);
-        }
     }
 
     // Automation data of existing automation channels, and the links of every automation clip.
@@ -3305,14 +3027,8 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
             if t.locked != old.locked {
                 patch_bytes(&mut events[tl.record], 47, &[u8::from(t.locked)]);
             }
-            if t.perf != old.perf {
-                patch_bytes(&mut events[tl.record], 22, &perf_bytes(&t.perf));
-            }
             if t.collapsed != old.collapsed {
                 patch_bytes(&mut events[tl.record], 61, &[u8::from(!t.collapsed)]);
-            }
-            if t.link != old.link {
-                patch_bytes(&mut events[tl.record], 49, &link_bytes(&t.link));
             }
             if t.color != old.color {
                 if let Some(c) = t.color {
@@ -3339,7 +3055,6 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
     // Mixer tracks.
     let mut params = l.mixer_params.and_then(|i| events[i].data()).map(<[u8]>::to_vec);
     let slot_states = if skip_mixer { Vec::new() } else { slot_state_events(events, &l) };
-    let slot_recs = if skip_mixer { Vec::new() } else { slot_events(events, &l, id::PLUGIN_REC) };
     // The file track each block now stands for: inserts are added or removed just before the last track
     // (`grow_mixer`, `shrink_mixer`), so a block keeps its position, the last one was the file's last, and an added one
     // has none.
@@ -3373,16 +3088,16 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
             .iter()
             .enumerate()
             .filter(|&(t, _)| rewrite[t])
-            .flat_map(|(_, m)| m.slots.iter().enumerate().filter_map(move |(k, s)| Some((k, m.origin.map(usize::from), s.as_ref()?))))
+            .flat_map(|(_, m)| m.slots.iter().take(10).enumerate().filter_map(move |(k, s)| Some((k, m.origin.map(usize::from), s.as_ref()?))))
             .collect();
         let mut runs = take_runs(&mut pool, &wanted).into_iter();
         for (t, m) in project.mixer.iter().enumerate().filter(|&(t, _)| rewrite[t]) {
             let area = areas[t].as_ref().expect("checked above");
             let mut block = Vec::new();
-            for (k, slot) in m.slots.iter().enumerate() {
+            for (k, slot) in m.slots.iter().take(10).enumerate() {
                 if let Some(p) = slot {
                     let rt = record_track(t as u16, n);
-                    block.extend(slot_plugin_events(p, m.slot_cpu[k], rt, k as u8, runs.next().flatten(), enc));
+                    block.extend(slot_plugin_events(p, rt, k as u8, runs.next().flatten(), enc));
                 }
                 block.push(Event::new(id::MX_SLOT, Value::U16(k as u16)));
             }
@@ -3390,23 +3105,14 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
             inserts.extend(block.into_iter().rev().map(|e| (area.to, e)));
         }
     }
-    for (t, (((((m, old), ml), states), recs), &rewritten)) in project
+    for ((((m, old), ml), states), &rewritten) in project
         .mixer
         .iter()
         .zip(&current.mixer)
         .zip(&l.mixer)
         .zip(slot_states.iter().chain(std::iter::repeat(&[None; 10])))
-        .zip(slot_recs.iter().chain(std::iter::repeat(&[None; 10])))
         .zip(rewrite.iter())
-        .enumerate()
     {
-        let last = t > 0 && t + 1 == n;
-        // A plugin kept in its slot gets its CPU switches in its window record (212, flp/events/plugins.md §3).
-        for (k, &at) in recs.iter().enumerate().filter(|_| !rewritten) {
-            if let Some(i) = at.filter(|_| m.slot_cpu[k] != old.slot_cpu[k] && m.slots[k].is_some()) {
-                patch_cpu(&mut events[i], m.slot_cpu[k]);
-            }
-        }
         // spec: flp/events/mixer.md "Slot sub-block": a plugin kept in its slot gets its new state (213).
         for ((new, prev), &at) in m.slots.iter().zip(&old.slots).zip(states).filter(|_| !rewritten) {
             if let (Some(new), Some(prev), Some(i)) = (new, prev, at) {
@@ -3428,30 +3134,35 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
                 }
             }
         }
+        if m.separator != old.separator {
+            if let Some(i) = ml.flags {
+                let mut d = events[i].data().unwrap_or(&[]).to_vec();
+                d.resize(d.len().max(8), 0);
+                d[5] = (d[5] & !4) | if m.separator { 4 } else { 0 };
+                set_data(&mut events[i], d);
+            }
+        }
         let latency = (m.latency_out, m.latency_in);
         let relatency = latency != (old.latency_out, old.latency_in);
-        let switches = |m: &MixerTrack| (m.enabled, m.polarity, m.swap, m.slots_enabled, m.threaded, m.dock, m.separator);
-        if relatency || switches(m) != switches(old) {
+        if relatency || (m.enabled, m.polarity, m.swap, m.slots_enabled) != (old.enabled, old.polarity, old.swap, old.slots_enabled) {
             if let Some(i) = ml.flags {
-                match (track_flags(events[i].data()), track_flags5(events[i].data())) {
-                    (Some(b), Some(b5)) if !relatency => patch_bytes(&mut events[i], 4, &[with_flags(b, m, last), with_flags5(b5, m)]),
-                    (Some(_), _) => {
+                match track_flags(events[i].data()) {
+                    Some(b) if !relatency => patch_bytes(&mut events[i], 4, &[with_flags(b, m)]),
+                    Some(_) => {
                         let mut r = with_latency(events[i].data().unwrap_or(&[]), old_file, latency);
-                        r[4] = with_flags(r[4], m, last);
-                        r[5] = with_flags5(r[5], m);
+                        r[4] = with_flags(r[4], m);
                         set_data(&mut events[i], r);
                     }
                     // A 5-byte record (FL 10 / 11) has no flags: it becomes the 8-byte record of FL 12, its latency kept in
                     // the form the file's version reads (spec: flp/layouts.md "A mixer track's record (event 236)").
-                    (None, _) => {
+                    None => {
                         let d = events[i].data().unwrap_or(&[]);
                         let late = old_file && d.get(4).is_some_and(|&b| b != 0);
                         let base = if m.index == 0 { MX_FLAGS_MASTER } else { MX_FLAGS_INSERT };
                         let mut r = vec![0u8; 8];
                         r[4] = base | if late { MX_FLAG_LATE_OUT } else { 0 };
                         let mut r = with_latency(&r, old_file, latency);
-                        r[4] = with_flags(r[4], m, last);
-                        r[5] = with_flags5(r[5], m);
+                        r[4] = with_flags(r[4], m);
                         set_data(&mut events[i], r);
                     }
                 }
@@ -3506,22 +3217,6 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
                 None => return Err(ProjectError::Structure(format!("mixer track {} has no routing event", m.index))),
             }
         }
-        // Audio input / output, record source, monitor mode (spec: audio/track-io.md §1.6). A file without them gets
-        // the ones that changed after the routes, in the order FL writes them (each insert lands before the earlier
-        // ones at the same place).
-        let io = [
-            (ml.output, id::MX_OUTPUT, m.audio_out as u32, old.audio_out as u32),
-            (ml.input, id::MX_INPUT, m.audio_in as u32, old.audio_in as u32),
-            (ml.monitor, id::MX_MONITOR, m.monitor.into(), old.monitor.into()),
-            (ml.rec_source, id::MX_REC_SOURCE, m.rec_source.into(), old.rec_source.into()),
-        ];
-        for (at, eid, new, _) in io.into_iter().filter(|&(_, _, new, was)| new != was) {
-            match (at, ml.routes) {
-                (Some(i), _) => set_int(&mut events[i], new),
-                (None, Some(r)) => inserts.push((r + 1, Event::new(eid, Value::U32(new)))),
-                (None, None) => {}
-            }
-        }
         // spec: flp/events/mixer.md "Kind 0x20, route level": records right after the source track's own records.
         if m.send_levels != old.send_levels {
             if let Some(data) = params.as_mut() {
@@ -3538,7 +3233,11 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
                 levels.sort_by_key(|&(d, _)| d);
                 for (k, &(dest, level)) in levels.iter().enumerate() {
                     let mut r = [0u8; MIXER_REC_LEN];
-                    (r[4], r[5]) = if old_form { (64 + dest.min(126) as u8, MX_KIND_PARAM) } else { (dest.min(255) as u8, MX_KIND_ROUTE) };
+                    (r[4], r[5]) = if old_form && dest <= 126 {
+                        (64 + dest as u8, MX_KIND_PARAM)
+                    } else {
+                        (dest.min(os_model::target::MAX_MIXER_INSERT) as u8, MX_KIND_ROUTE)
+                    };
                     r[6..8].copy_from_slice(&loc.to_le_bytes());
                     r[8..12].copy_from_slice(&((level * 16000.0).round() as i32).to_le_bytes());
                     recs.insert(at + k, r);
@@ -3607,6 +3306,37 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
             }
         }
     }
+    write_strip_chunk(project, file);
+    write_parametric_chunk(project, file);
+    write_pitch_controls(project,file);
+    write_output_routing(project,file);
+    write_peak_links(project,file);
+    write_channel_layouts(project,file);
+    write_strip_bypass(project,file);
+    write_mixer_locks(project, file);
+    write_mixer_separator_names(project, file);
+    write_track_folders(project,file);write_track_heights(project,file);
+    write_comp_groups(project, file);
+    write_attached_lanes(project, file);
+    write_attached_order(project, file);
+    write_playlist_sizes(project, file);
+    write_playlist_loop(project, file);
+    write_frozen_tracks(project, file);
+    write_extra_fx(project, file);
+    write_audio_warps(project,file);
+    write_vocals(project,file);
+    write_audio_edits(project,file);
+    write_rack_strips(project,file);
+    write_hardware_outputs(project, file);
+    write_instrument_lanes(project,file);
+    write_pattern_speeds(project,file);
+    write_marker_colors(project,file);
+    write_timeline(project, file);
+    write_clip_appearance(project, file);
+    write_clip_picker_order(project, file);
+    write_clip_fx_owners(project,file);
+    write_note_drive(project,file);write_mpe(project,file);
+    write_staff_notation(project, file);
     Ok(())
 }
 
@@ -3925,10 +3655,14 @@ fn channel_type_code(kind: ChannelKind) -> u8 {
     }
 }
 
-/// One channel block in the minimal form FL 26 loads (spec: flp/events/channels.md; every record not written here
-/// takes FL's default).
+/// Lemon's ARA archive remains on its audio channel, separately from ordinary VST3 inserts.
+fn ara_channel(ch:&Channel)->bool {
+    ch.kind==ChannelKind::AudioClip && ch.plugin.as_deref()==Some("Lemon ARA")
+}
+
+/// One channel block; unrepresented settings retain the file format defaults.
 fn channel_block_events(ch: &Channel, auto: Option<&Automation>, enc: TextEnc) -> Result<Vec<Event>, ProjectError> {
-    let plugin = (ch.kind == ChannelKind::Plugin).then_some(ch.plugin.as_deref()).flatten().filter(|p| !p.is_empty());
+    let plugin = (ch.kind == ChannelKind::Plugin || ara_channel(ch)).then_some(ch.plugin.as_deref()).flatten().filter(|p| !p.is_empty());
     if matches!(ch.kind, ChannelKind::Other(_)) || (ch.kind == ChannelKind::Plugin && plugin.is_none()) {
         return Err(ProjectError::Mismatch(format!(
             "channel {}: creating unknown channels or plugin channels without a plugin is not supported",
@@ -3994,11 +3728,9 @@ fn channel_block_events(ch: &Channel, auto: Option<&Automation>, enc: TextEnc) -
     Ok(b)
 }
 
-/// Builds a new FLP file from the model: project info, tempo, patterns (notes, control points, names, colors),
-/// channels, the arrangements and the mixer, in FL's order. The mixer is stored after the playlist (spec:
-/// flp/events/mixer.md "Where the mixer sits"), so a project without arrangements gets no mixer: a caller saving a
-/// whole project gives it [`default_arrangement`] first, as the app's save does; [`unsaved_parts`] names what is left
-/// out. Opens in FL 26 (checked 2026-10-09).
+/// Builds a new FLP file from the model: project info, tempo, patterns (notes, control points, names, colors)
+/// and channels, in FL's order. FL fills in everything not written (mixer, playlist, per-channel settings), which
+/// this version does not write yet: see [`unsaved_parts`]. Opens in FL 26 (checked 2026-10-09).
 // spec: flp/container.md, flp/events/{project-info,channels,patterns}.md
 pub fn create(project: &Project) -> Result<FlpFile, ProjectError> {
     let enc = TextEnc::Utf16;
@@ -4086,10 +3818,6 @@ pub fn create(project: &Project) -> Result<FlpFile, ProjectError> {
     for a in &project.automations {
         ev.extend(a.targets.iter().map(|&t| link_event(a.channel, t)));
     }
-    for c in &project.controller_links {
-        ev.push(Event::new(id::AUTO_LINK, Value::var(c.bytes.to_vec())));
-        ev.extend(c.formula.as_deref().map(|s| Event::new(id::LINK_FORMULA, Value::var(encode_text(s, enc)))));
-    }
     for (i, ch) in project.channels.iter().enumerate() {
         ev.extend(channel_block_events(ch, project.automation(ch.index), enc)?);
         if i == 0 {
@@ -4114,9 +3842,6 @@ pub fn create(project: &Project) -> Result<FlpFile, ProjectError> {
         if let Some(on) = project.fast_declick {
             ev.push(Event::new(id::FAST_DECLICK, Value::U8(u8::from(on))));
         }
-        if let Some(on) = project.performance {
-            ev.push(Event::new(id::PERFORMANCE, Value::U8(u8::from(on))));
-        }
     }
     // The mixer follows the arrangements (spec: flp/events/mixer.md "Where the mixer sits").
     if !project.arrangements.is_empty() && !project.mixer.is_empty() {
@@ -4126,13 +3851,45 @@ pub fn create(project: &Project) -> Result<FlpFile, ProjectError> {
     header.extend(0u16.to_le_bytes()); // format
     header.extend((project.channels.len() as u16).to_le_bytes());
     header.extend(project.ppq.max(1).to_le_bytes());
-    Ok(FlpFile {
+    let mut file = FlpFile {
         chunks: vec![
             Chunk { tag: Tag::HEADER, body: ChunkBody::Header(Header { raw: header }) },
             Chunk { tag: Tag::DATA, body: ChunkBody::Events(ev) },
         ],
         trailing: Vec::new(),
-    })
+    };
+    write_strip_chunk(project, &mut file);
+    write_parametric_chunk(project, &mut file);
+    write_pitch_controls(project,&mut file);
+    write_output_routing(project,&mut file);
+    write_peak_links(project,&mut file);
+    write_channel_layouts(project,&mut file);
+    write_strip_bypass(project,&mut file);
+    write_mixer_locks(project, &mut file);
+    write_mixer_separator_names(project, &mut file);
+    write_track_folders(project,&mut file);write_track_heights(project,&mut file);
+    write_comp_groups(project, &mut file);
+    write_attached_lanes(project, &mut file);
+    write_attached_order(project, &mut file);
+    write_playlist_sizes(project, &mut file);
+    write_playlist_loop(project, &mut file);
+    write_frozen_tracks(project, &mut file);
+    write_extra_fx(project, &mut file);
+    write_audio_warps(project,&mut file);
+    write_vocals(project,&mut file);
+    write_audio_edits(project,&mut file);
+    write_rack_strips(project,&mut file);
+    write_hardware_outputs(project, &mut file);
+    write_instrument_lanes(project,&mut file);
+    write_pattern_speeds(project,&mut file);
+    write_marker_colors(project,&mut file);
+    write_timeline(project, &mut file);
+    write_clip_appearance(project, &mut file);
+    write_clip_picker_order(project, &mut file);
+    write_clip_fx_owners(project,&mut file);
+    write_note_drive(project,&mut file);write_mpe(project,&mut file);
+    write_staff_notation(project, &mut file);
+    Ok(file)
 }
 
 /// Number of playlist tracks an arrangement stores (spec: flp/events/playlist.md).
@@ -4147,10 +3904,11 @@ fn track_record(t: &PlaylistTrack) -> Vec<u8> {
     r[13..17].copy_from_slice(&1.0f32.to_le_bytes());
     r[17] = if t.number <= 33 { 0xf0 } else { 0xff };
     r[18..21].fill(0xff);
-    r[22..46].copy_from_slice(&perf_bytes(&t.perf));
+    r[30] = 5;
+    r[38] = 1;
     r[46] = u8::from(t.grouped);
     r[47] = u8::from(t.locked);
-    r[49..61].copy_from_slice(&link_bytes(&t.link));
+    r[53..61].fill(0xff);
     r[61] = u8::from(!t.collapsed);
     r
 }
@@ -4265,21 +4023,21 @@ fn track_block_events(m: &MixerTrack, last: bool, enc: TextEnc) -> Vec<Event> {
     flags[8..].copy_from_slice(&m.latency_in.to_le_bytes());
     flags[4] = if m.index == 0 || last { MX_FLAGS_MASTER } else { MX_FLAGS_INSERT };
     let rt = if last && m.index > 0 { MX_SPECIAL_TRACK } else { m.index };
-    flags[4] = with_flags(flags[4], m, last && m.index > 0);
-    flags[5] = with_flags5(flags[5], m);
+    flags[4] = with_flags(flags[4], m);
+    flags[5] = if m.separator { 4 } else { 0 };
     ev.push(Event::new(id::MX_FLAGS, Value::var(flags.to_vec())));
-    for (k, slot) in m.slots.iter().enumerate() {
+    for (k, slot) in m.slots.iter().take(10).enumerate() {
         if let Some(p) = slot {
-            ev.extend(slot_plugin_events(p, m.slot_cpu[k], rt, k as u8, None, enc));
+            ev.extend(slot_plugin_events(p, rt, k as u8, None, enc));
         }
         ev.push(Event::new(id::MX_SLOT, Value::U16(k as u16)));
     }
     ev.push(Event::new(id::MX_ROUTES, Value::var(route_bytes(&m.routes))));
-    ev.push(Event::new(id::MX_REC_SOURCE, Value::U32(m.rec_source.into())));
-    ev.push(Event::new(id::MX_MONITOR, Value::U32(m.monitor.into())));
+    ev.push(Event::new(165, Value::U32(3)));
+    ev.push(Event::new(166, Value::U32(1)));
     ev.push(Event::new(49, Value::U8(0)));
-    ev.push(Event::new(id::MX_INPUT, Value::U32(m.audio_in as u32)));
-    ev.push(Event::new(id::MX_OUTPUT, Value::U32(m.audio_out as u32)));
+    ev.push(Event::new(154, Value::U32(u32::MAX)));
+    ev.push(Event::new(147, Value::U32(if m.index == 0 { 0 } else { u32::MAX })));
     ev
 }
 
@@ -4352,6 +4110,7 @@ fn mixer_is_default(mixer: &[MixerTrack]) -> bool {
             && t.pan.is_none_or(|v| v == 0.0)
             && t.stereo_separation.is_none_or(|v| v == 0.0)
             && t.routes == if t.index == 0 { Vec::<u16>::new() } else { vec![0] }
+            && t.hardware_output.is_none()
             && t.latency_out == 0.0
             && t.latency_in == 0.0
     })
@@ -4362,7 +4121,6 @@ mod tests {
     use super::*;
     fn sampler(index: u16, name: &str, track: u16) -> Channel {
         Channel {
-            id: os_model::Id::NONE,
             index,
             kind: ChannelKind::Sampler,
             name: Some(name.into()),
@@ -4445,6 +4203,52 @@ mod tests {
         assert_eq!(again.patterns.iter().map(|p| p.number).collect::<Vec<_>>(), vec![1, 2, 3]);
         assert_eq!(again.patterns[2].name.as_deref(), Some("Chorus"));
         assert_eq!(again.patterns[0].notes.len(), 2);
+    }
+
+    #[test]
+    #[ignore = "requires private COMMUNITY_PROJECT fixture; never bundle user projects"]
+    fn community_reported_project_replacement_roundtrip() {
+        let path=std::env::var_os("COMMUNITY_PROJECT").expect("set the reported project path");
+        let mut file=FlpFile::parse(&std::fs::read(path).unwrap()).unwrap();
+        let mut p=load(&file).unwrap();
+        assert!(p.channels.len()>=3);
+        for kind in [ChannelKind::Sampler,ChannelKind::Plugin] {
+            let c=&mut p.channels[2];c.kind=kind;
+            c.plugin=if kind==ChannelKind::Plugin {Some("Fruity Wrapper".into())}else{None};
+            c.plugin_state=c.plugin.as_ref().map(|_|vec![1,2,3]);
+            apply(&p,&mut file).unwrap();
+            let back=load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap();
+            assert_eq!(back.channels[2].kind,kind);
+            assert_eq!(back.channels[2].plugin_state,p.channels[2].plugin_state);
+            assert_eq!(back.channels[2].mixer_track,p.channels[2].mixer_track);
+            assert_eq!(back.patterns,p.patterns);
+            p=back;
+        }
+    }
+
+    #[test]
+    fn replaced_generator_survives_first_save_and_second_save() {
+        let mut file = create(&new_project()).unwrap();
+        let mut p = load(&file).unwrap();
+        let original = p.channels[0].clone();
+        for plugin in [Some("Fruity Wrapper"), Some("Sytrus"), None] {
+            let c = &mut p.channels[0];
+            c.kind = if plugin.is_some() { ChannelKind::Plugin } else { ChannelKind::Sampler };
+            c.plugin = plugin.map(str::to_owned);
+            c.plugin_state = plugin.map(|_| vec![1, 2, 3, 4]);
+            let expected = c.clone();
+            apply(&p, &mut file).unwrap();
+            let back = load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap();
+            assert_eq!(back.channels[0].kind, expected.kind);
+            assert_eq!(back.channels[0].plugin.as_deref().filter(|s|!s.is_empty()), plugin);
+            assert_eq!(back.channels[0].plugin_state, expected.plugin_state);
+            assert_eq!(back.channels[0].mixer_track, original.mixer_track);
+            assert_eq!(back.patterns, p.patterns);
+            let bytes = file.to_bytes().unwrap();
+            apply(&back, &mut file).unwrap();
+            assert_eq!(file.to_bytes().unwrap(), bytes);
+            p = back;
+        }
     }
 
     /// A sampler channel's settings that Lemon Sampler edits are saved (spec: plugins/lemon-sampler.md §7): a block
@@ -4744,7 +4548,6 @@ mod tests {
             gate: 499.0 / 997.0,
             shift: 0.25,
             swing: 0.5,
-            truncate_swing: true,
             cut: 7,
             cut_by: 9,
             root: 48,
@@ -4951,6 +4754,95 @@ mod tests {
     /// Track switches (event 236 flags), the main volume (record 0 at 0x4000) and the main pitch (event 80) are
     /// written by `create` and `apply` and read back (spec: flp/layouts.md, audio/mixer.md, audio/voice-levels.md).
     #[test]
+    fn knobs_bypass_roundtrip() {
+        let mut p=new_project();p.arrangements.push(default_arrangement());p.mixer=(0..3).map(MixerTrack::new).collect();
+        p.mixer[1].strip_bypassed=true;p.mixer[1].strip=[12345;7];p.mixer[1].slots_enabled=true;
+        let f=create(&p).unwrap();let back=load(&FlpFile::parse(&f.to_bytes().unwrap()).unwrap()).unwrap();
+        assert!(back.mixer[1].strip_bypassed);assert!(!back.mixer[2].strip_bypassed);assert!(back.mixer[1].slots_enabled);assert_eq!(back.mixer[1].strip[0],12345);
+        let mut old=f;old.chunks.retain(|c|c.tag!=STRIP_BYPASS_TAG);assert!(!load(&old).unwrap().mixer[1].strip_bypassed);
+    }
+ #[test]fn foreign_imports_have_neutral_layouts_and_explicit_lemon_layouts_survive(){
+  let mut project=new_project();project.arrangements.push(default_arrangement());project.mixer=(0..45).map(MixerTrack::new).collect();project.mixer[33].channel_layout=2;
+  let mut file=create(&project).unwrap();assert_eq!(load(&file).unwrap().mixer[33].channel_layout,2);
+  file.chunks.retain(|c|!matches!(&c.tag.0,b"LPCH"|b"LSKB"|b"LSCL"));
+  let foreign=load(&file).unwrap();assert!(foreign.mixer.iter().all(|t|t.channel_layout==0));
+  file.chunks.push(Chunk{tag:Tag(*b"LPCH"),body:ChunkBody::Raw(vec![1,0,0,0,0])});
+  assert_eq!(load(&file).unwrap().mixer[33].channel_layout,2,"old Lemon migration retained");
+ }
+
+    #[test]
+    fn duplicated_imported_slot_controls_take_the_new_value() {
+        let loc=mixer_location(3,2);
+        let mut data=param_rec(MX_SLOT_MIX,MX_KIND_PARAM,loc,12800).to_vec();
+        data.extend(param_rec(MX_SLOT_MIX,MX_KIND_PARAM,loc,6400));
+        let untouched=param_rec(17,MX_KIND_PARAM,loc,1234);data.extend(&untouched);
+        set_param_record(&mut data,loc,MX_SLOT_MIX,3200);
+        let values:Vec<_>=mixer_param_records(&data).filter(|r|r.1==MX_SLOT_MIX).map(|r|r.4).collect();
+        assert_eq!(values,vec![3200,3200]);assert_eq!(&data[data.len()-untouched.len()..],untouched);
+    }
+
+    #[test]
+    fn channel_layouts_roundtrip_and_legacy_vocal_range() {
+        let mut p=new_project();p.arrangements.push(default_arrangement());p.mixer=(0..45).map(MixerTrack::new).collect();
+        let mut f=create(&p).unwrap();f.chunks.retain(|c|c.tag!=CHANNEL_LAYOUT_TAG);
+        let old=load(&f).unwrap();
+        for m in &old.mixer {assert_eq!(m.is_vocal(),(32..=41).contains(&m.index));}
+        p.mixer=old.mixer;p.mixer[32].channel_layout=0;p.mixer[6].channel_layout=2;p.mixer[6].name=Some("MIX BUS".into());
+        let f=create(&p).unwrap();let mut back=load(&FlpFile::parse(&f.to_bytes().unwrap()).unwrap()).unwrap();
+        assert_eq!(back.mixer[32].channel_layout,0);assert!(back.mixer[6].is_vocal());assert!(!back.mixer[42].is_vocal());
+        back.mixer.swap(6,10);for (i,m) in back.mixer.iter_mut().enumerate(){m.index=i as u16;}let again=load(&create(&back).unwrap()).unwrap();assert!(again.mixer[10].is_vocal());assert!(!again.mixer[6].is_vocal());
+    }
+
+    #[test]
+    fn peak_eq_links_roundtrip(){
+        let mut p=new_project();p.arrangements.push(default_arrangement());p.mixer=(0..3).map(os_model::MixerTrack::new).collect();
+        p.peak_links.push(os_model::PeakLink{source:1,target:os_model::target::slot_param(2,0,4),base:0.6,depth:0.75,inverted:true,release_ms:150});
+        let mut file=create(&p).unwrap();assert_eq!(load(&file).unwrap().peak_links,p.peak_links);
+        p.peak_links.clear();apply(&p,&mut file).unwrap();assert!(load(&file).unwrap().peak_links.is_empty());
+    }
+
+    #[test]
+    fn snaptune_settings_roundtrip() {
+        let mut p=new_project();p.arrangements.push(default_arrangement());p.mixer=(0..44).map(os_model::MixerTrack::new).collect();
+        p.mixer[32].channel_layout=2;p.mixer[32].tune=[45678,9,2,1];p.mixer[32].tune_enabled=true;p.mixer[32].tune_learn=123;
+        let mut file=create(&p).unwrap();let back=load(&file).unwrap();
+        assert_eq!(back.mixer[32].tune,[45678,9,2,1]);assert_eq!(back.mixer[32].tune_learn,0);assert!(back.mixer[32].tune_enabled);assert!(!back.mixer[31].tune_enabled);
+        assert_eq!(back.mixer[31].tune,[0;4]);assert!(back.mixer[32].is_vocal());
+        p.mixer.swap(32,5);for(i,m)in p.mixer.iter_mut().enumerate(){m.index=i as u16;}
+        apply(&p,&mut file).unwrap();assert_eq!(load(&file).unwrap().mixer[5].tune,[45678,9,2,1]);
+    }
+
+    #[test]
+    fn native_strip_roundtrip_and_edit() {
+        let mut p=new_project();
+        p.arrangements.push(default_arrangement());
+        p.mixer=vec![MixerTrack::new(0),MixerTrack::new(1),MixerTrack::new(2)];
+        p.mixer[1].strip=[24000,42000,12345,23456,34567,5,3];
+        p.mixer[1].deess=Some(23456);
+        let f=create(&p).unwrap();
+        let mut f=FlpFile::parse(&f.to_bytes().unwrap()).unwrap();
+        let mut loaded=load(&f).unwrap();
+        assert_eq!(loaded.mixer[1].deess,Some(23456));
+        loaded.mixer[1].deess=Some(0);
+        assert_eq!(loaded.mixer[1].strip,[24000,42000,12345,23456,34567,5,3]);
+        loaded.mixer[1].strip=[0,5000,65535,65535,65535,2,1];
+        apply(&loaded,&mut f).unwrap();
+        assert_eq!(load(&f).unwrap().mixer[1].strip,[0,5000,65535,65535,65535,2,1]);
+        assert_eq!(load(&f).unwrap().mixer[1].deess,Some(0));
+        loaded.mixer[1].deess=None;
+        loaded.mixer[1].strip=[0;7];
+        apply(&loaded,&mut f).unwrap();
+        assert!(!f.chunks.iter().any(|c|c.tag==STRIP_TAG));
+        let mut legacy=vec![1];legacy.extend(1u16.to_le_bytes());legacy.extend(123u16.to_le_bytes());legacy.extend(456u16.to_le_bytes());
+        f.chunks.push(Chunk{tag:STRIP_TAG,body:ChunkBody::Raw(legacy)});
+        assert_eq!(load(&f).unwrap().mixer[1].strip,[123,456,0,0,0,0,0]);
+        f.chunks.retain(|c|c.tag!=STRIP_TAG);
+        let mut legacy=vec![2];legacy.extend(1u16.to_le_bytes());
+        for v in [1u16,2,3,4,5,2] {legacy.extend(v.to_le_bytes());}
+        f.chunks.push(Chunk{tag:STRIP_TAG,body:ChunkBody::Raw(legacy)});
+        assert_eq!(load(&f).unwrap().mixer[1].strip,[1,2,3,4,5,2,0]);
+    }
+    #[test]
     fn mixer_switches_main_volume_and_pitch_round_trip() {
         use os_model::MixerTrack;
         let mut p = new_project();
@@ -4959,6 +4851,8 @@ mod tests {
         p.mixer[17].routes.clear();
         p.mixer[1].polarity = true;
         p.mixer[2].swap = true;
+        p.mixer[2].separator = true;
+        p.mixer[2].separator_name = Some("Drums".into());
         p.mixer[3].slots_enabled = false;
         p.main_volume = Some(6400);
         p.main_pitch = Some(-300);
@@ -4969,6 +4863,10 @@ mod tests {
         assert_eq!([flags(&file, 1), flags(&file, 2), flags(&file, 3), flags(&file, 4)], [0x4D, 0x4E, 0x48, 0x4C]);
         let mut edited = back.clone();
         edited.mixer[1].polarity = false;
+        edited.mixer[2].separator = false;
+        edited.mixer[2].separator_name = None;
+        edited.mixer[4].separator = true;
+        edited.mixer[4].separator_name = Some("Vocals".into());
         edited.mixer[3].slots_enabled = true;
         edited.mixer[4].swap = true;
         edited.mixer[4].enabled = false;
@@ -4988,55 +4886,6 @@ mod tests {
         let at = ev.iter().position(|e| e.id == id::MAIN_PITCH).unwrap();
         assert_eq!([ev[at - 2].id, ev[at - 1].id], [id::TEMPO, id::CURRENT_PATTERN]);
         assert_eq!(load(&plain).unwrap().main_pitch, Some(250));
-    }
-
-    /// The track menu's Separator (flag 0x0400), Dock to (0x00C0) and Allow threaded processing (0x0010) are written by
-    /// `create` and `apply` and read back; the last ("current") track keeps the master's docking (spec: flp/layouts.md
-    /// "A mixer track's record (event 236)", ui/mixer.md §6.1).
-    #[test]
-    fn mixer_separator_docking_and_threading_round_trip() {
-        use os_model::{MixerTrack, DOCK_LEFT, DOCK_MIDDLE, DOCK_RIGHT};
-        let mut p = new_project();
-        p.arrangements.push(default_arrangement());
-        p.mixer = (0..10).map(MixerTrack::new).collect();
-        p.mixer[9].routes.clear();
-        p.mixer[1].separator = true;
-        p.mixer[2].dock = DOCK_LEFT;
-        p.mixer[3].dock = DOCK_RIGHT;
-        p.mixer[4].threaded = false;
-        let mut file = FlpFile::parse(&create(&p).unwrap().to_bytes().unwrap()).unwrap();
-        let rec = |f: &FlpFile, t: usize| {
-            let d = events_of(f).unwrap().iter().filter(|e| e.id == id::MX_FLAGS).nth(t).unwrap().data().unwrap().to_vec();
-            (d[4], d[5])
-        };
-        // As FL saves them (OpenStudio-RE out/exp/mxm): inserts 0x4C, a separator 0x04 in the next byte.
-        assert_eq!([rec(&file, 0), rec(&file, 1), rec(&file, 2), rec(&file, 3), rec(&file, 4), rec(&file, 9)], [
-            (0x0C, 0),
-            (0x4C, 0x04),
-            (0x0C, 0),
-            (0x8C, 0),
-            (0x5C, 0),
-            (0x0C, 0)
-        ]);
-        let back = load(&file).unwrap();
-        assert_eq!(back.mixer, p.mixer);
-        assert_eq!((back.mixer[0].dock, back.mixer[9].dock), (DOCK_LEFT, DOCK_MIDDLE));
-        let mut edited = back.clone();
-        edited.mixer[1].separator = false;
-        edited.mixer[5].separator = true;
-        edited.mixer[3].dock = DOCK_MIDDLE;
-        edited.mixer[4].threaded = true;
-        edited.mixer[6].threaded = false;
-        apply(&edited, &mut file).unwrap();
-        let again = load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap();
-        assert_eq!(again.mixer, edited.mixer);
-        assert_eq!([rec(&file, 1), rec(&file, 3), rec(&file, 4), rec(&file, 5), rec(&file, 6)], [
-            (0x4C, 0),
-            (0x4C, 0),
-            (0x4C, 0),
-            (0x4C, 0x04),
-            (0x5C, 0)
-        ]);
     }
 
     /// Song or pattern mode (event 9, one byte right after 67; spec: flp/engine-events.md "Project"): `create` writes it
@@ -5065,138 +4914,6 @@ mod tests {
         }
     }
 
-    /// Audio and instrument tracks (track record bytes 49..61; spec: flp/events/playlist.md): a new track is unlinked
-    /// (kind 0, two −1s), and links are written, read and patched in place as the original saved them (Assign to new
-    /// Audio track on Insert 3: kind 1, mixer 3; Assign to new instrument track on the second channel: kind 3, channel 1).
-    #[test]
-    fn track_links_round_trip() {
-        let reparse = |f: &FlpFile| FlpFile::parse(&f.to_bytes().unwrap()).unwrap();
-        let mut p = new_project();
-        p.arrangements.push(default_arrangement());
-        let file = reparse(&create(&p).unwrap());
-        let rec = events_of(&file).unwrap().iter().find(|e| e.id == id::PL_TRACK).and_then(|e| e.data()).unwrap().to_vec();
-        assert_eq!(rec[49..61], [0, 0, 0, 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
-        let mut q = load(&file).unwrap();
-        assert!(q.arrangements[0].tracks.iter().all(|t| t.link.is_none()));
-
-        let mut file = file;
-        q.arrangements[0].tracks[0].link = TrackLink::audio(3);
-        q.arrangements[0].tracks[1].link = TrackLink::instrument(1);
-        q.arrangements[0].tracks[2].link = TrackLink { kind: 3, mixer: Some(24), channel: Some(198) };
-        apply(&q, &mut file).unwrap();
-        let file = reparse(&file);
-        let recs: Vec<Vec<u8>> = events_of(&file).unwrap().iter().filter(|e| e.id == id::PL_TRACK).take(3).map(|e| e.data().unwrap().to_vec()).collect();
-        assert_eq!(recs[0][49..61], [1, 0, 0, 0, 3, 0, 0, 0, 0xff, 0xff, 0xff, 0xff]);
-        assert_eq!(recs[1][49..61], [3, 0, 0, 0, 0xff, 0xff, 0xff, 0xff, 1, 0, 0, 0]);
-        assert_eq!(recs[1][..49], rec[..49].iter().enumerate().map(|(k, &b)| if k == 0 { 2 } else { b }).collect::<Vec<u8>>()[..]);
-        let back = load(&file).unwrap();
-        let links: Vec<TrackLink> = back.arrangements[0].tracks.iter().take(4).map(|t| t.link).collect();
-        assert_eq!(links, [TrackLink::audio(3), TrackLink::instrument(1), TrackLink { kind: 3, mixer: Some(24), channel: Some(198) }, TrackLink::NONE]);
-        let made = reparse(&create(&back).unwrap());
-        assert_eq!(load(&made).unwrap().arrangements[0].tracks[0].link, TrackLink::audio(3), "a new file writes them too");
-    }
-
-    /// Performance mode (event 31, after 100 and 40) and each track's Performance settings (track record u32s at 22..46;
-    /// spec: ui/performance-mode.md §5): written, read, patched in place, and added behind 40 when the file has none.
-    #[test]
-    fn performance_mode_round_trip() {
-        let reparse = |f: &FlpFile| FlpFile::parse(&f.to_bytes().unwrap()).unwrap();
-        let mut p = new_project();
-        p.arrangements.push(default_arrangement());
-        (p.current_arrangement, p.fast_declick, p.performance) = (Some(0), Some(false), Some(false));
-        let file = reparse(&create(&p).unwrap());
-        let ev = events_of(&file).unwrap();
-        let at = ev.iter().position(|e| e.id == id::CURRENT_ARRANGEMENT).unwrap();
-        assert_eq!((ev[at + 1].id, ev[at + 2].id, int(&ev[at + 2])), (id::FAST_DECLICK, id::PERFORMANCE, 0));
-        // A new track's record holds the defaults: Trigger sync 4 beats (5 at 30), Tolerant (1 at 38).
-        let rec = ev.iter().find(|e| e.id == id::PL_TRACK).and_then(|e| e.data()).unwrap();
-        assert_eq!((rec[30], rec[38], rec[22..30].iter().all(|&b| b == 0)), (5, 1, true));
-        let mut q = load(&file).unwrap();
-        assert_eq!((q.performance, q.arrangements[0].tracks[0].perf), (Some(false), PerfSettings::default()));
-
-        let mut file = file;
-        q.performance = Some(true);
-        let perf = PerfSettings { motion: 6, press: 3, trigger_sync: 0, queue: true, tolerant: false, position_sync: 6 };
-        q.arrangements[0].tracks[2].perf = perf;
-        apply(&q, &mut file).unwrap();
-        let file = reparse(&file);
-        let ev = events_of(&file).unwrap();
-        assert_eq!(ev.iter().filter(|e| e.id == id::PERFORMANCE).count(), 1);
-        assert_eq!((ev[at + 2].id, int(&ev[at + 2])), (id::PERFORMANCE, 1), "in place");
-        let rec = ev.iter().filter(|e| e.id == id::PL_TRACK).nth(2).and_then(|e| e.data()).unwrap();
-        assert_eq!(rec[22..46], [6, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0]);
-        let back = load(&file).unwrap();
-        assert_eq!((back.performance, back.arrangements[0].tracks[2].perf, back.arrangements[0].tracks[1].perf), (Some(true), perf, PerfSettings::default()));
-
-        // A file without event 31 gets it behind 40 when performance mode is switched on.
-        p.performance = None;
-        let mut file = reparse(&create(&p).unwrap());
-        let mut q = load(&file).unwrap();
-        assert_eq!(q.performance, None);
-        q.performance = Some(true);
-        apply(&q, &mut file).unwrap();
-        let file = reparse(&file);
-        let ev = events_of(&file).unwrap();
-        assert_eq!((ev[at + 1].id, ev[at + 2].id, int(&ev[at + 2])), (id::FAST_DECLICK, id::PERFORMANCE, 1));
-        assert_eq!(load(&file).unwrap().performance, Some(true));
-    }
-
-    /// A plugin's CPU switches (spec: flp/events/plugins.md §3, ui/plugin-window.md "CPU"): event 212's flags 0x40
-    /// (threaded processing allowed) and 0x20 (smart disable), for a channel plugin and a slot plugin alike, as FL 26
-    /// saved them (slot 0x160 -> smart disable off 0x140 -> threaded off 0x100; channel 0x151 -> 0x171 -> 0x131). Only
-    /// those two bits change; a slot's switches follow its plugin when it moves.
-    #[test]
-    fn plugin_cpu_switches_round_trip() {
-        use os_model::{MixerTrack, PluginCpu};
-        let mut p = new_project();
-        let mut ch = sampler(2, "Synth", 1);
-        ch.kind = ChannelKind::Plugin;
-        (ch.plugin, ch.plugin_state) = (Some(crate::wrapper::WRAPPER.into()), Some(vec![10, 0, 0, 0]));
-        p.channels.push(ch);
-        p.arrangements.push(default_arrangement());
-        p.mixer = (0..18).map(MixerTrack::new).collect();
-        p.mixer[17].routes.clear();
-        let limiter = || Some(SlotPlugin { id: os_model::Id::NONE, name: "Fruity Limiter".into(), state: vec![1, 2] });
-        p.mixer[2].slots[3] = limiter();
-        p.mixer[2].slots[4] = limiter();
-        p.mixer[2].slot_cpu[4] = PluginCpu { threaded: false, smart_disable: true };
-        let mut file = create(&p).unwrap();
-        let recs = |file: &FlpFile| -> Vec<u8> {
-            events_of(file).unwrap().iter().filter(|e| e.id == id::PLUGIN_REC).map(|e| e.data().unwrap()[16]).collect()
-        };
-        // The channel's record, then the slots' (a new slot plugin: 0x140 with its switches).
-        assert_eq!(recs(&file), [0x50, 0x40, 0x20]);
-        let back = load(&file).unwrap();
-        assert_eq!(back.channels[2].misc.cpu, PluginCpu::default());
-        assert_eq!(back.mixer[2].slot_cpu[3..5], [PluginCpu::default(), PluginCpu { threaded: false, smart_disable: true }]);
-        let bytes = file.to_bytes().unwrap();
-        apply(&back, &mut file).unwrap();
-        assert_eq!(file.to_bytes().unwrap(), bytes, "untouched");
-
-        // Patched in place: FL's own bytes for a channel (0x151, window open) and a slot.
-        let mut edited = back.clone();
-        edited.channels[2].misc.cpu.smart_disable = true;
-        edited.mixer[2].slot_cpu[3].smart_disable = true;
-        edited.mixer[2].slot_cpu[3].threaded = false;
-        apply(&edited, &mut file).unwrap();
-        let count = events_of(&file).unwrap().len();
-        assert_eq!(recs(&file), [0x70, 0x20, 0x20]);
-        let again = load(&file).unwrap();
-        assert_eq!(again.channels[2].misc.cpu, edited.channels[2].misc.cpu);
-        assert_eq!(again.mixer[2].slot_cpu, edited.mixer[2].slot_cpu);
-        assert_eq!(count, FlpFile::parse(&bytes).map(|f| events_of(&f).unwrap().len()).unwrap(), "no event added");
-
-        // Moved, the switches go with the plugin.
-        let mut moved = again.clone();
-        moved.mixer[2].slots.swap(3, 4);
-        moved.mixer[2].slot_cpu.swap(3, 4);
-        moved.mixer[2].slots[4].as_mut().unwrap().state = vec![9];
-        apply(&moved, &mut file).unwrap();
-        let last = load(&file).unwrap();
-        assert_eq!(last.mixer[2].slot_cpu, moved.mixer[2].slot_cpu);
-        assert_eq!(last.mixer[2].slot_cpu[4], PluginCpu { threaded: false, smart_disable: true });
-    }
-
     /// The initial values (event 216; spec: ui/settings-choices.md "Advanced: Initialize controls automatically",
     /// flp/engine-events.md "Event 216"): `create` writes the event in every project, empty without values; the records
     /// read back, one Lemon Studio doesn't understand (a plugin parameter's) byte for byte; they are not read into the
@@ -5216,7 +4933,7 @@ mod tests {
         p.arrangements.push(default_arrangement());
         p.mixer = (0..18).map(MixerTrack::new).collect();
         p.mixer[17].routes.clear();
-        p.mixer[2].slots[3] = Some(SlotPlugin { id: os_model::Id::NONE, name: "Fruity Limiter".into(), state: vec![] });
+        p.mixer[2].slots[3] = Some(SlotPlugin { name: "Fruity Limiter".into(), state: vec![] });
         p.mixer[2].slot_mix[3] = 0.25;
         p.groups = vec!["Unsorted".into()];
         let plugin = InitControl { head: 0x0102_0304, target: target::channel_param(1, 7), value: -123_456 };
@@ -5811,8 +5528,8 @@ mod tests {
         m.pan = Some(-0.25);
         m.routes = vec![0, 5];
         m.send_levels = vec![(5, 0.5)];
-        m.slots[0] = Some(SlotPlugin { id: os_model::Id::NONE, name: "Fruity Parametric EQ 2".into(), state: vec![1, 2, 3] });
-        m.slots[3] = Some(SlotPlugin { id: os_model::Id::NONE, name: crate::wrapper::WRAPPER.into(), state: vec![10, 0, 0, 0] });
+        m.slots[0] = Some(SlotPlugin { name: "Fruity Parametric EQ 2".into(), state: vec![1, 2, 3] });
+        m.slots[3] = Some(SlotPlugin { name: crate::wrapper::WRAPPER.into(), state: vec![10, 0, 0, 0] });
         m.slot_on[3] = false;
         m.slot_mix[3] = 0.5;
         p.mixer[0].enabled = false;
@@ -5828,41 +5545,10 @@ mod tests {
         assert_eq!((rec[0], rec[4], rec[17]), (2, 3, 0x01));
         let mut edited = back.clone();
         edited.mixer[2].slots.swap(0, 9);
-        edited.mixer[4].slots[1] = Some(SlotPlugin { id: os_model::Id::NONE, name: "Fruity Limiter".into(), state: vec![] });
+        edited.mixer[4].slots[1] = Some(SlotPlugin { name: "Fruity Limiter".into(), state: vec![] });
         edited.mixer[2].slot_mix[9] = 0.75;
         apply(&edited, &mut file).unwrap();
         assert_eq!(load(&file).unwrap().mixer, edited.mixer);
-    }
-
-    /// A track's audio input and output, record source and monitor mode are events 154, 147, 165 and 166 (spec:
-    /// audio/track-io.md §1.6): written for a new project, read back, and changed in place; arming is not saved.
-    #[test]
-    fn track_inputs_and_outputs_are_saved() {
-        use os_model::MixerTrack;
-        let mut p = new_project();
-        p.arrangements.push(default_arrangement());
-        p.mixer = (0..18).map(MixerTrack::new).collect();
-        p.mixer[17].routes.clear();
-        p.mixer[1].audio_in = 2;
-        p.mixer[1].audio_out = 0;
-        p.mixer[0].audio_out = -1;
-        p.mixer[3].monitor = os_model::MONITOR_ON;
-        p.mixer[3].rec_source = os_model::REC_EXTERNAL;
-        p.mixer[3].armed = true;
-        let mut file = FlpFile::parse(&create(&p).unwrap().to_bytes().unwrap()).unwrap();
-        let back = load(&file).unwrap();
-        assert_eq!(back.mixer, p.mixer);
-        assert!(!back.mixer[3].armed);
-        let at = |f: &FlpFile, eid: u8, t: usize| int(events_of(f).unwrap().iter().filter(|e| e.id == eid).nth(t).unwrap()) as i32;
-        assert_eq!((at(&file, id::MX_INPUT, 1), at(&file, id::MX_OUTPUT, 1), at(&file, id::MX_OUTPUT, 0)), (2, 0, -1));
-        assert_eq!((at(&file, id::MX_MONITOR, 3), at(&file, id::MX_REC_SOURCE, 3)), (3, 0));
-        let mut edited = back.clone();
-        edited.mixer[1].audio_in = -1;
-        edited.mixer[5].audio_out = 1;
-        edited.mixer[5].monitor = os_model::MONITOR_OFF;
-        apply(&edited, &mut file).unwrap();
-        assert_eq!(load(&file).unwrap().mixer, edited.mixer);
-        assert_eq!((at(&file, id::MX_INPUT, 1), at(&file, id::MX_OUTPUT, 5), at(&file, id::MX_MONITOR, 5)), (-1, 1, 0));
     }
 
     /// The last stored track is the "current" track: its slot plugins and records use track 501. Added tracks go
@@ -5874,7 +5560,7 @@ mod tests {
         p.arrangements.push(default_arrangement());
         p.mixer = (0..18).map(MixerTrack::new).collect();
         p.mixer[17].routes.clear();
-        p.mixer[17].slots[9] = Some(SlotPlugin { id: os_model::Id::NONE, name: "Fruity Limiter".into(), state: vec![7; 4] });
+        p.mixer[17].slots[9] = Some(SlotPlugin { name: "Fruity Limiter".into(), state: vec![7; 4] });
         p.mixer[17].slot_mix[9] = 0.25;
         p.mixer[17].volume = Some(0.5);
         let mut file = FlpFile::parse(&create(&p).unwrap().to_bytes().unwrap()).unwrap();
@@ -5893,7 +5579,7 @@ mod tests {
         grown.mixer.extend((17..20).map(MixerTrack::new));
         grown.mixer.push(current);
         grown.mixer[18].name = Some("New".into());
-        grown.mixer[18].slots[0] = Some(SlotPlugin { id: os_model::Id::NONE, name: "Fruity Parametric EQ 2".into(), state: vec![1, 2] });
+        grown.mixer[18].slots[0] = Some(SlotPlugin { name: "Fruity Parametric EQ 2".into(), state: vec![1, 2] });
         grown.mixer[19].routes = vec![0, 18];
         apply(&grown, &mut file).unwrap();
         let back = load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap();
@@ -5931,7 +5617,7 @@ mod tests {
         p.arrangements.push(default_arrangement());
         p.mixer = (0..18).map(MixerTrack::new).collect();
         p.mixer[17].routes.clear();
-        let fx = |name: &str, state: u8| Some(SlotPlugin { id: os_model::Id::NONE, name: name.into(), state: vec![state; 4] });
+        let fx = |name: &str, state: u8| Some(SlotPlugin { name: name.into(), state: vec![state; 4] });
         p.mixer[3].slots[0] = fx("Fruity Limiter", 3);
         p.mixer[4].slots[0] = fx("Fruity Limiter", 4);
         p.mixer[5].slots[2] = fx("Fruity Delay 3", 5);
@@ -6054,30 +5740,6 @@ mod tests {
         assert_eq!(events_of(&file).unwrap().iter().filter(|e| e.id == id::MX_ICON).count(), 1);
     }
 
-    /// A channel's icon number (event 155) is read into the rack settings; a new channel's block holds 0 (none), and a
-    /// save keeps the file's number (spec: flp/events/channels.md, flp/events/mixer.md "Icon numbers").
-    #[test]
-    fn channel_icon_is_read_and_kept() {
-        let mut p = new_project();
-        let mut ch = sampler(2, "Lead", 3);
-        ch.kind = ChannelKind::Plugin;
-        ch.plugin = Some(crate::wrapper::WRAPPER.into());
-        p.channels.push(ch);
-        let mut file = create(&p).unwrap();
-        assert!(load(&file).unwrap().channels.iter().all(|c| c.rack.icon == 0));
-        let ev = events_of_mut(&mut file).unwrap();
-        let start = ev.iter().rposition(|e| e.id == id::CH_START).unwrap();
-        let at = start + ev[start..].iter().position(|e| e.id == id::PLUGIN_ICON).unwrap();
-        ev[at] = Event::new(id::PLUGIN_ICON, Value::U32(30));
-        let back = load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap();
-        assert_eq!(back.channels[2].rack.icon, 30);
-        let mut edited = back.clone();
-        edited.channels[2].name = Some("Vocal".into());
-        apply(&edited, &mut file).unwrap();
-        let again = load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap();
-        assert_eq!((again.channels[2].rack.icon, again.channels[2].name.as_deref()), (30, Some("Vocal")));
-    }
-
     #[test]
     fn unsaved_parts_name_what_a_created_file_lacks() {
         use os_model::MixerTrack;
@@ -6089,26 +5751,6 @@ mod tests {
         assert!(unsaved_parts(&p, &file).is_empty(), "default mixer: nothing is lost");
         p.mixer[1].volume = Some(0.5);
         assert_eq!(unsaved_parts(&p, &file), vec!["mixer settings"]);
-    }
-
-    /// The mixer is stored after the playlist: a project with an arrangement keeps its mixer through `create` (a
-    /// new project saved from scratch), one without has none in its file and `unsaved_parts` says so.
-    #[test]
-    fn create_stores_the_mixer_after_the_playlist() {
-        use os_model::MixerTrack;
-        let mut p = new_project();
-        p.mixer = (0..4).map(MixerTrack::new).collect();
-        p.mixer[2].name = Some("Bass".into());
-        p.mixer[2].volume = Some(0.5);
-        let bare = create(&p).unwrap();
-        assert!(load(&bare).unwrap().mixer.is_empty());
-        assert_eq!(unsaved_parts(&p, &bare), vec!["mixer settings"]);
-        p.arrangements.push(default_arrangement());
-        let file = create(&p).unwrap();
-        let back = load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap();
-        assert_eq!(back.mixer.len(), 4);
-        assert_eq!((back.mixer[2].name.as_deref(), back.mixer[2].volume), (Some("Bass"), Some(0.5)));
-        assert!(unsaved_parts(&p, &file).is_empty());
     }
 
 
@@ -6139,6 +5781,7 @@ mod tests {
         let (mut lists, mut autos) = (0, 0);
         for path in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
             let file = FlpFile::parse(&std::fs::read(path).unwrap()).unwrap();
+            if matches!(load(&file),Err(ProjectError::LegacyLayout(_))){continue;}
             for e in events_of(&file).unwrap() {
                 match e.id {
                     id::ARR_CLIPS => {
@@ -6160,73 +5803,6 @@ mod tests {
         eprintln!("{lists} clip lists, {autos} automation records re-encode exactly");
     }
 
-    /// The LFO's fields and the range come back from a record as stored, and an edited LFO is written where it was read
-    /// from, every other byte kept (spec: flp/layouts.md "An automation clip's record", audio/automation.md "The LFO").
-    #[test]
-    fn automation_lfo_fields_round_trip() {
-        // A record as FL writes one: two curve points, the LFO on, adding, amount 38, two envelope points.
-        let mut a = new_automation(2, os_model::target::channel(0, 0), 0.5, 4.0);
-        a.lfo = ClipLfo {
-            switch: -1,
-            amount: 38,
-            mode: 1,
-            speed: 40898,
-            tension: 32,
-            skew: -128,
-            pulse_width: 64,
-            phase: 7,
-            flags: 3,
-            envelope: vec![os_model::clip_lfo::envelope_point(0.0, 0.0), os_model::clip_lfo::envelope_point(2.0, 1.0)],
-        };
-        let d = encode_automation(&a);
-        assert_eq!(d.len(), 109 + 24 * 2 + 24 * 2, "109 + 24 n + 24 m");
-        let o = 21 + 48;
-        assert_eq!((le_i32(&d, 4), d[8]), (38, 1));
-        assert_eq!(le_i32(&d, o + 44), 2, "the envelope's count");
-        let v = o + 48 + 48;
-        assert_eq!((d[v], le_i32(&d, v + 4), le_i32(&d, v + 8), le_i32(&d, v + 20)), (3, -1, -1, 40898));
-        assert_eq!((le_i32(&d, v + 24), le_i32(&d, v + 28), le_i32(&d, v + 32), le_i32(&d, v + 36)), (32, -128, 64, 7));
-        let back = decode_automation(2, &d).unwrap();
-        assert_eq!(back.lfo, a.lfo);
-        assert_eq!(back.points, a.points);
-        assert_eq!(encode_automation(&back), d, "decoded and encoded again: the same bytes");
-        // Bytes the model does not know stay, and an edit changes only its own field.
-        let mut d2 = d.clone();
-        d2[o + 1] = 0x55;
-        d2.extend([9, 8, 7]);
-        let mut back = decode_automation(2, &d2).unwrap();
-        assert_eq!(encode_automation(&back), d2);
-        back.lfo.speed = 26259;
-        let e = encode_automation(&back);
-        assert_eq!(le_i32(&e, v + 20), 26259);
-        assert!(e.iter().zip(&d2).enumerate().all(|(i, (x, y))| x == y || (v + 20..v + 24).contains(&i)));
-        // A record whose tail is cut short keeps it while the LFO is at its defaults; an LFO switched on gets the
-        // new clip's layout.
-        let mut short = Automation { header: vec![0; 21], tail: vec![1, 2, 3], ..new_automation(2, 0, 0.5, 4.0) };
-        short.lfo = ClipLfo::default();
-        assert_eq!(&encode_automation(&short)[21 + 48..], &[1, 2, 3]);
-        short.lfo.switch = -1;
-        let e = encode_automation(&short);
-        assert_eq!(e.len(), 109 + 48 + 24);
-        assert_eq!(decode_automation(2, &e).unwrap().lfo, short.lfo);
-    }
-
-    /// A new clip's record is FL's: amount 64, the LFO off with its flags 1, speed 45819, one envelope point at 1.
-    #[test]
-    fn a_new_clip_has_the_default_lfo() {
-        let a = new_automation(2, os_model::target::channel(0, 0), 0.5, 4.0);
-        let d = encode_automation(&a);
-        assert_eq!(d.len(), 109 + 48 + 24);
-        let t = &d[21 + 48..];
-        assert_eq!(&t[36..48], &[5, 0, 0, 0, 3, 0, 0, 0, 1, 0, 0, 0]);
-        assert_eq!(f64::from_le_bytes(t[56..64].try_into().unwrap()), 1.0);
-        assert_eq!(&t[72..80], &[1, 0, 0, 0, 0, 0, 0, 0]);
-        assert_eq!(&t[92..96], &45819i32.to_le_bytes());
-        assert_eq!((le_i32(&d, 4), d[8]), (64, 0));
-        assert_eq!(decode_automation(2, &d).unwrap(), Automation { targets: Vec::new(), ..a });
-        assert_eq!(untargeted_automation(2, 0.5, 4.0).lfo.mode, 1);
-    }
-
     /// Files of FL 24.2 to 25 hold 80-byte clip records: read with their fields, written back at 80 bytes with 0
     /// at bytes 76..79; 88-byte lists are still told apart (spec: flp/layouts.md, "Playlist clip records").
     #[test]
@@ -6241,22 +5817,6 @@ mod tests {
         assert_eq!((back[1].position, back[1].length, back[1].track), (768, 96, 0));
         assert_eq!(encode_clips(&back, CLIP_LEN_25), d);
         assert_eq!(list_clip_len(&encode_clips(&back, CLIP_LEN)), Some(CLIP_LEN));
-    }
-
-    /// Lists of older files, 60-byte (FL 21 to 24.1) and 32-byte (up to FL 20) records, are told apart and written
-    /// back at their length; 32-byte records have no id (spec: flp/layouts.md, "How to tell the generation").
-    #[test]
-    fn older_clip_records_are_read_at_their_length() {
-        let a = Clip::new(384, 288, 2, ClipSource::Pattern(1));
-        let b = Clip::new(768, 96, 0, ClipSource::Pattern(2));
-        for len in [CLIP_LEN_21, CLIP_LEN_20] {
-            let d = encode_clips(&[a.clone(), b.clone()], len);
-            assert_eq!(d.len(), 2 * len);
-            assert_eq!(list_clip_len(&d), Some(len));
-            let back = decode_clips(&d, len);
-            assert_eq!((back[1].position, back[1].length, back[1].track), (768, 96, 0));
-            assert_eq!(encode_clips(&back, len), d);
-        }
     }
 
     /// A new project's playlist (clips with windows, mute, markers) and automation clips are written by `create`,
@@ -6456,6 +6016,18 @@ mod tests {
     /// back; writing the same model again changes nothing; clearing them works (spec: flp/events/project-info.md,
     /// channels.md, patterns.md).
     #[test]
+    fn split_instrument_outputs_persist_and_clear() {
+        let mut model=new_project();
+        model.channels[0].misc.split_outputs=true;
+        let mut file=FlpFile::parse(&create(&model).unwrap().to_bytes().unwrap()).unwrap();
+        let mut reopened=load(&file).unwrap();
+        assert!(reopened.channels[0].misc.split_outputs);
+        reopened.channels[0].misc.split_outputs=false;
+        apply(&reopened,&mut file).unwrap();
+        assert!(!load(&file).unwrap().channels[0].misc.split_outputs);
+    }
+
+    #[test]
     fn rack_settings_round_trip() {
         let mut file = FlpFile::parse(&create(&new_project()).unwrap().to_bytes().unwrap()).unwrap();
         let mut m = load(&file).unwrap();
@@ -6567,8 +6139,7 @@ mod tests {
         assert_eq!(load(&file3).unwrap().info.url.as_deref(), Some("https://example.org"));
     }
 
-    /// Files saved by FL 11 and older hold 8-bit text (spec: flp/container.md "Text payloads"); saved, they are in the
-    /// current layout, whose text is UTF-16 (spec: flp/layouts.md "Converting to the newer layout").
+    /// Files saved by FL 11 and older hold 8-bit text (spec: flp/container.md "Text payloads").
     #[test]
     fn project_info_is_8_bit_in_old_files() {
         let mut p = new_project();
@@ -6578,16 +6149,13 @@ mod tests {
             if e.id == id::VERSION {
                 e.value = Value::var(b"11.1.1\0".to_vec());
             }
-            if e.id == id::TITLE {
-                e.value = Value::var(b"Caf\xe9\0".to_vec());
-            }
         }
         let mut m = load(&file).unwrap();
-        assert_eq!(m.info.title.as_deref(), Some("Caf\u{e9}"));
+        m.info.title = Some("Café".into());
         m.info.comments = Some("a\nb".into());
         apply(&m, &mut file).unwrap();
-        assert_eq!(event_data(&file, id::TITLE), Some(utf16z("Caf\u{e9}")));
-        assert_eq!(event_data(&file, id::COMMENTS), Some(utf16z("a\rb")));
+        assert_eq!(event_data(&file, id::TITLE), Some(b"Caf\xe9\0".to_vec()));
+        assert_eq!(event_data(&file, id::COMMENTS), Some(b"a\rb\0".to_vec()));
         assert_eq!(load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap().info, m.info);
     }
 
@@ -6781,9 +6349,6 @@ mod tests {
         let key = arr.markers.iter_mut().find(|m| m.kind == TimeMarker::KEY).unwrap();
         key.name = "C Major (Ionian)".into();
         key.scale = 0x52A;
-        // The original's Default and Other Arabic on D (events 46, 45 and 168 as it saved them).
-        arr.markers.push(TimeMarker::key(1200, 2, -1));
-        arr.markers.push(TimeMarker::key(1300, 2, 15));
         p.arrangements.push(arr);
         let mut file = FlpFile::parse(&create(&p).unwrap().to_bytes().unwrap()).unwrap();
         let back = load(&file).unwrap();
@@ -6791,11 +6356,6 @@ mod tests {
         let ev = events_of(&file).unwrap();
         let scales: Vec<u32> = ev.iter().filter(|e| e.id == id::MARKER_SCALE).map(int).collect();
         assert_eq!(scales.iter().filter(|&&v| v == 0x52A).count(), 1);
-        let of = |id: u8| ev.iter().filter(|e| e.id == id).map(int).collect::<Vec<u32>>();
-        let n = of(id::MARKER_POS).len();
-        assert_eq!(of(id::MARKER_ROOT)[n - 2..], [2, 2]);
-        assert_eq!(of(id::MARKER_FLAG)[n - 2..], [1, 0]);
-        assert_eq!(of(id::MARKER_SCALE_INDEX)[n - 2..], [0xFFFF_FFFF, 15]);
         let pos: Vec<u32> = ev.iter().filter(|e| e.id == id::MARKER_POS).map(int).collect();
         assert!(pos.contains(&(u32::from(TimeMarker::PUNCH_OUT) << 24 | 96 * 9)), "{pos:x?}");
 
@@ -6896,71 +6456,6 @@ mod tests {
         assert_eq!(again.automations[1].target().map(decode), Some(Target::SlotParam(1, 0, 8)));
     }
 
-    /// The channel rack's swing knob, mixer box and LED as targets (spec: flp/events/automation.md "Targets",
-    /// flp/engine-events.md "Event 216", "Channel rack records"; measured 2026-11-02): a clip on each is written as a 227
-    /// link with target 0x4000_0001, `channel << 16 | 8` or `channel << 16 | 7` and read back as it was, and their
-    /// initial values are 12-byte records in the controls' own units (swing 64 → 64, Insert 2 → 2, on → 1). Moving the
-    /// channels moves the channel targets with them.
-    #[test]
-    fn rack_control_automation_and_initial_values_round_trip() {
-        use os_model::target::{self, decode, Target};
-        let mut p = new_project();
-        for (i, name) in [(2u16, "Main swing"), (3, "Kick - Target mixer track"), (4, "Clap - Mute / solo")] {
-            p.channels.push(Channel { kind: ChannelKind::Automation, ..sampler(i, name, 0) });
-        }
-        let (swing, track, on) = (target::MAIN_SWING, target::channel(0, target::CHANNEL_MIXER_TRACK), target::channel(1, target::CHANNEL_ON));
-        p.automations.push(new_automation(2, swing, 0.5, 4.0));
-        p.automations.push(new_automation(3, track, 0.004, 4.0));
-        p.automations.push(new_automation(4, on, 1.0, 4.0));
-        let mut arr = default_arrangement();
-        arr.clips = (0..3).map(|k| Clip::new(0, 384, k, ClipSource::Channel(2 + k))).collect();
-        p.arrangements = vec![arr];
-        p.init_controls = [(track, 2), (on, 1), (swing, 64)].map(|(target, value)| InitControl { head: 0, target, value }).to_vec();
-        let mut file = FlpFile::parse(&create(&p).unwrap().to_bytes().unwrap()).unwrap();
-        let back = load(&file).unwrap();
-        assert_eq!(back.automations, p.automations);
-        assert_eq!(back.init_controls, p.init_controls);
-        let links = events_of(&file).unwrap().iter().filter(|e| e.id == id::AUTO_LINK).filter_map(|e| e.data()).map(|d| d[8..12].to_vec()).collect::<Vec<_>>();
-        assert_eq!(links, [[0x01, 0, 0, 0x40], [8, 0, 0, 0], [7, 0, 1, 0]]);
-        let data = event_data(&file, id::INIT_CONTROLS).unwrap();
-        assert_eq!(data, [[0u8; 4], [8, 0, 0, 0], [2, 0, 0, 0], [0; 4], [7, 0, 1, 0], [1, 0, 0, 0], [0; 4], [1, 0, 0, 0x40], [64, 0, 0, 0]].concat());
-        let read: Vec<Option<Target>> = back.automations.iter().map(|a| a.target().map(decode)).collect();
-        assert_eq!(read, [Some(Target::MainSwing), Some(Target::ChannelMixerTrack(0)), Some(Target::ChannelOn(1))]);
-        // The two sampler channels swapped: the mixer box's and the LED's targets follow, their control points too; the
-        // swing stays.
-        let mut m = back.clone();
-        m.patterns[0].controls = vec![ControlPoint::new(0, 0, target::CHANNEL_MIXER_TRACK, 2), ControlPoint::new(0, 1, target::CHANNEL_ON, 0)];
-        m.reorder_channels(&[1, 0, 2, 3, 4]);
-        assert_eq!(m.patterns[0].controls.iter().map(|c| c.kind).collect::<Vec<_>>(), [target::channel(1, 8), target::channel(0, 7)]);
-        apply(&m, &mut file).unwrap();
-        let again = load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap();
-        let read: Vec<Option<Target>> = again.automations.iter().map(|a| a.target().map(decode)).collect();
-        assert_eq!(read, [Some(Target::MainSwing), Some(Target::ChannelMixerTrack(1)), Some(Target::ChannelOn(0))]);
-    }
-
-    /// A clip on an effect inside a container (Lemon Studio's member targets: the container slot's parameter packing
-    /// the member's id and the item, spec plugins/patcher/README.md §4.2) is a slot parameter link like any other: up
-    /// to the last member's dry level, 0x7FFF, it is written and read back as it is.
-    #[test]
-    fn container_member_targets_round_trip() {
-        use os_model::target::{decode, member_item, slot_param, Target, MEMBER_DRY, MEMBER_WET};
-        let mut p = new_project();
-        for (i, name) in [(2u16, "Lemon Limiter in Container - Bus 1 - Ceiling"), (3, "Bus 1 - Lemon Delay dry")] {
-            p.channels.push(Channel { kind: ChannelKind::Automation, ..sampler(i, name, 0) });
-        }
-        let (param, dry) = (slot_param(1, 2, member_item(1, 4).unwrap()), slot_param(1, 2, member_item(15, MEMBER_DRY).unwrap()));
-        p.automations.push(new_automation(2, param, 0.5, 4.0));
-        p.automations.push(new_automation(3, dry, 0.25, 4.0));
-        p.automations[1].targets.push(slot_param(1, 2, member_item(15, MEMBER_WET).unwrap()));
-        let mut arr = default_arrangement();
-        arr.clips = vec![Clip::new(0, 384, 0, ClipSource::Channel(2)), Clip::new(0, 384, 1, ClipSource::Channel(3))];
-        p.arrangements = vec![arr];
-        let back = load(&FlpFile::parse(&create(&p).unwrap().to_bytes().unwrap()).unwrap()).unwrap();
-        assert_eq!(back.automations, p.automations);
-        assert_eq!(dry, 0x7042_FFFF);
-        assert_eq!(back.automations[0].target().map(decode), Some(Target::SlotParam(1, 2, 2048 + 4)));
-    }
-
     /// A clip with several targets has one link each: all are read in file order, an unchanged model writes the file
     /// back byte for byte, and changed targets patch, add or remove links; controller links stay as they are (spec:
     /// flp/events/automation.md "Event 227").
@@ -7006,51 +6501,6 @@ mod tests {
             assert_eq!(l[0], ctl, "the controller link is left alone");
             assert!(l[1..].iter().all(|d| d[2..4] == 2u16.to_le_bytes()));
         }
-        assert_eq!(back.controller_links, vec![os_model::ControllerLink::from_bytes(&ctl).unwrap()]);
-    }
-
-    /// Controller links are read in file order with their bytes as they are; a new file holds them; changed links patch
-    /// their events, new ones follow the last, links gone are removed, and the automation links stay (spec:
-    /// flp/events/automation.md "Controller links").
-    #[test]
-    fn controller_links_round_trip() {
-        use os_model::target::{mixer, slot_param, MIXER_VOLUME};
-        use os_model::ControllerLink;
-        let mut p = new_project();
-        p.channels.push(Channel { kind: ChannelKind::Automation, ..sampler(2, "Clip", 0) });
-        p.automations.push(new_automation(2, mixer(3, MIXER_VOLUME), 0.5, 4.0));
-        let mut odd = ControllerLink::new(0x7000 + 2 * 64 + 1, 2, slot_param(1, 0, 5));
-        odd.bytes[4..8].copy_from_slice(&0x000D_2000u32.to_le_bytes());
-        odd.formula = Some("1-Input*0.8-0.2".into());
-        p.controller_links = vec![ControllerLink::new(0x7000 + 64, 1, mixer(2, MIXER_VOLUME)), odd];
-        let file = FlpFile::parse(&create(&p).unwrap().to_bytes().unwrap()).unwrap();
-        let back = load(&file).unwrap();
-        assert_eq!(back.controller_links, p.controller_links);
-        assert_eq!(back.controller_links[0].output(), 1);
-        assert_eq!(back.controller_links[0].source_slot(), Some((1, 0)));
-        assert_eq!(back.controller_links[1].source_slot(), Some((2, 1)));
-        assert_eq!(os_model::target::decode(back.controller_links[1].target()), os_model::target::Target::SlotParam(1, 0, 5));
-        assert_eq!(back.automations[0].targets, vec![mixer(3, MIXER_VOLUME)]);
-        let bytes = file.to_bytes().unwrap();
-        let mut same = file.clone();
-        apply(&back, &mut same).unwrap();
-        assert_eq!(same.to_bytes().unwrap(), bytes, "unchanged: byte for byte");
-        // The formula moves with its link, comes and goes with it.
-        let mut inverted = ControllerLink::new(0x7000 + 64, 0, mixer(4, MIXER_VOLUME));
-        inverted.formula = Some("1-Input".into());
-        let (a, b) = (p.controller_links[0].clone(), p.controller_links[1].clone());
-        let more = vec![b.clone(), inverted.clone(), a.clone(), inverted];
-        for links in [vec![b.clone()], more, vec![a, b], vec![]] {
-            let mut m = back.clone();
-            m.controller_links = links.clone();
-            let mut f = file.clone();
-            apply(&m, &mut f).unwrap();
-            let again = load(&FlpFile::parse(&f.to_bytes().unwrap()).unwrap()).unwrap();
-            assert_eq!(again.controller_links, links);
-            assert_eq!(again.automations[0].targets, vec![mixer(3, MIXER_VOLUME)]);
-            let n = |id: u8| events_of(&f).unwrap().iter().filter(|e| e.id == id).count();
-            assert_eq!(n(id::LINK_FORMULA), links.iter().filter(|c| c.formula.is_some()).count(), "no formula left over");
-        }
     }
 
     /// Deleting, cloning and moving channels rewrites the blocks in model order and renumbers notes, control
@@ -7094,5 +6544,903 @@ mod tests {
         let mut again = file.clone();
         apply(&back, &mut again).unwrap();
         assert_eq!(again.to_bytes().unwrap(), file.to_bytes().unwrap());
+    }
+}
+
+// Lemon-native metadata, separate from FL event IDs. No chunk is added to untouched legacy projects.
+const STRIP_TAG: Tag = Tag(*b"LSCS");
+fn read_strip_chunk(file:&FlpFile,p:&mut Project){for c in &file.chunks{if c.tag!=STRIP_TAG{continue;}let ChunkBody::Raw(d)=&c.body else{continue};let n=match d.first(){Some(1)=>2,Some(2)=>6,Some(3)=>7,Some(4)=>9,Some(5)=>13,Some(6)=>14,_=>continue};for r in d[1..].chunks_exact(2+n*2){let index=u16::from_le_bytes([r[0],r[1]]);if let Some(m)=p.mixer.iter_mut().find(|m|m.index==index){m.strip=[0;7];for i in 0..n.min(7){m.strip[i]=u16::from_le_bytes([r[2+i*2],r[3+i*2]]);}if n>=9 {m.deess=if u16::from_le_bytes([r[16],r[17]])!=0 {Some(u16::from_le_bytes([r[18],r[19]]))}else{None};}if n>=13 {for i in 0..4 {m.tune[i]=u16::from_le_bytes([r[20+i*2],r[21+i*2]]);}m.tune[1]=m.tune[1].min(11);m.tune[2]=m.tune[2].min(12);m.tune[3]=m.tune[3].min(1);if n>=14 {m.tune_enabled=u16::from_le_bytes([r[28],r[29]])!=0;}}m.strip[5]=m.strip[5].min(5);m.strip[6]=m.strip[6].min(3);}}}}
+fn write_strip_chunk(p:&Project,file:&mut FlpFile){let mut data=vec![6];for m in &p.mixer{if m.strip!=[0;7] || m.deess.is_some() || m.tune!=[0;4] || m.tune_enabled{data.extend(m.index.to_le_bytes());for v in m.strip{data.extend(v.to_le_bytes());}data.extend(u16::from(m.deess.is_some()).to_le_bytes());data.extend(m.deess.unwrap_or(0).to_le_bytes());for v in m.tune {data.extend(v.to_le_bytes());}data.extend(u16::from(m.tune_enabled).to_le_bytes());}}file.chunks.retain(|c|c.tag!=STRIP_TAG);if data.len()>1{file.chunks.push(Chunk{tag:STRIP_TAG,body:ChunkBody::Raw(data)});}}
+
+const INSTRUMENT_LANES:Tag=Tag(*b"LSIL");
+fn read_instrument_lanes(file:&FlpFile,p:&mut Project) {
+    for chunk in &file.chunks {
+        if chunk.tag!=INSTRUMENT_LANES {continue;}
+        let ChunkBody::Raw(d)=&chunk.body else {continue;};
+        if d.first()!=Some(&1){continue;}
+        for r in d[1..].chunks_exact(8) {
+            let v=|i|u16::from_le_bytes([r[i],r[i+1]]);
+            let (ch,arr,lane,pat)=(v(0),v(2),v(4),v(6));
+            // Empty patterns can be omitted by FLP serialization. The instrument's
+            // track binding must survive saving before its first note is entered.
+            if lane<500 && p.channels.iter().any(|c|c.index==ch) && p.arrangements.iter().any(|a|a.number==arr) {
+                p.instrument_lanes.push((ch,arr,lane,pat));
+            }
+        }
+    }
+}
+fn write_instrument_lanes(p:&Project,file:&mut FlpFile) {
+    file.chunks.retain(|c|c.tag!=INSTRUMENT_LANES&&c.tag!=Tag(*b"LSHK"));
+    if let Some((root,scale,flags))=p.harmony {file.chunks.push(Chunk{tag:Tag(*b"LSHK"),body:ChunkBody::Raw(vec![1,root,scale,flags])});}
+    if p.instrument_lanes.is_empty(){return;}
+    let mut d=vec![1];
+    for &(ch,a,t,p) in &p.instrument_lanes {for n in [ch,a,t,p]{d.extend(n.to_le_bytes());}}
+    file.chunks.push(Chunk{tag:INSTRUMENT_LANES,body:ChunkBody::Raw(d)});
+}
+
+// Versioned comp leaders; take grouping, muted state, source windows and fades use normal FLP records.
+const FOLDER_TAG:Tag=Tag(*b"LSFD");
+fn read_track_folders(file:&FlpFile,p:&mut Project){
+    for chunk in file.chunks.iter().filter(|c|c.tag==FOLDER_TAG){
+        if let ChunkBody::Raw(data)=&chunk.body && data.first()==Some(&1){
+            for row in data[1..].chunks_exact(4){
+                let arr=u16::from_le_bytes([row[0],row[1]]);
+                let index=u16::from_le_bytes([row[2],row[3]]) as usize;
+                if let Some(t)=p.arrangements.iter_mut().find(|a|a.number==arr).and_then(|a|a.tracks.get_mut(index)){t.folder=true;}
+            }
+        }
+    }
+}
+fn write_track_folders(p:&Project,file:&mut FlpFile){
+    file.chunks.retain(|c|c.tag!=FOLDER_TAG);
+    let mut data=vec![1];for a in &p.arrangements{for (i,t) in a.tracks.iter().enumerate(){if t.folder{
+        data.extend(a.number.to_le_bytes());data.extend((i as u16).to_le_bytes());
+    }}}
+    if data.len()>1{file.chunks.push(Chunk{tag:FOLDER_TAG,body:ChunkBody::Raw(data)});}
+}
+
+const COMP_TAG: Tag = Tag(*b"LSCP");
+fn read_comp_groups(file: &FlpFile, p: &mut Project) {
+    for c in &file.chunks {
+        if c.tag != COMP_TAG { continue; }
+        let ChunkBody::Raw(d) = &c.body else { continue; };
+        if d.first() != Some(&1) { continue; }
+        for r in d[1..].chunks_exact(6) {
+            let v = |i| u16::from_le_bytes([r[i],r[i+1]]);
+            if let Some(a) = p.arrangements.iter_mut().find(|a| a.number == v(0)) {
+                if let Some(t) = a.tracks.get_mut(v(2) as usize) { t.comp = Some(v(4)); }
+            }
+        }
+    }
+}
+fn write_comp_groups(p: &Project, file: &mut FlpFile) {
+    file.chunks.retain(|c| c.tag != COMP_TAG);
+    let mut d = vec![1];
+    for a in &p.arrangements { for (i,t) in a.tracks.iter().enumerate() {
+        if let Some(m) = t.comp { for v in [a.number, i as u16, m] { d.extend(v.to_le_bytes()); } }
+    }}
+    if d.len()>1 { file.chunks.push(Chunk { tag: COMP_TAG, body: ChunkBody::Raw(d) }); }
+}
+
+const CHANNEL_LAYOUT_TAG:Tag=Tag(*b"LSCL");
+fn read_channel_layouts(file:&FlpFile,p:&mut Project) {
+    // Migrate old Lemon projects only. Foreign FL projects have no template-specific Vox strips.
+    let old_lemon=file.chunks.iter().any(|c|matches!(&c.tag.0,b"LPCH"|b"LSKB"));
+    for m in &mut p.mixer {m.channel_layout=if old_lemon{if (32..=41).contains(&m.index){2}else{1}}else{0};}
+    for c in &file.chunks {
+        if c.tag!=CHANNEL_LAYOUT_TAG {continue;}let ChunkBody::Raw(d)=&c.body else{continue};
+        if d.first()!=Some(&1){continue;}
+        for r in d[1..].chunks_exact(3){let index=u16::from_le_bytes([r[0],r[1]]);if let Some(m)=p.mixer.iter_mut().find(|m|m.index==index){m.channel_layout=r[2].min(2);}}
+    }
+}
+fn write_channel_layouts(p:&Project,file:&mut FlpFile){
+    let mut d=vec![1];for m in &p.mixer{d.extend(m.index.to_le_bytes());d.push(m.channel_layout.min(2));}
+    file.chunks.retain(|c|c.tag!=CHANNEL_LAYOUT_TAG);
+    file.chunks.push(Chunk{tag:CHANNEL_LAYOUT_TAG,body:ChunkBody::Raw(d)});
+}
+
+fn read_peak_links(file:&FlpFile,p:&mut Project){
+ for c in &file.chunks {if c.tag!=Tag(*b"LSPL"){continue;}let ChunkBody::Raw(d)=&c.body else{continue};if d.first()!=Some(&1){continue;}
+  for r in d[1..].chunks_exact(17){let base=f32::from_le_bytes(r[6..10].try_into().unwrap());let depth=f32::from_le_bytes(r[10..14].try_into().unwrap());if !base.is_finite()||!depth.is_finite(){continue;}
+   let source=u16::from_le_bytes(r[..2].try_into().unwrap());if !p.mixer.iter().any(|m|m.index==source){continue;}
+   let target=u32::from_le_bytes(r[2..6].try_into().unwrap());p.peak_links.retain(|l|l.target!=target);
+   p.peak_links.push(os_model::PeakLink{source,target,base:base.clamp(0.,1.),depth:depth.clamp(0.,1.),inverted:r[14]!=0,release_ms:u16::from_le_bytes(r[15..17].try_into().unwrap()).clamp(10,2000)});
+  }
+ }
+}
+fn write_peak_links(p:&Project,file:&mut FlpFile){
+ file.chunks.retain(|c|c.tag!=Tag(*b"LSPL"));if p.peak_links.is_empty(){return;}let mut d=vec![1];
+ for l in &p.peak_links{d.extend(l.source.to_le_bytes());d.extend(l.target.to_le_bytes());d.extend(l.base.to_le_bytes());d.extend(l.depth.to_le_bytes());d.push(u8::from(l.inverted));d.extend(l.release_ms.to_le_bytes());}
+ file.chunks.push(Chunk{tag:Tag(*b"LSPL"),body:ChunkBody::Raw(d)});
+}
+// Dedicated mixer EQ is Lemon-native data; never masquerade as an eleventh FL effect slot.
+const PARAMETRIC_TAG: Tag = Tag(*b"LEQ2");
+fn read_parametric_chunk(file: &FlpFile, project: &mut Project) {
+    for chunk in &file.chunks {
+        if chunk.tag != PARAMETRIC_TAG { continue; }
+        let ChunkBody::Raw(data) = &chunk.body else { continue; };
+        if data.first() != Some(&1) { continue; }
+        for row in data[1..].chunks_exact(359) {
+            let index = u16::from_le_bytes([row[0],row[1]]);
+            let Some(m) = project.mixer.iter_mut().find(|m|m.index==index) else {continue};
+            m.parametric_pre = row[2] != 0;
+            m.slot_on[10] = row[3] != 0;
+            if row[4] != 0 {
+                m.slots[10] = Some(SlotPlugin {name:"Fruity Parametric EQ 2".into(), state:row[5..].to_vec()});
+            }
+        }
+    }
+}
+fn write_parametric_chunk(project: &Project, file: &mut FlpFile) {
+    let mut data = vec![1];
+    for m in &project.mixer {
+        if m.slots[10].is_none() && !m.parametric_pre && m.slot_on[10] {continue;}
+        data.extend(m.index.to_le_bytes());
+        data.extend([u8::from(m.parametric_pre),u8::from(m.slot_on[10]),u8::from(m.slots[10].is_some())]);
+        let mut state = [0u8;354];
+        if let Some(eq) = &m.slots[10] {let n=eq.state.len().min(354);state[..n].copy_from_slice(&eq.state[..n]);}
+        data.extend(state);
+    }
+    file.chunks.retain(|c|c.tag!=PARAMETRIC_TAG);
+    if data.len()>1 {file.chunks.push(Chunk{tag:PARAMETRIC_TAG,body:ChunkBody::Raw(data)});}
+}
+
+const HARDWARE_OUTPUT_TAG: Tag = Tag(*b"LMHO");
+
+fn read_hardware_outputs(file: &FlpFile, project: &mut Project) {
+    for chunk in &file.chunks {
+        if chunk.tag != HARDWARE_OUTPUT_TAG { continue; }
+        let ChunkBody::Raw(data) = &chunk.body else { continue };
+        let Some((&1, mut rows)) = data.split_first() else { continue };
+        while let Some(head) = rows.get(..6) {
+            let index = u16::from_le_bytes([head[0], head[1]]);
+            let first = u16::from_le_bytes([head[2], head[3]]);
+            let len = usize::from(u16::from_le_bytes([head[4], head[5]]));
+            let Some(name) = rows.get(6..6 + len) else { break };
+            rows = &rows[6 + len..];
+            if first >= 2 && first % 2 == 0
+                && let Ok(device) = std::str::from_utf8(name)
+                && let Some(track) = project.mixer.iter_mut().find(|t| t.index == index)
+            {
+                track.hardware_output = Some(os_model::HardwareOutput { device: device.into(), first });
+            }
+        }
+    }
+}
+
+fn write_hardware_outputs(project: &Project, file: &mut FlpFile) {
+    file.chunks.retain(|chunk| chunk.tag != HARDWARE_OUTPUT_TAG);
+    let mut data = vec![1];
+    for track in &project.mixer {
+        let Some(output) = &track.hardware_output else { continue };
+        let Ok(len) = u16::try_from(output.device.len()) else { continue };
+        data.extend(track.index.to_le_bytes());
+        data.extend(output.first.to_le_bytes());
+        data.extend(len.to_le_bytes());
+        data.extend(output.device.as_bytes());
+    }
+    if data.len() > 1 {
+        file.chunks.push(Chunk { tag: HARDWARE_OUTPUT_TAG, body: ChunkBody::Raw(data) });
+    }
+}
+
+const MIXER_LOCK_TAG: Tag = Tag(*b"LMLK");
+const MIXER_GROUP_LOCK_TAG: Tag = Tag(*b"LMGL");
+fn read_mixer_locks(file: &FlpFile, p: &mut Project) {
+    for chunk in &file.chunks {
+        let group = chunk.tag == MIXER_GROUP_LOCK_TAG;
+        if !group && chunk.tag != MIXER_LOCK_TAG { continue; }
+        let ChunkBody::Raw(data) = &chunk.body else { continue };
+        if data.first() != Some(&1) { continue; }
+        for bytes in data[1..].chunks_exact(2) {
+            let index = u16::from_le_bytes([bytes[0], bytes[1]]);
+            if let Some(track) = p.mixer.iter_mut().find(|m| m.index == index) {
+                if group { track.group_locked = index > 0 && track.separator; }
+                else { track.edit_locked = true; }
+            }
+        }
+    }
+}
+
+fn write_mixer_locks(p: &Project, file: &mut FlpFile) {
+    for (tag, group) in [(MIXER_LOCK_TAG, false), (MIXER_GROUP_LOCK_TAG, true)] {
+        let mut data = vec![1];
+        for m in &p.mixer {
+            let locked = if group { m.group_locked && m.separator && m.index > 0 } else { m.edit_locked };
+            if locked { data.extend(m.index.to_le_bytes()); }
+        }
+        file.chunks.retain(|c| c.tag != tag);
+        if data.len() > 1 {
+            file.chunks.push(Chunk { tag, body: ChunkBody::Raw(data) });
+        }
+    }
+}
+
+const MIXER_SEPARATOR_NAMES: Tag = Tag(*b"LMSN");
+
+fn read_mixer_separator_names(file: &FlpFile, project: &mut Project) {
+    for chunk in file.chunks.iter().filter(|chunk| chunk.tag == MIXER_SEPARATOR_NAMES) {
+        let ChunkBody::Raw(data) = &chunk.body else { continue };
+        let Ok((1, names)) = serde_json::from_slice::<(u8, Vec<(u16, String)>)>(data) else { continue };
+        for (index, name) in names {
+            let name = name.trim();
+            if !name.is_empty() && let Some(track) = project.mixer.iter_mut().find(|m| m.index == index && m.separator) {
+                track.separator_name = Some(name.to_owned());
+            }
+        }
+    }
+}
+
+fn write_mixer_separator_names(project: &Project, file: &mut FlpFile) {
+    file.chunks.retain(|chunk| chunk.tag != MIXER_SEPARATOR_NAMES);
+    let names: Vec<_> = project.mixer.iter().filter(|track| track.separator)
+        .filter_map(|track| Some((track.index, track.separator_name.as_deref()?))).collect();
+    if !names.is_empty() {
+        let data = serde_json::to_vec(&(1u8, names)).expect("Mixer separator names are serializable");
+        file.chunks.push(Chunk { tag: MIXER_SEPARATOR_NAMES, body: ChunkBody::Raw(data) });
+    }
+}
+
+const STRIP_BYPASS_TAG:Tag=Tag(*b"LSKB");
+fn read_strip_bypass(file:&FlpFile,p:&mut Project){
+ for c in &file.chunks {if c.tag!=STRIP_BYPASS_TAG {continue;}let ChunkBody::Raw(d)=&c.body else{continue};if d.first()!=Some(&1){continue;}
+  for r in d[1..].chunks_exact(3){let n=u16::from_le_bytes([r[0],r[1]]);if let Some(m)=p.mixer.iter_mut().find(|m|m.index==n){m.strip_bypassed=r[2]!=0;}}
+ }
+}
+fn write_strip_bypass(p:&Project,file:&mut FlpFile){
+ let mut d=vec![1];for m in &p.mixer {d.extend(m.index.to_le_bytes());d.push(u8::from(m.strip_bypassed));}
+ file.chunks.retain(|c|c.tag!=STRIP_BYPASS_TAG);file.chunks.push(Chunk{tag:STRIP_BYPASS_TAG,body:ChunkBody::Raw(d)});
+}
+
+// Frozen source clips use the same lossless records as ordinary Playlist clips.
+const FREEZE_TAG: Tag = Tag(*b"LSFZ");
+fn write_frozen_tracks(p: &Project, file: &mut FlpFile) {
+    file.chunks.retain(|c| c.tag != FREEZE_TAG);
+    let mut d = vec![1];
+    for a in &p.arrangements { for t in &a.tracks {
+        if let Some(clips) = &t.frozen {
+            d.extend(a.number.to_le_bytes()); d.extend((t.number as u16).to_le_bytes());
+            d.extend((clips.len() as u32).to_le_bytes());
+            for c in clips { d.extend(encode_clip(c)); }
+        }
+    }}
+    if d.len()>1 { file.chunks.push(Chunk { tag: FREEZE_TAG, body: ChunkBody::Raw(d) }); }
+}
+fn read_frozen_tracks(file: &FlpFile, p: &mut Project) {
+    for c in &file.chunks {
+        if c.tag != FREEZE_TAG { continue; }
+        let ChunkBody::Raw(data) = &c.body else { continue; };
+        if data.first() != Some(&1) { continue; }
+        let mut d = &data[1..];
+        while d.len() >= 8 {
+            let a = u16::from_le_bytes(d[0..2].try_into().unwrap());
+            let t = u16::from_le_bytes(d[2..4].try_into().unwrap());
+            let n = u32::from_le_bytes(d[4..8].try_into().unwrap()) as usize;
+            d = &d[8..];
+            if n > d.len()/CLIP_LEN { break; }
+            if let Some(track) = p.arrangements.iter_mut().find(|v|v.number==a).and_then(|v|v.tracks.iter_mut().find(|v|v.number==u32::from(t))) {
+                track.frozen = Some(d[..n*CLIP_LEN].chunks_exact(CLIP_LEN).map(decode_clip).collect());
+            }
+            d = &d[n*CLIP_LEN..];
+        }
+    }
+}
+
+// Extended user slots. Physical slot 10 remains the dedicated mixer EQ.
+const EXTRA_FX: Tag = Tag(*b"LSFX");
+fn write_extra_fx(p:&Project,file:&mut FlpFile) {
+    file.chunks.retain(|c|c.tag!=EXTRA_FX);
+    let mut d=vec![1];
+    for m in &p.mixer {for k in 11..64 {
+        let slot=m.slots[k].as_ref();
+        if slot.is_none()&&m.slot_on[k]&&m.slot_mix[k]==1. {continue;}
+        let name=slot.map_or("",|s|s.name.as_str()).as_bytes();let state=slot.map_or(&[][..],|s|s.state.as_slice());
+        d.extend(m.index.to_le_bytes());d.push(k as u8);d.push(u8::from(m.slot_on[k]));d.push(u8::from(slot.is_some()));
+        d.extend(m.slot_mix[k].to_le_bytes());d.extend((name.len() as u32).to_le_bytes());d.extend((state.len() as u32).to_le_bytes());
+        d.extend(name);d.extend(state);
+    }}
+    if d.len()>1 {file.chunks.push(Chunk{tag:EXTRA_FX,body:ChunkBody::Raw(d)});}
+}
+fn read_extra_fx(file:&FlpFile,p:&mut Project) {
+    for c in &file.chunks {if c.tag!=EXTRA_FX {continue;}let ChunkBody::Raw(d)=&c.body else{continue;};if d.first()!=Some(&1){continue;}
+        let mut d=&d[1..];while d.len()>=21 {
+            let t=u16::from_le_bytes(d[..2].try_into().unwrap());let k=d[2] as usize;
+            let on=d[3]!=0;let filled=d[4]!=0;let mix=f64::from_le_bytes(d[5..13].try_into().unwrap());
+            let n=u32::from_le_bytes(d[13..17].try_into().unwrap()) as usize;let z=u32::from_le_bytes(d[17..21].try_into().unwrap()) as usize;d=&d[21..];
+            if n>d.len()||z>d.len()-n {break;}
+            if (11..64).contains(&k) {if let Some(m)=p.mixer.iter_mut().find(|m|m.index==t) {
+                m.slot_on[k]=on;m.slot_mix[k]=if mix.is_finite(){mix.clamp(0.,1.)}else{1.};
+                m.slots[k]=if filled {Some(SlotPlugin{name:String::from_utf8_lossy(&d[..n]).into_owned(),state:d[n..n+z].to_vec()})}else{None};
+            }}
+            d=&d[n+z..];
+        }
+    }
+}
+
+fn write_output_routing(p: &Project, file: &mut FlpFile) {
+    file.chunks.retain(|c| c.tag != Tag(*b"MOUT"));
+    let mut data = vec![1];
+    for channel in p.channels.iter().filter(|c| c.misc.split_outputs) {
+        data.extend(channel.index.to_le_bytes());
+    }
+    if data.len() > 1 { file.chunks.push(Chunk { tag: Tag(*b"MOUT"), body: ChunkBody::Raw(data) }); }
+}
+fn read_output_routing(file: &FlpFile, p: &mut Project) {
+    for chunk in file.chunks.iter().filter(|c| c.tag == Tag(*b"MOUT")) {
+        let ChunkBody::Raw(data) = &chunk.body else {continue};
+        if data.first() != Some(&1) {continue}
+        let ids: std::collections::HashSet<_> = data[1..].chunks_exact(2).map(|v|u16::from_le_bytes([v[0],v[1]])).collect();
+        for channel in &mut p.channels {channel.misc.split_outputs = ids.contains(&channel.index);}
+    }
+}
+fn write_pitch_controls(p: &Project, file: &mut FlpFile) {
+    file.chunks.retain(|c| c.tag != Tag(*b"LPCH"));
+    let mut d = vec![1]; d.extend(p.varispeed_cents.to_le_bytes());
+    for c in &p.channels { d.extend(c.index.to_le_bytes()); d.extend(c.misc.pitch_follow_offset.to_le_bytes()); d.push(c.misc.pitch_range); }
+    file.chunks.push(Chunk { tag: Tag(*b"LPCH"), body: ChunkBody::Raw(d) });
+}
+fn read_pitch_controls(file: &FlpFile, p: &mut Project) {
+    for c in &file.chunks {
+        if c.tag != Tag(*b"LPCH") { continue; }
+        let ChunkBody::Raw(d) = &c.body else { continue; };
+        if d.len() < 3 || d[0] != 1 { continue; }
+        p.varispeed_cents = i16::from_le_bytes([d[1],d[2]]).clamp(-1200,1200);
+        for r in d[3..].chunks_exact(7) {
+            let id = u16::from_le_bytes([r[0],r[1]]);
+            if let Some(c) = p.channels.iter_mut().find(|c| c.index == id) { c.misc.pitch_follow_offset = i32::from_le_bytes(r[2..6].try_into().unwrap()).clamp(-24000,24000); c.misc.pitch_range=r[6].clamp(1,48); }
+        }
+    }
+}
+
+fn write_rack_strips(p:&Project,file:&mut FlpFile){
+    file.chunks.retain(|c|c.tag!=Tag(*b"LRCK")&&c.tag!=Tag(*b"LHST"));let mut data=vec![1];
+    for m in &p.mixer {if let Some(h)=&m.rack_strip {data.extend(m.index.to_le_bytes());data.extend([h.slot,u8::from(h.native_bypassed),u8::from(h.eq_on)]);}}
+    if data.len()>1 {file.chunks.push(Chunk{tag:Tag(*b"LRCK"),body:ChunkBody::Raw(data)});}
+}
+fn read_rack_strips(file:&FlpFile,p:&mut Project){
+    // Retire the rejected proxy-strip experiment without leaving native processing disabled.
+    for c in &file.chunks {if c.tag!=Tag(*b"LHST"){continue;}let ChunkBody::Raw(d)=&c.body else{continue};if d.first()!=Some(&1)||d.len()>2_000_000{continue;}
+        if let Ok(serde_json::Value::Array(entries))=serde_json::from_slice(&d[1..]){for e in entries {let Some(n)=e.get(0).and_then(|v|v.as_u64()).filter(|n|*n<=u16::MAX as u64)else{continue};let Some(h)=e.get(1)else{continue};let Some(k)=h.get("slot").and_then(|v|v.as_u64()).filter(|k|*k<64&&*k!=10)else{continue};
+            if let Some(m)=p.mixer.iter_mut().find(|m|m.index==n as u16){if let (Some(native),Some(eq))=(h.get("native_bypassed").and_then(|v|v.as_bool()),h.get("eq_on").and_then(|v|v.as_bool())){m.strip_bypassed=native;m.slot_on[10]=eq;m.slot_on[k as usize]=false;}}
+        }}
+    }
+
+    for c in &file.chunks {if c.tag!=Tag(*b"LRCK"){continue;}let ChunkBody::Raw(d)=&c.body else{continue};
+        if d.first()!=Some(&1)||(d.len()-1)%5!=0{continue;}
+        for e in d[1..].chunks_exact(5){let n=u16::from_le_bytes([e[0],e[1]]);let k=e[2];if k>=64||k==10||e[3]>1||e[4]>1{continue;}
+            if let Some(m)=p.mixer.iter_mut().find(|m|m.index==n){if m.slots[k as usize].is_some(){m.rack_strip=Some(os_model::RackStrip{slot:k,native_bypassed:e[3]!=0,eq_on:e[4]!=0});}}
+        }
+    }
+}
+
+fn write_audio_warps(p:&Project,file:&mut FlpFile){
+    file.chunks.retain(|c|c.tag!=Tag(*b"LSWP"));
+    if p.audio_warps.is_empty(){return;}
+    let entries:Vec<_>=p.audio_warps.iter().map(|w|serde_json::json!({"source":w.source,"rendered":w.rendered,"points":w.points})).collect();
+    if let Ok(data)=serde_json::to_vec(&serde_json::json!({"version":1,"warps":entries})) {file.chunks.push(Chunk{tag:Tag(*b"LSWP"),body:ChunkBody::Raw(data)});}
+}
+fn read_audio_warps(file:&FlpFile,p:&mut Project){
+    for c in &file.chunks {if c.tag!=Tag(*b"LSWP"){continue;}let ChunkBody::Raw(data)=&c.body else{continue};
+        let Ok(v)=serde_json::from_slice::<serde_json::Value>(data) else{continue};
+        if v["version"].as_u64()!=Some(1){continue;}
+        for w in v["warps"].as_array().into_iter().flatten().take(10000){
+            let (Some(source),Some(rendered),Some(points))=(w["source"].as_str(),w["rendered"].as_str(),w["points"].as_array()) else{continue};
+            if points.len()<2||points.len()>1024{continue;}
+            let points:Option<Vec<(f64,f64)>>=points.iter().map(|p|Some((p[0].as_f64()?,p[1].as_f64()?))).collect();
+            let Some(points)=points else{continue};
+            if points.iter().any(|(s,b)|!s.is_finite()||!b.is_finite()||*s<0.||*b<0.)||points[0].1!=0.||points.windows(2).any(|w|w[1].0<=w[0].0||w[1].1<=w[0].1){continue;}
+            p.audio_warps.push(os_model::AudioWarp{source:source.into(),rendered:rendered.into(),points});
+        }
+    }
+}
+
+const PATTERN_SPEEDS:Tag=Tag(*b"LSPS");
+fn write_pattern_speeds(p:&Project,file:&mut FlpFile){
+    file.chunks.retain(|c|c.tag!=PATTERN_SPEEDS);let mut data=vec![1];
+    for a in &p.arrangements {
+        let lists=std::iter::once((u32::MAX,a.clips.as_slice())).chain(a.tracks.iter().filter_map(|t|t.frozen.as_deref().map(|clips|(t.number,clips))));
+        for (track,clips) in lists {for (index,c) in clips.iter().enumerate(){if matches!(c.source,ClipSource::Pattern(_)) && c.pattern_rate()!=1. {
+            data.extend(a.number.to_le_bytes());data.extend(track.to_le_bytes());data.extend((index as u32).to_le_bytes());data.extend(c.pattern_rate().to_le_bytes());
+        }}}
+    }
+    if data.len()>1{file.chunks.push(Chunk{tag:PATTERN_SPEEDS,body:ChunkBody::Raw(data)});}
+}
+fn read_pattern_speeds(file:&FlpFile,p:&mut Project){
+    for c in &file.chunks{if c.tag!=PATTERN_SPEEDS{continue;}let ChunkBody::Raw(data)=&c.body else{continue;};if data.first()!=Some(&1){continue;}
+        for r in data[1..].chunks_exact(18){
+            let arr=u16::from_le_bytes(r[0..2].try_into().unwrap());let track=u32::from_le_bytes(r[2..6].try_into().unwrap());let index=u32::from_le_bytes(r[6..10].try_into().unwrap()) as usize;let rate=f64::from_le_bytes(r[10..18].try_into().unwrap());
+            if !rate.is_finite()||!((1./64.)..=64.).contains(&rate){continue;}
+            let Some(a)=p.arrangements.iter_mut().find(|a|a.number==arr)else{continue;};
+            let clips=if track==u32::MAX{Some(&mut a.clips)}else{a.tracks.iter_mut().find(|t|t.number==track).and_then(|t|t.frozen.as_mut())};
+            if let Some(clip)=clips.and_then(|c|c.get_mut(index)).filter(|c|matches!(c.source,ClipSource::Pattern(_))){clip.pattern_speed=rate;}
+        }
+    }
+}
+
+// Optional Lemon metadata. No chunk is written for projects with default picker order.
+const CLIP_PICKER_ORDER: Tag = Tag(*b"LSPO");
+
+fn write_clip_picker_order(project: &Project, file: &mut FlpFile) {
+    file.chunks.retain(|chunk| chunk.tag != CLIP_PICKER_ORDER);
+    if project.clip_picker_order.is_empty() {
+        return;
+    }
+    let mut data = vec![1];
+    for source in &project.clip_picker_order {
+        let (kind, id) = match source {
+            ClipSource::Pattern(id) => (0, id),
+            ClipSource::Channel(id) => (1, id),
+        };
+        data.push(kind);
+        data.extend(id.to_le_bytes());
+    }
+    file.chunks.push(Chunk { tag: CLIP_PICKER_ORDER, body: ChunkBody::Raw(data) });
+}
+
+fn read_clip_picker_order(file: &FlpFile, project: &mut Project) {
+    let mut seen = std::collections::HashSet::new();
+    for chunk in file.chunks.iter().filter(|chunk| chunk.tag == CLIP_PICKER_ORDER) {
+        let ChunkBody::Raw(data) = &chunk.body else { continue };
+        let Some((1, records)) = data.split_first() else { continue };
+        for record in records.chunks_exact(3).take(2 * (usize::from(u16::MAX) + 1)) {
+            let id = u16::from_le_bytes([record[1], record[2]]);
+            let source = match record[0] {
+                0 if id > 0 => ClipSource::Pattern(id),
+                1 => ClipSource::Channel(id),
+                _ => continue,
+            };
+            if seen.insert(source) {
+                project.clip_picker_order.push(source);
+            }
+        }
+    }
+}
+
+// Per-clip presentation is Lemon metadata. FL's clip and channel records stay intact.
+const CLIP_APPEARANCE: Tag = Tag(*b"LSCA");
+const INDEPENDENT_AUTOMATION: Tag = Tag(*b"LSAI");
+type ClipAppearance<T> = (u16, Option<u32>, usize, Option<T>, Option<[u8; 3]>);
+
+fn write_clip_appearance(project: &Project, file: &mut FlpFile) {
+    file.chunks.retain(|chunk| !matches!(chunk.tag, CLIP_APPEARANCE | INDEPENDENT_AUTOMATION));
+    let mut records: Vec<ClipAppearance<&str>> = Vec::new();
+    let mut independent = Vec::new();
+    for arrangement in &project.arrangements {
+        let mut ordered: Vec<_> = arrangement.clips.iter().collect();
+        // Match encode_clips, including the stable order for clips at the same position.
+        ordered.sort_by_key(|clip| clip.position);
+        let frozen = arrangement.tracks.iter().filter_map(|track| {
+            track.frozen.as_ref().map(|clips| (Some(track.number), clips.iter().collect()))
+        });
+        for (track, clips) in std::iter::once((None, ordered)).chain(frozen) {
+            for (index, clip) in clips.into_iter().enumerate() {
+                if clip.independent_automation {
+                    independent.push((arrangement.number, track, index));
+                }
+                if clip.name.is_some() || clip.color.is_some() {
+                    records.push((arrangement.number, track, index, clip.name.as_deref(),
+                        clip.color.map(|c| [c.r, c.g, c.b])));
+                }
+            }
+        }
+    }
+    if !records.is_empty() {
+        let data = serde_json::to_vec(&records).expect("clip appearance is serializable");
+        file.chunks.push(Chunk { tag: CLIP_APPEARANCE, body: ChunkBody::Raw(data) });
+    }
+    if !independent.is_empty() {
+        let data = serde_json::to_vec(&independent).expect("clip placements are serializable");
+        file.chunks.push(Chunk { tag: INDEPENDENT_AUTOMATION, body: ChunkBody::Raw(data) });
+    }
+}
+
+fn read_clip_appearance(file: &FlpFile, project: &mut Project) {
+    for chunk in file.chunks.iter().filter(|chunk| chunk.tag == CLIP_APPEARANCE) {
+        let ChunkBody::Raw(data) = &chunk.body else { continue };
+        let Ok(records) = serde_json::from_slice::<Vec<ClipAppearance<String>>>(data) else { continue };
+        for (number, track, index, name, color) in records {
+            let Some(arrangement) = project.arrangements.iter_mut().find(|a| a.number == number) else { continue };
+            let clips = match track {
+                None => Some(&mut arrangement.clips),
+                Some(number) => arrangement.tracks.iter_mut().find(|t| t.number == number)
+                    .and_then(|t| t.frozen.as_mut()),
+            };
+            if let Some(clip) = clips.and_then(|clips| clips.get_mut(index)) {
+                clip.name = name.map(Into::into);
+                clip.color = color.map(|[r, g, b]| Rgb::new(r, g, b));
+            }
+        }
+    }
+    for chunk in file.chunks.iter().filter(|chunk| chunk.tag == INDEPENDENT_AUTOMATION) {
+        let ChunkBody::Raw(data) = &chunk.body else { continue };
+        let Ok(records) = serde_json::from_slice::<Vec<(u16, Option<u32>, usize)>>(data) else { continue };
+        for (number, track, index) in records {
+            let Some(arrangement) = project.arrangements.iter_mut().find(|a| a.number == number) else { continue };
+            let clips = match track {
+                None => Some(&mut arrangement.clips),
+                Some(number) => arrangement.tracks.iter_mut().find(|t| t.number == number)
+                    .and_then(|t| t.frozen.as_mut()),
+            };
+            if let Some(clip) = clips.and_then(|clips| clips.get_mut(index))
+                && matches!(clip.source, ClipSource::Channel(_))
+            {
+                clip.independent_automation = true;
+            }
+        }
+    }
+}
+
+const TIMELINE: Tag = Tag(*b"LSTL");
+
+type TimelineRecord = (u16, os_model::timeline::Timeline, Vec<(usize, u64)>);
+
+fn write_timeline(project: &Project, file: &mut FlpFile) {
+    file.chunks.retain(|c| c.tag != TIMELINE);
+    let records: Vec<_> = project.arrangements.iter().filter_map(|a| {
+        let linear: Vec<_> = a.markers.iter().enumerate().filter_map(|(i, m)| m.linear_us.map(|us| (i, us))).collect();
+        if a.timeline == Default::default() && linear.is_empty() { return None; }
+        Some((a.number, &a.timeline, linear))
+    }).collect();
+    if !records.is_empty() && let Ok(data) = serde_json::to_vec(&(1u8, records)) {
+        file.chunks.push(Chunk { tag: TIMELINE, body: ChunkBody::Raw(data) });
+    }
+}
+
+fn read_timeline(file: &FlpFile, project: &mut Project) {
+    for chunk in file.chunks.iter().filter(|c| c.tag == TIMELINE) {
+        let ChunkBody::Raw(data) = &chunk.body else { continue };
+        if data.len() > 4 * 1024 * 1024 { continue; }
+        let Ok((1, records)) = serde_json::from_slice::<(u8, Vec<TimelineRecord>)>(data) else { continue };
+        for (number, mut timeline, linear) in records {
+            let Some(a) = project.arrangements.iter_mut().find(|a| a.number == number) else { continue };
+            timeline.normalize();
+            a.timeline = timeline;
+            for (i, us) in linear {
+                if let Some(m) = a.markers.get_mut(i).filter(|m| m.kind == TimeMarker::PLAIN) {
+                    m.linear_us = Some(us.min(86_400_000_000));
+                }
+            }
+        }
+    }
+}
+
+const MARKER_COLORS:Tag=Tag(*b"LSMC");
+fn write_marker_colors(p:&Project,file:&mut FlpFile){
+    file.chunks.retain(|c|c.tag!=MARKER_COLORS);let mut data=vec![1];
+    for a in &p.arrangements {for (i,m) in a.markers.iter().enumerate(){if let Some(color)=m.color {
+        data.extend(a.number.to_le_bytes());data.extend((i as u32).to_le_bytes());data.extend((color&0xffffff).to_le_bytes());
+    }}}
+    if data.len()>1{file.chunks.push(Chunk{tag:MARKER_COLORS,body:ChunkBody::Raw(data)});}
+}
+fn read_marker_colors(file:&FlpFile,p:&mut Project){
+    for c in &file.chunks {if c.tag!=MARKER_COLORS{continue;}let ChunkBody::Raw(data)=&c.body else{continue;};if data.first()!=Some(&1){continue;}
+        for r in data[1..].chunks_exact(10){let a=u16::from_le_bytes(r[0..2].try_into().unwrap());let i=u32::from_le_bytes(r[2..6].try_into().unwrap()) as usize;let color=u32::from_le_bytes(r[6..10].try_into().unwrap());
+            if let Some(m)=p.arrangements.iter_mut().find(|arr|arr.number==a).and_then(|arr|arr.markers.get_mut(i)){m.color=Some(color&0xffffff);}
+        }
+    }
+}
+
+const CLIP_FX_OWNERS:Tag=Tag(*b"LSCF");
+fn write_clip_fx_owners(p:&Project,file:&mut FlpFile){
+    file.chunks.retain(|c|c.tag!=CLIP_FX_OWNERS);let mut data=vec![1];
+    for m in p.mixer.iter().filter(|m|m.clip_fx){
+        let owner=p.channels.iter().find(|c|c.mixer_track==m.index&&p.clip_fx_channels.contains(&c.index)).map_or(u16::MAX,|c|c.index);
+        data.extend(owner.to_le_bytes());data.extend(m.index.to_le_bytes());
+    }
+    if data.len()>1{file.chunks.push(Chunk{tag:CLIP_FX_OWNERS,body:ChunkBody::Raw(data)});}
+}
+fn read_clip_fx_owners(file:&FlpFile,p:&mut Project){
+    for chunk in &file.chunks{if chunk.tag!=CLIP_FX_OWNERS{continue;}let ChunkBody::Raw(data)=&chunk.body else{continue;};if data.first()!=Some(&1){continue;}
+        for pair in data[1..].chunks_exact(4){let id=u16::from_le_bytes(pair[..2].try_into().unwrap());let bus=u16::from_le_bytes(pair[2..].try_into().unwrap());
+            if let Some(m)=p.mixer.iter_mut().find(|m|m.index==bus&&bus!=0){m.clip_fx=true;}else{continue;}
+            if id!=u16::MAX&&!p.clip_fx_channels.contains(&id)&&p.channels.iter().any(|c|c.index==id&&c.kind.is_sampler()&&c.mixer_track==bus){p.clip_fx_channels.push(id);}
+        }
+    }
+}
+
+// Native MPE extension. Legacy FL note records remain unchanged.
+const NOTE_DRIVE: Tag = Tag(*b"LSND");
+fn write_note_drive(p: &Project, file: &mut FlpFile) {
+    file.chunks.retain(|c| c.tag != NOTE_DRIVE);
+    let mut data = Vec::new();
+    for pat in p
+        .patterns
+        .iter()
+        .filter(|pat| pat.notes.iter().any(|n| n.drive > 0))
+    {
+        let mut sorted: Vec<_> = pat.notes.iter().collect();
+        sorted.sort_by_key(|n| n.position);
+        for (i, n) in sorted.into_iter().enumerate().filter(|(_, n)| n.drive > 0) {
+            data.extend(pat.number.to_le_bytes());
+            data.extend((i as u32).to_le_bytes());
+            data.push(n.drive);
+        }
+    }
+    if !data.is_empty() {
+        file.chunks.push(Chunk {
+            tag: NOTE_DRIVE,
+            body: ChunkBody::Raw(data),
+        });
+    }
+}
+fn read_note_drive(file: &FlpFile, p: &mut Project) {
+    for chunk in file.chunks.iter().filter(|c| c.tag == NOTE_DRIVE) {
+        if let ChunkBody::Raw(bytes) = &chunk.body {
+            for r in bytes.chunks_exact(7) {
+                let pat = u16::from_le_bytes([r[0], r[1]]);
+                let i = u32::from_le_bytes(r[2..6].try_into().unwrap()) as usize;
+                if let Some(n) = p
+                    .patterns
+                    .iter_mut()
+                    .find(|x| x.number == pat)
+                    .and_then(|x| x.notes.get_mut(i))
+                {
+                    n.drive = r[6].min(127);
+                }
+            }
+        }
+    }
+}
+
+const MPE_DATA:Tag=Tag(*b"LSME");
+const STAFF_NOTATION: Tag = Tag(*b"LSNT");
+
+type WrittenNotes = Vec<(u16, usize, os_model::notation::NoteMarks)>;
+type WrittenStaves = Vec<(u16, Vec<os_model::notation::StaffChange>)>;
+
+fn write_staff_notation(project: &Project, file: &mut FlpFile) {
+    file.chunks.retain(|chunk| chunk.tag != STAFF_NOTATION);
+    let notes: WrittenNotes = project.patterns.iter().flat_map(|p| {
+            p.notes.iter().enumerate().filter_map(|(i, n)| {
+                (n.notation != Default::default()).then_some((p.number, i, n.notation))
+            })
+        }).collect();
+    let staves: WrittenStaves = project.arrangements.iter().filter(|a| !a.staff_notation.is_empty())
+        .map(|a| (a.number, a.staff_notation.clone())).collect();
+    if (!notes.is_empty() || !staves.is_empty())
+        && let Ok(mut data) = serde_json::to_vec(&(notes, staves))
+    {
+        data.insert(0, 1);
+        file.chunks.push(Chunk { tag: STAFF_NOTATION, body: ChunkBody::Raw(data) });
+    }
+}
+
+fn read_staff_notation(file: &FlpFile, project: &mut Project) {
+    let Some((notes, staves)) = file.chunks.iter().rev().filter(|c| c.tag == STAFF_NOTATION).find_map(|c| {
+        let ChunkBody::Raw(data) = &c.body else { return None };
+        let (1, payload) = data.split_first()? else { return None };
+        serde_json::from_slice::<(WrittenNotes, WrittenStaves)>(payload).ok()
+    }) else { return };
+    let mut patterns: BTreeMap<_, _> = project.patterns.iter_mut().map(|p| (p.number, p)).collect();
+    for (number, index, marks) in notes {
+        if let Some(note) = patterns.get_mut(&number).and_then(|p| p.notes.get_mut(index)) {
+            note.notation = marks;
+        }
+    }
+    for (number, changes) in staves {
+        if let Some(arr) = project.arrangements.iter_mut().find(|a| a.number == number) {
+            arr.staff_notation = changes;
+        }
+    }
+}
+fn write_mpe(p:&Project,file:&mut FlpFile){
+ file.chunks.retain(|c|c.tag!=MPE_DATA);
+ if p.mpe.channels.is_empty()&&p.patterns.iter().all(|p|p.notes.iter().all(|n|n.expression==0)){return;}
+ let mut d=vec![1];d.extend((p.mpe.channels.len()as u16).to_le_bytes());
+ for &(id,c)in &p.mpe.channels{let c=c.valid();d.extend(id.to_le_bytes());d.extend([c.enabled as u8,c.upper as u8,c.members,c.bend]);for v in [c.sensitivity,c.pressure,c.slide]{d.extend(v.to_le_bytes());}}
+ let notes:Vec<_>=p.patterns.iter().flat_map(|pat|pat.notes.iter().enumerate().filter_map(|(i,n)|p.mpe.get(n.expression).map(|e|(pat.number,i,e)))).collect();
+ d.extend((notes.len()as u32).to_le_bytes());for(pat,i,e)in notes{d.extend(pat.to_le_bytes());d.extend((i as u32).to_le_bytes());for lane in &e.lanes{d.extend((lane.len()as u32).to_le_bytes());for p in lane{d.extend(p.at.to_le_bytes());d.extend(p.value.to_le_bytes());d.push(p.smooth as u8);}}}
+ // Optional trailer. Older readers still load the expressions and MPE configuration.
+ if p.mpe.channels.iter().any(|(_, config)| config.valid().wheel_bend != 2) {
+  d.extend(p.mpe.channels.iter().map(|(_, config)| config.valid().wheel_bend));
+ }
+ file.chunks.push(Chunk{tag:MPE_DATA,body:ChunkBody::Raw(d)});
+}
+fn read_mpe(file:&FlpFile,p:&mut Project){
+ fn parse(d:&[u8])->Option<(os_model::mpe::Data,Vec<(u16,usize,u32)>)>{
+  struct Read<'a>(&'a[u8]);impl Read<'_>{fn bytes<const N:usize>(&mut self)->Option<[u8;N]>{let x=self.0.get(..N)?.try_into().ok()?;self.0=&self.0[N..];Some(x)}fn u8(&mut self)->Option<u8>{Some(self.bytes::<1>()?[0])}fn u16(&mut self)->Option<u16>{Some(u16::from_le_bytes(self.bytes()?))}fn u32(&mut self)->Option<u32>{Some(u32::from_le_bytes(self.bytes()?))}fn f32(&mut self)->Option<f32>{let v=f32::from_le_bytes(self.bytes()?);v.is_finite().then_some(v)}}
+  if d.len()>32*1024*1024{return None;}let mut r=Read(d);if r.u8()?!=1{return None;}let mut data=os_model::mpe::Data::default();let mut links=vec![];
+  for _ in 0..r.u16()?{let id=r.u16()?;let c=os_model::mpe::Config{enabled:r.u8()?!=0,upper:r.u8()?!=0,members:r.u8()?,bend:r.u8()?,sensitivity:r.f32()?,pressure:r.f32()?,slide:r.f32()?,..Default::default()};data.set_config(id,c);}
+  let count=r.u32()?;if count>1_000_000{return None;}for _ in 0..count{let pat=r.u16()?;let note=r.u32()?as usize;let mut e=os_model::mpe::Expression::default();for lane in 0..3{let n=r.u32()?;if n>100_000{return None;}for _ in 0..n{let at=r.f32()?;let value=r.f32()?;let smooth=r.u8()?!=0;e.lanes[lane].push(os_model::mpe::Point{at:at.clamp(0.,1.),value:if lane==0{value.clamp(-96.,96.)}else{value.clamp(0.,1.)},smooth});}e.lanes[lane].sort_by(|a,b|a.at.total_cmp(&b.at));}let id=data.add(e);links.push((pat,note,id));}
+  if r.0.len() == data.channels.len() {
+   for ((_, config), &range) in data.channels.iter_mut().zip(r.0) {config.wheel_bend = range.clamp(1,96);}
+  }
+  Some((data,links))
+ }
+ for c in &file.chunks{if c.tag!=MPE_DATA{continue;}let ChunkBody::Raw(d)=&c.body else{continue;};let Some((mut data,links))=parse(d)else{continue;};data.channels.retain(|(id,_)|p.channels.iter().any(|c|c.index==*id));for(pat,index,id)in links{if let Some(n)=p.patterns.iter_mut().find(|p|p.number==pat).and_then(|p|p.notes.get_mut(index)){n.expression=id;}}p.mpe=data;}
+}
+
+fn write_vocals(p:&Project,file:&mut FlpFile){
+ file.chunks.retain(|c|c.tag!=Tag(*b"LSVT"));
+ // Older readers must play the finished cache, not reinterpret the new independent layers.
+ let legacy:Vec<_>=p.vocal_edits.iter().filter(|v|!p.audio_edits.iter().any(|h|h.channel==v.channel&&live_audio_edit(p,h))).collect();
+ if !legacy.is_empty(){if let Ok(data)=serde_json::to_vec(&legacy){file.chunks.push(Chunk{tag:Tag(*b"LSVT"),body:ChunkBody::Raw(data)});}}
+}
+fn read_vocals(file:&FlpFile,p:&mut Project){
+ for c in &file.chunks{if c.tag!=Tag(*b"LSVT"){continue;}let ChunkBody::Raw(data)=&c.body else{continue};
+  if data.len()>64*1024*1024{continue;}
+  if let Ok(edits)=serde_json::from_slice::<Vec<os_model::vocal::Edit>>(data){
+   let mut channels=std::collections::HashSet::new();
+   p.vocal_edits=edits.into_iter().take(1000).filter(|v|v.valid()&&p.channels.iter().any(|c|c.index==v.channel)&&channels.insert(v.channel)).collect();
+   for i in 0..p.vocal_edits.len(){if let Some(j)=(0..i).find(|&j|p.vocal_edits[j].source_hash==p.vocal_edits[i].source_hash&&p.vocal_edits[j].source==p.vocal_edits[i].source&&p.vocal_edits[j].f0==p.vocal_edits[i].f0){p.vocal_edits[i].f0=p.vocal_edits[j].f0.clone();}}
+
+  }
+ }
+}
+
+fn read_track_heights(file: &FlpFile, p: &mut Project) {
+    let default = PlaylistView::new(p.ppq);
+    let saved_zoom = p.playlist_view.unwrap_or(default).row_px() as f32 / default.row_px() as f32;
+    for chunk in &file.chunks {
+        if chunk.tag != Tag(*b"LSTH") {
+            continue;
+        }
+        let ChunkBody::Raw(data) = &chunk.body else { continue };
+        let Some((&version, records)) = data.split_first() else { continue };
+        for record in records.chunks_exact(8) {
+            let arrangement = u16::from_le_bytes([record[0], record[1]]);
+            let row = u16::from_le_bytes([record[2], record[3]]) as usize;
+            let height = f32::from_le_bytes(record[4..8].try_into().unwrap());
+            let height = match version {
+                // Version 1 stored the absolute height visible at the saved zoom.
+                1 if (16.0..=600.0).contains(&height) => height / saved_zoom,
+                2 if height > 0.0 && height <= 1800.0 => height,
+                _ => continue,
+            };
+            if let Some(track) = p.arrangements.iter_mut().find(|a| a.number == arrangement)
+                .and_then(|a| a.tracks.get_mut(row))
+            {
+                track.height = Some(height);
+            }
+        }
+    }
+}
+
+fn write_track_heights(p: &Project, file: &mut FlpFile) {
+    file.chunks.retain(|c| c.tag != Tag(*b"LSTH"));
+    let mut data = vec![2];
+    for arrangement in &p.arrangements {
+        for (row, track) in arrangement.tracks.iter().enumerate() {
+            if let Some(height) = track.height {
+                data.extend(arrangement.number.to_le_bytes());
+                data.extend((row as u16).to_le_bytes());
+                data.extend(height.to_le_bytes());
+            }
+        }
+    }
+    if data.len() > 1 {
+        file.chunks.push(Chunk { tag: Tag(*b"LSTH"), body: ChunkBody::Raw(data) });
+    }
+}
+
+fn live_audio_edit(p:&Project,d:&os_model::audio_edit::Document)->bool{
+ p.arrangements.iter().any(|a|a.number==d.arrangement&&a.clips.iter().any(|c|c.id()==d.clip&&c.source==ClipSource::Channel(d.channel)))
+}
+fn write_audio_edits(p:&Project,file:&mut FlpFile){
+ file.chunks.retain(|c|c.tag!=Tag(*b"LSAE"));
+ let docs:Vec<_>=p.audio_edits.iter().filter(|d|live_audio_edit(p,d)).collect();
+ if docs.is_empty(){return;}
+ let mut analysis:Vec<std::sync::Arc<Vec<f32>>>=vec![];let mut edits=vec![];
+ for d in p.vocal_edits.iter().filter(|d|docs.iter().any(|h|h.channel==d.channel)){
+  let index=analysis.iter().position(|f|std::sync::Arc::ptr_eq(f,&d.f0)||f==&d.f0).unwrap_or_else(||{analysis.push(d.f0.clone());analysis.len()-1});
+  let mut v=d.clone();v.f0=Vec::new().into();edits.push((v,index));
+ }
+ // Version 2 shares immutable analysis once per project, including copies and slices.
+ if let Ok(data)=serde_json::to_vec(&(2u32,&docs,&edits,&analysis)){file.chunks.push(Chunk{tag:Tag(*b"LSAE"),body:ChunkBody::Raw(data)});}
+}
+fn read_audio_edits(file:&FlpFile,p:&mut Project){
+ type Stored=(u32,Vec<os_model::audio_edit::Document>,Vec<(os_model::vocal::Edit,usize)>,Vec<std::sync::Arc<Vec<f32>>>);
+ for c in &file.chunks{if c.tag!=Tag(*b"LSAE"){continue;}let ChunkBody::Raw(data)=&c.body else{continue};
+  if data.len()>64*1024*1024{continue;}
+  let docs=if let Ok((2,docs,edits,analysis))=serde_json::from_slice::<Stored>(data){
+   let mut channels=std::collections::HashSet::new();
+   for(mut edit,index)in edits.into_iter().take(1000){let Some(f0)=analysis.get(index)else{continue};edit.f0=f0.clone();
+    if edit.valid()&&p.channels.iter().any(|c|c.index==edit.channel)&&docs.iter().any(|d|d.channel==edit.channel&&live_audio_edit(p,d))&&channels.insert(edit.channel){p.vocal_edits.retain(|old|old.channel!=edit.channel);p.vocal_edits.push(edit);}
+   }docs
+  }else if let Ok((1,docs))=serde_json::from_slice::<(u32,Vec<os_model::audio_edit::Document>)>(data){docs}else{continue};
+  let mut seen=std::collections::HashSet::new();
+  p.audio_edits=docs.into_iter().take(1000).filter(|d|p.vocal_edits.iter().any(|v|d.valid(v))&&live_audio_edit(p,d)&&seen.insert(d.channel)).collect();
+ }
+}
+
+// Optional versioned lane associations. Older readers retain ordinary clips and routing.
+const ATTACHED_LANES:Tag=Tag(*b"LSAM");
+const TRACK_MODES:Tag=Tag(*b"LSTM");
+fn read_attached_lanes(file:&FlpFile,p:&mut Project) {
+    for c in file.chunks.iter().filter(|c|c.tag==TRACK_MODES) {
+        let ChunkBody::Raw(d)=&c.body else {continue};
+        let Ok((1, entries))=serde_json::from_slice::<(u8,Vec<(u16,u16,os_model::PlaylistTrackMode)>)>(d) else {continue};
+        for (arr,row,mode) in entries {
+            if let Some(t)=p.arrangements.iter_mut().find(|a|a.number==arr).and_then(|a|a.tracks.get_mut(row as usize)){t.mode=mode;}
+        }
+    }
+    for c in &file.chunks {if c.tag!=ATTACHED_LANES {continue;}let ChunkBody::Raw(d)=&c.body else{continue};
+        if d.first()!=Some(&1) || (d.len()-1)%6!=0 {continue;}
+        for r in d[1..].chunks_exact(6){let v=|i|u16::from_le_bytes([r[i],r[i+1]]);
+            if v(4)==0 || !p.mixer.iter().any(|m|m.index==v(4)&&!m.clip_fx){continue;}
+            if let Some(t)=p.arrangements.iter_mut().find(|a|a.number==v(0)).and_then(|a|a.tracks.get_mut(v(2) as usize)){t.attached_mixer=Some(v(4));}
+        }
+    }
+}
+fn write_attached_lanes(p:&Project,file:&mut FlpFile){
+    file.chunks.retain(|c|c.tag!=TRACK_MODES);
+    let modes:Vec<_>=p.arrangements.iter().flat_map(|a|a.tracks.iter().enumerate().filter(|(_,t)|t.mode!=os_model::PlaylistTrackMode::Legacy).map(|(r,t)|(a.number,r as u16,t.mode))).collect();
+    if !modes.is_empty(){file.chunks.push(Chunk{tag:TRACK_MODES,body:ChunkBody::Raw(serde_json::to_vec(&(1u8,modes)).expect("track modes"))});}
+    file.chunks.retain(|c|c.tag!=ATTACHED_LANES);let mut d=vec![1];
+    for a in &p.arrangements {for (r,t) in a.tracks.iter().enumerate(){if let Some(m)=t.attached_mixer{for n in [a.number,r as u16,m]{d.extend(n.to_le_bytes());}}}}
+    if d.len()>1{file.chunks.push(Chunk{tag:ATTACHED_LANES,body:ChunkBody::Raw(d)});}
+}
+
+// The ordinary arrangement and the existing LSAM bindings also work in older readers.
+const PLAYLIST_SIZES: Tag = Tag(*b"LSLC");
+
+fn read_playlist_sizes(file: &FlpFile, project: &mut Project) {
+    for chunk in file.chunks.iter().filter(|chunk| chunk.tag == PLAYLIST_SIZES) {
+        let ChunkBody::Raw(bytes) = &chunk.body else { continue };
+        let Ok((1, sizes)) = serde_json::from_slice::<(u8, Vec<(u16, u16)>)>(bytes) else { continue };
+        for (number, count) in sizes {
+            if let Some(arr) = project.arrangements.iter_mut().find(|a| a.number == number) {
+                arr.visible_tracks = Some(count.min(PLAYLIST_TRACKS as u16));
+            }
+        }
+    }
+}
+
+fn write_playlist_sizes(project: &Project, file: &mut FlpFile) {
+    file.chunks.retain(|chunk| chunk.tag != PLAYLIST_SIZES);
+    let sizes: Vec<_> = project.arrangements.iter()
+        .filter_map(|a| a.visible_tracks.map(|count| (a.number, count))).collect();
+    if !sizes.is_empty() {
+        let bytes = serde_json::to_vec(&(1u8, sizes)).expect("Playlist sizes are serializable");
+        file.chunks.push(Chunk { tag: PLAYLIST_SIZES, body: ChunkBody::Raw(bytes) });
+    }
+}
+
+const PLAYLIST_LOOP: Tag = Tag(*b"LSLR");
+
+fn read_playlist_loop(file: &FlpFile) -> Option<(u32, u32)> {
+    file.chunks.iter().rev().filter(|chunk| chunk.tag == PLAYLIST_LOOP).find_map(|chunk| {
+        let ChunkBody::Raw(bytes) = &chunk.body else { return None };
+        let [1, bounds @ ..] = bytes.as_slice() else { return None };
+        let (start, end): (u32, u32) = serde_json::from_slice(bounds).ok()?;
+        (start < end).then_some((start, end))
+    })
+}
+
+fn write_playlist_loop(project: &Project, file: &mut FlpFile) {
+    file.chunks.retain(|chunk| chunk.tag != PLAYLIST_LOOP);
+    if let Some(range) = project.playlist_loop.filter(|(start, end)| start < end) {
+        let mut data = vec![1];
+        data.extend(serde_json::to_vec(&range).expect("Playlist loop is serializable"));
+        file.chunks.push(Chunk { tag: PLAYLIST_LOOP, body: ChunkBody::Raw(data) });
+    }
+}
+
+const ATTACHED_ORDER: Tag = Tag(*b"LSAO");
+type AttachedOrder = (u16, Vec<u16>, Vec<u16>);
+
+fn read_attached_order(file: &FlpFile, p: &mut Project) {
+    for c in file.chunks.iter().filter(|c| c.tag == ATTACHED_ORDER) {
+        let ChunkBody::Raw(data) = &c.body else { continue };
+        let Ok((1, entries)) = serde_json::from_slice::<(u8, Vec<AttachedOrder>)>(data) else { continue };
+        for (number, mut order, mut hidden) in entries {
+            let Some(arr) = p.arrangements.iter_mut().find(|a| a.number == number) else { continue };
+            let mut rows = std::collections::HashSet::new();
+            order.retain(|&row| u32::from(row) < PLAYLIST_TRACKS && rows.insert(row));
+            let mut inserts = std::collections::HashSet::new();
+            hidden.retain(|&n| n != 0 && p.mixer.iter().any(|m| m.index == n && !m.clip_fx) && inserts.insert(n));
+            arr.attached_order = order;
+            arr.attached_hidden = hidden;
+        }
+    }
+}
+
+fn write_attached_order(p: &Project, file: &mut FlpFile) {
+    file.chunks.retain(|c| c.tag != ATTACHED_ORDER);
+    let entries: Vec<_> = p.arrangements.iter().filter(|a| !a.attached_order.is_empty() || !a.attached_hidden.is_empty())
+        .map(|a| (a.number, &a.attached_order, &a.attached_hidden)).collect();
+    if !entries.is_empty() {
+        let data = serde_json::to_vec(&(1u8, entries)).expect("attached order is serializable");
+        file.chunks.push(Chunk { tag: ATTACHED_ORDER, body: ChunkBody::Raw(data) });
     }
 }

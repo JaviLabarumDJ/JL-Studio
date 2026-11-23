@@ -55,7 +55,7 @@ impl App {
     /// Opens the project picker at (x, y).
     pub fn open_project_picker(&mut self, at: (f32, f32)) {
         self.state.menu_open = None;
-        self.state.playlist.popup = Some(Popup { x: at.0, y: at.1, items: items(&self.state), sub: None, scroll: [0; 2] });
+        self.state.playlist.popup = Some(Popup { x: at.0, y: at.1, items: items(&self.state), sub: None, scroll: [0; 2], cascade: Vec::new() });
         self.invalidate();
     }
 
@@ -92,15 +92,11 @@ pub fn run(app: &mut App, c: ProjCmd) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{test_project, Action};
+    use crate::app::test_project;
     use crate::views::menus::{self, VIEW};
     use os_model::Pattern;
-    use os_ui::{Canvas, Rect};
+    use os_ui::Canvas;
     use winit::keyboard::{Key, NamedKey};
-
-    fn hit_rect(app: &App, a: &Action) -> Rect {
-        app.hits.iter().rev().find(|h| &h.action == a).map(|h| h.rect).unwrap_or_else(|| panic!("no hit for {a:?}"))
-    }
 
     fn app() -> App {
         let mut app = App::new(None);
@@ -144,8 +140,7 @@ mod tests {
         assert_eq!(app.state.pending_open, Some(3), "a sampler channel's window opens once hosted");
     }
 
-    /// Ctrl+F8 opens and closes it; the VIEW entry and the toolbar button open it; the button's right click is the
-    /// plugin menu (spec §2 Opening).
+    /// Ctrl+F8 and View open the same Project Picker.
     #[test]
     fn ways_in() {
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
@@ -157,24 +152,11 @@ mod tests {
         app.key(&f8, true, false);
         assert!(!is_open(&app.state), "and closes it");
 
-        let i = (0..).map_while(|i| menus::item_at(VIEW, i)).position(|it| it.label == "Clip palette").expect("VIEW entry");
+        let i = (0..).map_while(|i| menus::item_at(VIEW, i)).position(|it| it.label == "Project picker").expect("VIEW entry");
         assert!(menus::works(VIEW, menus::item_at(VIEW, i).unwrap()));
         app.menu_item(VIEW, i);
         assert!(is_open(&app.state));
-        app.state.playlist.popup = None;
-
-        app.paint(&mut c, None);
-        let b = hit_rect(&app, &Action::ProjectPicker);
-        app.mouse_move(b.cx(), b.cy());
-        app.mouse_down();
-        app.mouse_up();
-        let p = app.state.playlist.popup.as_ref().expect("open");
-        assert!(is_open(&app.state) && (p.x, p.y) == (b.x, b.bottom() + 2.0), "under the button");
-        app.state.playlist.popup = None;
-        app.paint(&mut c, None);
-        app.mouse_move(b.cx(), b.cy());
-        app.mouse_down_right();
-        app.mouse_up();
-        assert!(crate::plugin_palette::is_open(&app.state), "right click: the plugin menu");
+        app.key(&f8, true, false);
+        assert!(!is_open(&app.state), "the shortcut closes the picker opened by View");
     }
 }

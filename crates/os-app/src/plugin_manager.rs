@@ -8,15 +8,21 @@
 use winit::keyboard::{Key, NamedKey};
 
 use crate::app::App;
-use crate::plugin_db::{self as db, DirKind, Mode};
+use crate::plugin_db::{self as db, DirKind};
 use crate::views::settings::{self, Plug};
 
 impl App {
     /// The plugin manager's checks (`settings::plugin_check`).
     pub(crate) fn plugin_check(&mut self, key: &str) {
+        if key == settings::SAFE_PLUGIN_CHECK {
+            let disabled = !crate::settings_file::flag("external_plugins_disabled", false);
+            crate::prefs::set_text("external_plugins_disabled", if disabled { "1" } else { "0" });
+            self.state.message = Some("Reopen the project to apply external plug-in recovery mode.".into());
+            self.invalidate();
+            return;
+        }
         let p = &mut self.state.plugdb.prefs;
         match key {
-            settings::STARTUP_CHECK => p.startup_scan = !p.startup_scan,
             settings::ERRORS_CHECK => p.rescan_errors = !p.rescan_errors,
             settings::COMBINE_CHECK => p.combine = !p.combine,
             _ => return,
@@ -31,18 +37,15 @@ impl App {
         }
         let dir = |app: &App, i: usize| db::search_dirs(&app.state.plugdb.prefs).into_iter().nth(i);
         match a {
-            // Any folder change starts a scan (§2).
             Plug::Folder(i) => {
                 let Some(d) = dir(self, i) else { return };
                 self.state.plugdb.prefs.toggle_folder(&d.path);
                 self.prefs_changed();
-                self.start_scan(Mode::Changed);
             }
             Plug::Remove(i) => {
                 let Some(d) = dir(self, i).filter(|d| d.kind == DirKind::Added) else { return };
                 self.state.plugdb.prefs.remove_folder(&d.path);
                 self.prefs_changed();
-                self.start_scan(Mode::Changed);
                 self.state.message = Some(format!("Removed search folder {}", d.path.display()));
             }
             Plug::Prefer(p) => {
@@ -80,15 +83,14 @@ impl App {
     pub(crate) fn plugin_folder_chosen(&mut self, path: std::path::PathBuf) {
         self.state.message = Some(if self.state.plugdb.prefs.add_folder(&path) {
             self.prefs_changed();
-            self.start_scan(Mode::Changed);
-            format!("Added search folder {}: looking for plugins", path.display())
+            format!("Added search folder {}. Click Find new plugins to scan.", path.display())
         } else {
             format!("{} is searched already", path.display())
         });
     }
 
     /// Typing into the plugin table's Find box (§2). True when the key was taken.
-    pub(crate) fn plugin_find_key(&mut self, key: &Key, ctrl: bool) -> bool {
+    pub(crate) fn plugin_find_key(&mut self, key: &Key, ctrl: bool, alt: bool) -> bool {
         let s = &mut self.state;
         if !(s.settings.open && s.settings.tab == settings::PLUGINS && s.plugdb.finding) {
             s.plugdb.finding = false;
@@ -96,17 +98,12 @@ impl App {
         }
         let d = &mut s.plugdb;
         match key {
-            Key::Named(NamedKey::Enter) => d.finding = false,
+            Key::Named(NamedKey::Enter | NamedKey::Tab) => d.finding = false,
             Key::Named(NamedKey::Escape) => {
                 d.finding = false;
                 d.find.clear();
             }
-            Key::Named(NamedKey::Backspace) => {
-                d.find.pop();
-            }
-            Key::Named(NamedKey::Space) => d.find.push(' '),
-            Key::Character(c) if !ctrl => d.find.push_str(c),
-            _ => return true,
+            _ => { d.find.key_mod(key, ctrl, alt, self.shift); }
         }
         d.top = 0;
         d.refilter();

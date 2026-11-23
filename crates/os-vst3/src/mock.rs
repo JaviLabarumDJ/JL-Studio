@@ -50,6 +50,8 @@ pub struct Probe {
     pub latency: AtomicU32,
     /// The controller has the extra parameter.
     pub extra: AtomicBool,
+    pub has_mono_key: AtomicBool,
+    pub key_enabled: AtomicBool,
     /// Gain points the processor received (offset, value), in order.
     pub gain_points: Mutex<Vec<(i32, f64)>>,
     /// The controller object, for simulating edits in its editor.
@@ -269,13 +271,14 @@ impl IComponent for Component {
         kNotImplemented
     }
 
-    unsafe fn get_bus_count(&self, type_: MediaType, _dir: BusDirection) -> i32 {
+    unsafe fn get_bus_count(&self, type_: MediaType, dir: BusDirection) -> i32 {
+        if type_ == 0 && dir == 0 && self.probe.has_mono_key.load(Ordering::Relaxed) { return 3; }
         // One stereo audio input and output, no event buses.
         i32::from(type_ == 0)
     }
 
     unsafe fn get_bus_info(&self, type_: MediaType, dir: BusDirection, index: i32, info: *mut BusInfo) -> tresult {
-        if type_ != 0 || index != 0 {
+        if type_ != 0 || !(0..unsafe { self.get_bus_count(type_, dir) }).contains(&index) {
             return kInvalidArgument;
         }
         let info = unsafe { &mut *info };
@@ -283,7 +286,10 @@ impl IComponent for Component {
         info.direction = dir;
         info.channel_count = 2;
         copy_w(&mut info.name, if dir == 0 { "In" } else { "Out" });
-        info.bus_type = 0;
+        info.bus_type = i32::from(index == 2);
+        if index == 2 {
+            info.channel_count = i32::from(self.probe.key_enabled.load(Ordering::Relaxed));
+        }
         info.flags = 1;
         kResultOk
     }
@@ -323,12 +329,21 @@ impl IComponent for Component {
 
 impl IAudioProcessor for Component {
     unsafe fn set_bus_arrangements(&self, inputs: *mut SpeakerArrangement, num_ins: i32, outputs: *mut SpeakerArrangement, num_outs: i32) -> tresult {
+        if self.probe.has_mono_key.load(Ordering::Relaxed) && num_ins == 3 {
+            let mono = unsafe { *inputs.add(2) } == 1 << 19;
+            self.probe.key_enabled.store(mono, Ordering::Relaxed);
+            return if mono { kResultOk } else { kResultFalse };
+        }
         let ok = num_ins == 1 && num_outs == 1 && unsafe { *inputs == 3 && *outputs == 3 };
         self.probe.log(format!("comp.set_bus_arrangements {ok}"));
         if ok { kResultOk } else { kResultFalse }
     }
 
-    unsafe fn get_bus_arrangement(&self, _dir: BusDirection, index: i32, arr: *mut SpeakerArrangement) -> tresult {
+    unsafe fn get_bus_arrangement(&self, dir: BusDirection, index: i32, arr: *mut SpeakerArrangement) -> tresult {
+        if dir == 0 && self.probe.has_mono_key.load(Ordering::Relaxed) && (1..=2).contains(&index) {
+            unsafe { *arr = if index == 1 { 3 } else { 0 } };
+            return kResultOk;
+        }
         if index != 0 {
             return kInvalidArgument;
         }
@@ -381,6 +396,17 @@ impl IAudioProcessor for Component {
         let n = d.num_samples.max(0) as usize;
         let mut peak = 0f32;
         let mut g = self.gain.get();
+        if n > 0 && d.num_inputs == 3 && d.num_outputs == 1 {
+            unsafe {
+                let key = &*d.inputs.add(2);
+                if key.num_channels == 1 {
+                    let samples = *key.buffers.cast::<*mut f32>();
+                    for channel in 0..2 {
+                        std::ptr::copy_nonoverlapping(samples, *(*d.outputs).buffers.cast::<*mut f32>().add(channel), n);
+                    }
+                }
+            }
+        }
         if n > 0 && d.num_inputs == 1 && d.num_outputs == 1 {
             unsafe {
                 let (ib, ob) = (&*d.inputs, &*d.outputs);

@@ -225,8 +225,6 @@ pub struct EventReader<'a> {
     pos: usize,
     base: usize,
     done: bool,
-    /// Sizes by the ID ranges alone, without [`SIZE_EXCEPTIONS`] (Lemon Studio's own events, `crate::lemon`).
-    ranges: bool,
 }
 
 impl<'a> EventReader<'a> {
@@ -237,14 +235,7 @@ impl<'a> EventReader<'a> {
             pos: 0,
             base,
             done: false,
-            ranges: false,
         }
-    }
-
-    /// Reads sizes by the ID ranges alone (Lemon Studio's `LMex` events: the size exceptions are the original's).
-    pub fn ranges_only(mut self) -> Self {
-        self.ranges = true;
-        self
     }
 
     fn read_one(&mut self) -> Result<(usize, Event), ReadError> {
@@ -252,7 +243,7 @@ impl<'a> EventReader<'a> {
         let offset = self.base + start;
         let id = self.buf[start];
         let rest = &self.buf[start + 1..];
-        let kind = if self.ranges { range_kind(id) } else { kind_of(id) };
+        let kind = kind_of(id);
         let (value, used) = match kind.fixed_size() {
             Some(n) => {
                 let Some(b) = rest.get(..n) else {

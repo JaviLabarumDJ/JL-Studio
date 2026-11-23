@@ -1,0 +1,879 @@
+//! Signed Windows, Linux and macOS updates. Network and disk work never runs on the audio thread.
+use std::{fs, io::{Read, Write}, path::{Path, PathBuf}, sync::{Mutex, OnceLock}, time::{Duration, Instant}};
+use ed25519_dalek::{Signature, VerifyingKey};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+#[path = "update_retention.rs"]
+pub(crate) mod retention;
+
+pub(crate) const SETTINGS_VISIBILITY: &str = "visible_update-preferences";
+
+pub const VERSION: u64 = 2026112301;
+pub fn display_version() -> &'static str {
+    include_str!("../../../packaging/product-version.txt").trim()
+}
+#[cfg(windows)]
+pub const FEED: &str = "https://michaellanemusic.de/lemon-studio/updates/stable.json";
+#[cfg(windows)]
+const ROOT: &str = "https://michaellanemusic.de/lemon-studio/updates/";
+#[cfg(windows)]
+const PRODUCT: &str = "lemon-studio-michael-lane-windows-x64";
+#[cfg(target_os="linux")]
+pub const FEED: &str = "https://michaellanemusic.de/lemon-studio/updates/linux-x64/stable.json";
+#[cfg(target_os="linux")]
+const ROOT: &str = "https://michaellanemusic.de/lemon-studio/updates/linux-x64/";
+#[cfg(target_os="linux")]
+const PRODUCT: &str = "lemon-studio-michael-lane-linux-x64";
+#[cfg(all(target_os="macos",target_arch="aarch64"))]
+pub const FEED: &str = "https://michaellanemusic.de/lemon-studio/mac/updates/arm64/stable.json";
+#[cfg(all(target_os="macos",target_arch="aarch64"))]
+const ROOT: &str = "https://michaellanemusic.de/lemon-studio/mac/updates/arm64/";
+#[cfg(all(target_os="macos",target_arch="aarch64"))]
+const PRODUCT: &str = "lemon-studio-michael-lane-mac-arm64";
+#[cfg(all(target_os="macos",not(target_arch="aarch64")))]
+pub const FEED: &str = "https://michaellanemusic.de/lemon-studio/mac/updates/x86_64/stable.json";
+#[cfg(all(target_os="macos",not(target_arch="aarch64")))]
+const ROOT: &str = "https://michaellanemusic.de/lemon-studio/mac/updates/x86_64/";
+#[cfg(all(target_os="macos",not(target_arch="aarch64")))]
+const PRODUCT: &str = "lemon-studio-michael-lane-mac-x86_64";
+const EXE: &str = if cfg!(windows) {"lemonstudio.exe"} else {"lemonstudio"};
+#[cfg(windows)]
+const WINDOWS_EXE: &str = "ML Studio.exe";
+// Existing updaters require this exact signed payload name.
+const SOURCE_PAYLOAD: &str = "Lemon Studio Source.zip";
+const SOURCE_ARCHIVE: &str = "ML Studio Source.zip";
+const MAC_FILES: &[&str] = &["Contents/MacOS/lemonstudio","Contents/Info.plist","Contents/PkgInfo","Contents/Resources/Assets.car","Contents/Resources/lemonstudio.icns","Contents/_CodeSignature/CodeResources"];
+fn expected_files() -> Vec<&'static str> {
+    if cfg!(target_os="macos") {MAC_FILES.to_vec()} else {vec![EXE,SOURCE_PAYLOAD,"THIRD-PARTY-NOTICES.txt","LICENSE"]}
+}
+
+fn installed_name(name: &str) -> &str {
+    if name == SOURCE_PAYLOAD { SOURCE_ARCHIVE } else { name }
+}
+
+fn application_filename(name: &str) -> bool {
+    #[cfg(windows)]
+    if name.eq_ignore_ascii_case(WINDOWS_EXE) || name.eq_ignore_ascii_case(EXE) { return true; }
+    name == EXE
+}
+
+fn update_destination<'a>(name: &'a str, executable: &'a str) -> &'a str {
+    if name == EXE { executable } else { installed_name(name) }
+}
+
+#[cfg(windows)]
+pub fn use_branded_executable(args: &[String]) -> bool {
+    match windows_launch::migrate_legacy_launch(args) {
+        Ok(relaunched) => relaunched,
+        Err(error) => {
+            eprintln!("Could not switch to the ML Studio executable: {error}");
+            false
+        }
+    }
+}
+type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct File { pub name: String, pub sha256: String, pub size: u64 }
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Manifest { pub product: String, pub version: u64, pub label: String, pub notes: String, pub files: Vec<File> }
+#[derive(Serialize, Deserialize)]
+struct Signed { payload: String, signature: String }
+#[derive(Clone, Default)]
+struct Status { busy: bool, ready: Option<PathBuf>, message: String, started: bool, last: Option<Instant> }
+static STATUS: OnceLock<Mutex<Status>> = OnceLock::new();
+fn status() -> &'static Mutex<Status> { STATUS.get_or_init(Default::default) }
+fn hex(data: &[u8]) -> String { data.iter().map(|b| format!("{b:02x}")).collect() }
+fn unhex(s: &str) -> Result<Vec<u8>> {
+    if s.len()%2 != 0 || !s.is_ascii() { return Err("Invalid hexadecimal data".into()); }
+    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i+2],16).map_err(Into::into)).collect()
+}
+fn public_key() -> Result<VerifyingKey> {
+    Ok(VerifyingKey::from_bytes(&unhex(if cfg!(target_os="macos") {include_str!("update-mac-public-key.hex").trim()} else {include_str!("update-public-key.hex").trim()})?.try_into().map_err(|_| "Invalid public key")?)?)
+}
+fn allowed(name: &str) -> bool {
+    expected_files().contains(&name)
+}
+fn verify_with(bytes: &[u8], key: &VerifyingKey) -> Result<Manifest> {
+    verify_newer_than(bytes,key,VERSION)
+}
+fn authenticate(bytes: &[u8], key: &VerifyingKey) -> Result<Manifest> {
+    if bytes.len() > 65536 { return Err("Update manifest too large".into()); }
+    let signed: Signed = serde_json::from_slice(bytes)?;
+    key.verify_strict(signed.payload.as_bytes(), &Signature::from_slice(&unhex(&signed.signature)?)?)?;
+    Ok(serde_json::from_str(&signed.payload)?)
+}
+
+fn verify_newer_than(bytes: &[u8], key: &VerifyingKey, minimum: u64) -> Result<Manifest> {
+    let manifest = authenticate(bytes, key)?;
+    validate_newer(&manifest, minimum)?;
+    Ok(manifest)
+}
+
+fn validate_newer(m: &Manifest, minimum: u64) -> Result<()> {
+    if m.product != PRODUCT || m.version <= minimum || m.label.len()>80 || m.notes.len()>8000 { return Err("Wrong product or non-newer update".into()); }
+    if m.files.len()!=expected_files().len() { return Err("Incomplete update".into()); }
+    let mut names = std::collections::HashSet::new();
+    for file in &m.files {
+        if !allowed(&file.name) || !names.insert(&file.name) || file.size==0 || file.size>512*1024*1024 || unhex(&file.sha256)?.len()!=32 { return Err("Invalid update file".into()); }
+    }
+    Ok(())
+}
+fn verify(bytes: &[u8]) -> Result<Manifest> { verify_with(bytes, &public_key()?) }
+fn checked_file(path: &Path, file: &File) -> Result<()> {
+    let meta=fs::symlink_metadata(path)?;
+    if !meta.is_file() || meta.file_type().is_symlink() || meta.len()!=file.size { return Err("Update file size/type mismatch".into()); }
+    let mut input=fs::File::open(path)?; let mut hash=Sha256::new(); let mut block=[0u8;65536];
+    loop { let n=input.read(&mut block)?; if n==0 {break} hash.update(&block[..n]); }
+    if hex(&hash.finalize())!=file.sha256.to_ascii_lowercase() { return Err("Update checksum mismatch".into()); }
+    Ok(())
+}
+fn cache() -> Result<PathBuf> {
+    #[cfg(windows)]
+    let dir=PathBuf::from(std::env::var_os("LOCALAPPDATA").ok_or("No local application folder")?).join(os_paths::APP_NAME).join("Updates");
+    #[cfg(not(windows))]
+    let dir=os_paths::user_dir().ok_or("No user application folder")?.join("Updates"); fs::create_dir_all(&dir)?; Ok(dir)
+}
+fn get(url: &str, max: u64) -> Result<Vec<u8>> {
+    let response=ureq::AgentBuilder::new().timeout(Duration::from_secs(120)).redirects(0).build().get(url).call()?;
+    let mut bytes=Vec::new(); response.into_reader().take(max+1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64>max {return Err("Download exceeds expected size".into())} Ok(bytes)
+}
+
+#[cfg(not(target_os="macos"))]
+fn check_install_writable(root: &Path) -> Result<()> {
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos();
+    let probe = root.join(format!(".lemon-write-check-{}-{stamp}", std::process::id()));
+    fs::create_dir(&probe)?;
+    fs::remove_dir(probe)?;
+    Ok(())
+}
+#[cfg(target_os="macos")]
+fn writable_bundle(exe:&Path) -> Result<()> {
+    let bundle=exe.parent().and_then(Path::parent).and_then(Path::parent).ok_or("Run ML Studio from Applications")?;
+    if bundle.extension().and_then(|s|s.to_str())!=Some("app") {return Err("Run the installed ML Studio app from Applications to update".into());}
+    let parent=bundle.parent().ok_or("No Applications folder")?;
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos();
+    let probe = parent.join(format!(".lemon-write-check-{}-{stamp}", std::process::id()));
+    let file = fs::OpenOptions::new().write(true).create_new(true).open(&probe)
+        .map_err(|e| format!("Move ML Studio to a writable Applications folder, reopen it there, then retry Update ({e})"))?;
+    drop(file);
+    fs::remove_file(probe)?;
+    Ok(())
+}
+enum CheckResult {
+    Current,
+    Available(String),
+    Downloaded(PathBuf),
+}
+
+fn check(download: impl FnOnce() -> bool) -> Result<CheckResult> {
+    let bytes = get(FEED, 65536).map_err(|e| format!("Could not fetch the update feed ({e})"))?;
+    check_release(&bytes, &public_key()?, download)
+}
+
+fn check_release(bytes: &[u8], key: &VerifyingKey, download: impl FnOnce() -> bool) -> Result<CheckResult> {
+    // Authenticate even a current/older release, before interpreting its version.
+    let manifest = authenticate(bytes, key)?;
+    if manifest.product != PRODUCT { return Err("Wrong update product".into()); }
+    if manifest.version <= VERSION { return Ok(CheckResult::Current); }
+    validate_newer(&manifest, VERSION)?;
+    if !download() { return Ok(CheckResult::Available(manifest.label)); }
+
+    #[cfg(target_os="macos")] writable_bundle(&std::env::current_exe()?)?;
+    let dir=cache()?.join(format!("{}-{}",manifest.version,std::process::id())); fs::create_dir_all(&dir)?;
+    #[cfg(unix)] {use std::os::unix::fs::PermissionsExt;fs::set_permissions(&dir,fs::Permissions::from_mode(0o700))?;}
+    for file in &manifest.files {
+        status().lock().unwrap().message=format!("Downloading {}",manifest.label);
+        let dest=dir.join(&file.name);
+        fs::create_dir_all(dest.parent().ok_or("No payload directory")?)?;
+        if checked_file(&dest,file).is_ok() {continue}
+        let url=format!("{ROOT}{}/{}",manifest.version,file.name.replace(' ',"%20"));
+        let data=get(&url,file.size).map_err(|e| format!("Could not download {} ({e})", file.name))?;
+        let part=dir.join(format!("{}.part",file.name));
+        let mut out=fs::File::create(&part)?; out.write_all(&data)?; out.sync_all()?; drop(out);
+        checked_file(&part,file)?; fs::rename(&part,&dest)?;
+    }
+    fs::write(dir.join("signed.json"),bytes)?;
+    Ok(CheckResult::Downloaded(dir))
+}
+pub fn start(previous_failure: Option<&str>) {
+    // Maintenance never touches the audio/UI thread or pending newer update payloads.
+    std::thread::spawn(|| { if let Ok(exe)=std::env::current_exe() { let _=retention::run(&exe,VERSION,None); } });
+    {
+        let mut s = status().lock().unwrap();
+        s.started = true;
+        if let Some(error) = previous_failure {
+            s.last = Some(Instant::now());
+            s.message = format!("Update check failed: {error}");
+        }
+    }
+    tick();
+}
+
+/// A manual request checks and downloads regardless of the background settings.
+pub fn request() {
+    start_check(true);
+}
+
+fn start_check(manual: bool) {
+    let mut s = status().lock().unwrap();
+    if s.busy || s.ready.is_some() { return; }
+    s.busy = true;
+    s.last = Some(Instant::now());
+    s.message = "Checking for updates…".into();
+    drop(s);
+
+    std::thread::spawn(move || {
+        use crate::prefs::{AUTO_CHECK_UPDATES, AUTO_DOWNLOAD_UPDATES, check as preference};
+        let result = check(|| manual || (preference(&AUTO_CHECK_UPDATES) && preference(&AUTO_DOWNLOAD_UPDATES)));
+        let mut s = status().lock().unwrap();
+        s.busy = false;
+        match result {
+            Ok(CheckResult::Downloaded(dir)) => {
+                s.ready = Some(dir);
+                s.message = "Update ready. Click to restart, or it will install when you close ML Studio.".into();
+            }
+            Ok(CheckResult::Available(label)) => {
+                s.message = format!("{label} is available. Click Update to download it.");
+            }
+            Ok(CheckResult::Current) => s.message = "ML Studio is up to date.".into(),
+            Err(e) => {
+                s.message = format!("Update check failed: {e}. Click Update to retry.");
+                report_error(&s.message);
+            }
+        }
+    });
+}
+
+pub fn tick() {
+    if !crate::prefs::check(&crate::prefs::AUTO_CHECK_UPDATES) { return; }
+    let s = status().lock().unwrap();
+    let due = s.started && !s.busy && s.ready.is_none()
+        && s.last.is_none_or(|last| last.elapsed() >= Duration::from_secs(21600));
+    drop(s);
+    if due { start_check(false); }
+}
+pub fn ready() -> bool { status().lock().unwrap().ready.is_some() }
+pub fn display() -> (&'static str,String) {
+    let s=status().lock().unwrap();
+    (if s.ready.is_some(){"Restart"}else if s.busy{if s.message.starts_with("Downloading"){"Get…"}else{"Check…"}}else if s.message.starts_with("Update check failed"){"Retry"}else if s.message.contains("up to date"){"Latest"}else{"Update"},s.message.clone())
+}
+pub fn report_result(message: &str) {
+    if let Ok(dir)=cache() {let _=fs::write(dir.join("last-update-result.txt"),message);}
+}
+
+pub fn report_error(message: &str) {
+    if let Ok(dir) = cache() {
+        let _ = fs::write(dir.join("last-update-error.txt"), message);
+    }
+}
+
+fn last_error() -> Result<Option<String>> {
+    match fs::read_to_string(cache()?.join("last-update-error.txt")) {
+        Ok(message) => Ok(Some(message)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+pub fn take_result() -> Option<String> {
+    let file=cache().ok()?.join("last-update-result.txt");
+    // An older updater may have installed this build and left its restart notice in the old cache.
+    #[cfg(windows)]
+    let file=if !file.exists() {
+        let legacy=PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("Lemon Studio/Updates/last-update-result.txt");
+        if legacy.is_file() {legacy} else {file}
+    } else {file};
+    let message=fs::read_to_string(&file).ok()?;
+    let _=fs::remove_file(file);
+    #[cfg(windows)]
+    if message.starts_with("ML Studio updated to ") {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::UI::Shell::{SHChangeNotify, SHCNE_UPDATEITEM, SHCNF_PATHW};
+        if let Ok(exe) = std::env::current_exe() {
+            let path: Vec<u16> = exe.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+            unsafe { SHChangeNotify(SHCNE_UPDATEITEM as i32, SHCNF_PATHW, path.as_ptr().cast(), std::ptr::null()) };
+        }
+    }
+    Some(message)
+}
+
+/// Starts a copy of the running executable and waits for it to acknowledge the handoff.
+pub fn on_exit(restart: bool, project: Option<&Path>) -> Result<()> {
+    let Some(stage) = status().lock().unwrap().ready.clone() else {
+        return if restart { Err("No downloaded update is ready".into()) } else { Ok(()) };
+    };
+    let exe = std::env::current_exe()?;
+    let root = exe.parent().ok_or("No installation directory")?;
+    if !exe.file_name().and_then(|name| name.to_str()).is_some_and(application_filename) {
+        return Err("This copy uses a different executable name. Use the ML Studio installer to update it.".into());
+    }
+    #[cfg(target_os="macos")]
+    writable_bundle(&exe)?;
+    #[cfg(windows)]
+    let needs_permission = match check_install_writable(root) {
+        Ok(()) => false,
+        Err(error) if restart && error.downcast_ref::<std::io::Error>().is_some_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied) => true,
+        Err(error) => return Err(format!("ML Studio cannot write to its installation folder ({error}). Save your project and use Update > Restart to request Windows permission.").into()),
+    };
+    #[cfg(not(any(windows, target_os="macos")))]
+    check_install_writable(root).map_err(|e| format!("ML Studio cannot write to its installation folder ({e}). Use the installer or choose a writable installation folder."))?;
+
+    let helper = stage.join(if cfg!(windows) { "lemon-update-helper.exe" } else { "lemon-update-helper" });
+    fs::copy(&exe, &helper).map_err(|e| format!("Could not prepare the updater ({e})"))?;
+    #[cfg(unix)] {use std::os::unix::fs::PermissionsExt;fs::set_permissions(&helper,fs::Permissions::from_mode(0o700))?;}
+    // The helper uses the same runtime DLLs as this build. Only copy beside it, never download/execute arbitrary helpers.
+    for entry in fs::read_dir(root)? {
+        let entry=entry?;
+        if entry.path().extension().is_some_and(|s|s.eq_ignore_ascii_case("dll")) {fs::copy(entry.path(),stage.join(entry.file_name()))?;}
+    }
+    let mut cmd=std::process::Command::new(helper);
+    cmd.arg("--apply-update").arg(std::process::id().to_string()).arg(&exe).arg(&stage).arg(if restart{"restart"}else{"close"});
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos();
+    let handoff = stage.join(format!("handoff-{stamp}"));
+    fs::create_dir(&handoff)?;
+    cmd.arg(project.unwrap_or(Path::new(""))).arg(&handoff);
+    #[cfg(windows)] {use std::os::windows::process::CommandExt;cmd.creation_flags(0x08000000);}
+    #[cfg(windows)]
+    let child = if needs_permission {
+        HelperChild::Shell(windows_launch::elevate(&cmd)?)
+    } else {
+        spawn_helper(&mut cmd, restart)?
+    };
+    #[cfg(not(windows))]
+    let child = spawn_helper(&mut cmd, restart)?;
+    #[cfg(windows)]
+    let elevated_pid = match &child { HelperChild::Shell(child) => Some(child.id()), _ => None };
+    wait_for_helper(child, &handoff, Duration::from_secs(10))?;
+    #[cfg(windows)]
+    if let Some(pid) = elevated_pid {
+        let result = (|| {
+            use std::os::windows::process::CommandExt;
+            let watcher = stage.join("lemon-relaunch.exe");
+            fs::copy(&exe, &watcher)?;
+            let watcher_handoff = handoff.join("relaunch");
+            fs::create_dir(&watcher_handoff)?;
+            let child = std::process::Command::new(&watcher)
+                .arg("--relaunch-update").arg(std::process::id().to_string()).arg(pid.to_string())
+                .arg(&exe).arg(&watcher_handoff).arg(project.unwrap_or(Path::new("")))
+                .creation_flags(0x08000000).spawn()?;
+            wait_for_helper(child, &watcher_handoff, Duration::from_secs(10))
+        })();
+        if result.is_err() { fs::write(handoff.join("helper-cancelled"), b"cancelled")?; }
+        result?;
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+pub fn relaunch(args: &[String]) -> i32 {
+    match windows_launch::relaunch(args) {
+        Ok(()) => 0,
+        Err(error) => {
+            if let Some(folder) = args.get(3) { let _ = fs::write(Path::new(folder).join("result.txt"), error.to_string()); }
+            1
+        }
+    }
+}
+
+enum HelperChild {
+    Direct(std::process::Child),
+    #[cfg(windows)]
+    Shell(windows_launch::ShellChild),
+}
+
+impl From<std::process::Child> for HelperChild {
+    fn from(child: std::process::Child) -> Self { Self::Direct(child) }
+}
+
+impl HelperChild {
+    fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        match self {
+            Self::Direct(child) => child.try_wait(),
+            #[cfg(windows)]
+            Self::Shell(child) => child.try_wait(),
+        }
+    }
+    fn kill(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Direct(child) => child.kill(),
+            #[cfg(windows)]
+            Self::Shell(child) => child.kill(),
+        }
+    }
+}
+
+fn spawn_helper(cmd: &mut std::process::Command, interactive: bool) -> Result<HelperChild> {
+    match cmd.spawn() {
+        Ok(child) => Ok(child.into()),
+        #[cfg(windows)]
+        Err(error) if error.raw_os_error() == Some(740) && interactive => windows_launch::elevate(cmd).map(HelperChild::Shell),
+        Err(error) => {
+            let _ = interactive;
+            Err(format!("Could not start the update helper ({error}). Save your project and use Update > Restart to retry. Windows may ask for permission.").into())
+        }
+    }
+}
+
+#[cfg(windows)]
+#[path = "updates_windows.rs"]
+mod windows_launch;
+
+fn wait_for_helper(child: impl Into<HelperChild>, stage: &Path, timeout: Duration) -> Result<()> {
+    let mut child = child.into();
+    let until = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            let detail = fs::read_to_string(stage.join("result.txt"))
+                .ok().filter(|text| !text.is_empty()).unwrap_or_else(|| status.to_string());
+            return Err(format!("The update helper stopped before it was ready ({detail})").into());
+        }
+        if stage.join("helper-ready").is_file() {
+            return Ok(());
+        }
+        if Instant::now() >= until {
+            // An elevated process may reject TerminateProcess. It must still refuse a later install.
+            fs::write(stage.join("helper-cancelled"), b"cancelled")?;
+            // This is the child we just launched. It must not apply later after a failed handoff.
+            let _ = child.kill();
+            return Err("The update helper did not respond in time. Try Restart again or use the installer.".into());
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Commit only known app files. Originals stay in a versioned rollback directory; user data is never part of the transaction.
+fn install_files(stage: &Path, target: &Path, manifest: &Manifest) -> Result<()> {
+    let executable = target.file_name().and_then(|v|v.to_str()).filter(|name|application_filename(name))
+        .ok_or("Unexpected application filename")?;
+    let root=target.parent().ok_or("No installation directory")?;
+    let root=fs::canonicalize(root)?;
+    for file in &manifest.files {
+        checked_file(&stage.join(&file.name),file)?;
+        let dest=root.join(update_destination(&file.name, executable));
+        if dest.exists() { let meta=fs::symlink_metadata(&dest)?;if !meta.is_file() || meta.file_type().is_symlink(){return Err("Unsafe installation destination".into())} }
+    }
+    let backup=root.join(format!(".update-backup-{}-{}",manifest.version,std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()));
+    // Never overwrite a prior rollback directory or follow a junction.
+    fs::create_dir(&backup)?;
+    let mut moved: Vec<(PathBuf,PathBuf,bool)>=Vec::new();
+    let result: Result<()>=(|| {
+        // Executable last. If it is locked by another session, roll all preceding changes back.
+        let mut files=manifest.files.clone(); files.sort_by_key(|f|f.name==EXE);
+        for file in files {
+            let name=update_destination(&file.name, executable);
+            let dest=root.join(name); let old=backup.join(name); let existed=dest.exists();
+            let temp=backup.join(format!("{}.new",file.name));
+            fs::copy(stage.join(&file.name),&temp)?; checked_file(&temp,&file)?;
+            #[cfg(unix)] {use std::os::unix::fs::PermissionsExt;fs::set_permissions(&temp,fs::Permissions::from_mode(if file.name==EXE {0o755}else{0o644}))?;}
+            if existed {fs::copy(&dest,&old)?;}
+            fs::rename(&temp,&dest)?;
+            moved.push((dest,old,existed));
+        }
+        Ok(())
+    })();
+    if let Err(error)=result {
+        let mut recovery_errors=Vec::new();
+        for (dest,old,existed) in moved.iter().rev() {
+            if *existed {if let Err(e)=fs::rename(old,dest){recovery_errors.push(e.to_string());}}
+            else if dest.exists() {if let Err(e)=fs::remove_file(dest){recovery_errors.push(e.to_string());}}
+        }
+        if recovery_errors.is_empty() {
+            return Err(format!("Could not replace the installed files ({error}). Close any other copies of ML Studio, then try again. If the folder is protected, use the installer.").into());
+        }
+        return Err(format!("Update failed: {error}. Restore failed: {recovery_errors:?}. Original files are in {}",backup.display()).into());
+    }
+    Ok(())
+}
+fn install(stage:&Path,target:&Path,manifest:&Manifest)->Result<()> {
+    if cfg!(target_os="macos") {install_bundle(stage,target,manifest)} else {install_files(stage,target,manifest)}
+}
+
+/// Stage the complete signed bundle next to the current app, then swap atomically on the same volume.
+fn install_bundle(stage:&Path,target:&Path,manifest:&Manifest)->Result<()> {
+    let bundle=target.parent().and_then(Path::parent).and_then(Path::parent).ok_or("Not an installed app bundle")?;
+    if bundle.extension().and_then(|x|x.to_str())!=Some("app") || target!=bundle.join("Contents/MacOS/lemonstudio") {
+        return Err("Run the installed ML Studio app to update it".into());
+    }
+    if fs::symlink_metadata(bundle)?.file_type().is_symlink() {return Err("App bundle cannot be a symbolic link".into());}
+    let parent=bundle.parent().ok_or("No app installation folder")?;
+    let stamp=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos();
+    let next=parent.join(format!(".lemon-update-{stamp}.app"));
+    let backup=parent.join(format!(".lemon-backup-{}-{stamp}.app",manifest.version));
+    fs::create_dir(&next).map_err(|e|format!("Cannot update this location ({e}). Move ML Studio to a writable Applications folder first."))?;
+    for file in &manifest.files {
+        if !MAC_FILES.contains(&file.name.as_str()) {return Err("Unexpected bundle file".into());}
+        checked_file(&stage.join(&file.name),file)?;
+        let dest=next.join(&file.name);fs::create_dir_all(dest.parent().ok_or("No bundle folder")?)?;
+        fs::copy(stage.join(&file.name),&dest)?;checked_file(&dest,file)?;
+        #[cfg(unix)] {use std::os::unix::fs::PermissionsExt;fs::set_permissions(&dest,fs::Permissions::from_mode(if file.name=="Contents/MacOS/lemonstudio" {0o755}else{0o644}))?;}
+    }
+    #[cfg(target_os="macos")]
+    if !std::process::Command::new("/usr/bin/codesign").args(["--verify","--deep","--strict"]).arg(&next).status()?.success() {return Err("Updated app signature is invalid; original app retained".into());}
+    fs::rename(bundle,&backup)?;
+    if let Err(e)=fs::rename(&next,bundle) {
+        fs::rename(&backup,bundle).map_err(|restore|format!("Install failed: {e}; restore failed: {restore}; original app: {}",backup.display()))?;
+        return Err(e.into());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn wait_parent(pid:u32,stage:&Path)->Result<()> {
+    if pid==0 || pid==std::process::id() {return Err("Invalid parent process".into());}
+    let alive=||std::process::Command::new("/bin/kill").arg("-0").arg(pid.to_string()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().map(|s|s.success());
+    if !alive()? {return Err("Closing process no longer exists".into());}
+    fs::write(stage.join("helper-ready"),b"ready")?;
+    let until=Instant::now()+Duration::from_secs(120);
+    while alive()? {if Instant::now()>=until {return Err("ML Studio is still running; update deferred".into());}std::thread::sleep(Duration::from_millis(100));}
+    Ok(())
+}
+
+#[cfg(windows)]
+fn wait_parent(pid: u32, stage: &Path) -> Result<()> {
+    use windows_sys::Win32::{Foundation::{CloseHandle,WAIT_OBJECT_0,WAIT_TIMEOUT},System::Threading::{OpenProcess,WaitForSingleObject,PROCESS_SYNCHRONIZE}};
+    let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+    if handle.is_null() {
+        return Err(format!("Cannot wait for ML Studio to close ({})", std::io::Error::last_os_error()).into());
+    }
+    let result = fs::write(stage.join("helper-ready"), b"ready")
+        .map(|_| {
+            let until = Instant::now() + Duration::from_secs(120);
+            loop {
+                let state = unsafe { WaitForSingleObject(handle, 100) };
+                if state != WAIT_TIMEOUT || Instant::now() >= until || stage.join("helper-cancelled").exists() { break state; }
+            }
+        });
+    unsafe { CloseHandle(handle); }
+    if result? != WAIT_OBJECT_0 {
+        return Err("ML Studio is still running. Open it again and retry the update after closing other sessions.".into());
+    }
+    Ok(())
+}
+
+fn restart_app(target: &Path, project: Option<&Path>) -> Result<()> {
+    let mut cmd = std::process::Command::new(target);
+    cmd.current_dir(target.parent().ok_or("No installation directory")?);
+    if let Some(project) = project.filter(|p| !p.as_os_str().is_empty()) { cmd.arg(project); }
+    cmd.spawn()?;
+    Ok(())
+}
+
+pub fn helper(args: &[String]) -> i32 {
+    let mut parent_closed=false;
+    let mut installed=false;
+    let result: Result<()>=(|| {
+        if args.len()<4 {return Err("Missing updater arguments".into())}
+        let stage=PathBuf::from(&args[2]); let target=PathBuf::from(&args[1]);
+        let manifest=verify(&fs::read(stage.join("signed.json"))?)?;
+        for file in &manifest.files { checked_file(&stage.join(&file.name), file)?; }
+        #[cfg(not(target_os="macos"))]
+        check_install_writable(target.parent().ok_or("No installation directory")?)?;
+        let handoff = args.get(5).map(Path::new).unwrap_or(&stage);
+        if handoff != stage && handoff.parent() != Some(stage.as_path()) { return Err("Invalid updater handoff folder".into()); }
+        wait_parent(args[0].parse()?, handoff)?;
+        if handoff.join("helper-cancelled").exists() {
+            return Err("Update handoff was cancelled; retry Update from ML Studio".into());
+        }
+        parent_closed=true;
+        install(&stage,&target,&manifest)?;
+        installed=true;
+        #[cfg(windows)]
+        if let Err(error)=windows_launch::repair_start_menu(&target){eprintln!("Start menu shortcut: {error}");}
+        let _=retention::run(&target,manifest.version,Some(&stage));
+        let _=fs::write(stage.join("result.txt"),format!("Installed {}",manifest.label));
+        report_result(&format!("ML Studio updated to {}.",manifest.label));
+        if args[3]=="restart" { restart_app(&target, args.get(4).map(Path::new))?; }
+        Ok(())
+    })();
+    if let Err(e) = result {
+        let message = if installed {
+            format!("The update installed, but ML Studio could not reopen ({e}). Open it from your shortcut.")
+        } else {
+            format!("Automatic update was not completed: {e}")
+        };
+        report_error(&message);
+        report_result(&message);
+        if let Some(dir) = args.get(2) {
+            let _ = fs::write(Path::new(dir).join("result.txt"), &message);
+        }
+        if let Some(dir) = args.get(5).filter(|dir| Path::new(dir).parent() == args.get(2).map(Path::new)) {
+            let _ = fs::write(Path::new(dir).join("result.txt"), &message);
+        }
+        // Write the error before the original app starts and looks for the result.
+        if !installed && parent_closed && args.get(3).is_some_and(|s| s == "restart") {
+            if let Err(e) = restart_app(Path::new(&args[1]), args.get(4).map(Path::new)) {
+                let message = format!("{message}\nML Studio could not reopen ({e}). Open it from your shortcut.");
+                report_error(&message);
+                report_result(&message);
+            }
+        }
+        return 1;
+    }
+    0
+}
+
+/// Read-only release diagnostics, before any window, project or audio device is opened.
+pub fn diagnostic(args: &[String]) -> i32 {
+    let result: Result<String>=(|| {
+        match args.first().map(String::as_str) {
+            Some("--update-version") => Ok(VERSION.to_string()),
+            Some("--update-status") => {
+                let detail = last_error()?.unwrap_or_else(|| "No update error recorded.".into());
+                Ok(format!("ML Studio build {VERSION}\n{detail}"))
+            },
+            Some("--cleanup-updates") => Ok(format!("Removed {} obsolete update folders; newest two rollback backups retained", retention::run(&std::env::current_exe()?,VERSION,None)?)),
+            Some("--check-update-feed") => Ok(format!("{}",if matches!(check(|| true)?, CheckResult::Downloaded(_)){"Update downloaded and verified"}else{"Signed feed verified; up to date"})),
+            Some("--verify-update") => {
+                let path=Path::new(args.get(1).ok_or("Manifest path required")?);
+                let m=verify_newer_than(&fs::read(path)?,&public_key()?,0)?;
+                for file in &m.files {checked_file(&path.parent().ok_or("No manifest folder")?.join(&file.name),file)?;}
+                Ok(format!("Verified {} ({}), all {} files",m.label,m.version,m.files.len()))
+            },
+            _ => Err("Unknown diagnostic".into())
+        }
+    })();
+    match result {Ok(s)=>{println!("{s}");0},Err(e)=>{eprintln!("{e}");1}}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ed25519_dalek::{Signer,SigningKey};
+    #[test]
+    fn update_check_can_report_availability_without_staging_a_download() {
+        let key = SigningKey::from_bytes(&[23; 32]);
+        let mut manifest = Manifest {
+            product: PRODUCT.into(),
+            version: VERSION + 1,
+            label: "New release".into(),
+            notes: String::new(),
+            files: expected_files().into_iter().map(|name| File {
+                name: name.into(), size: 1, sha256: hex(&Sha256::digest(b"x")),
+            }).collect(),
+        };
+        let sign = |m: &Manifest| {
+            let payload = serde_json::to_string(m).unwrap();
+            let signature = hex(&key.sign(payload.as_bytes()).to_bytes());
+            serde_json::to_vec(&Signed { payload, signature }).unwrap()
+        };
+        let bytes = sign(&manifest);
+        let public = key.verifying_key();
+        assert!(matches!(check_release(&bytes, &public, || false).unwrap(),
+            CheckResult::Available(label) if label == "New release"));
+        let other_key = SigningKey::from_bytes(&[24; 32]).verifying_key();
+        assert!(check_release(&bytes, &other_key, || panic!("untrusted feed")).is_err());
+        manifest.files.clear();
+        assert!(check_release(&sign(&manifest), &public, || panic!("incomplete feed")).is_err());
+        manifest.version = VERSION;
+        assert!(matches!(check_release(&sign(&manifest), &public, || panic!("current version")).unwrap(),
+            CheckResult::Current));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn updater_cancelled_handoff_stops_while_parent_stays_open() {
+        let root = std::env::temp_dir().join(format!("lemon-cancel-check-{}", std::process::id()));
+        let old = root.join("handoff-1");
+        let retry = root.join("handoff-2");
+        fs::create_dir_all(&old).unwrap();
+        fs::create_dir(&retry).unwrap();
+        fs::write(old.join("helper-cancelled"), b"cancelled").unwrap();
+        let start = Instant::now();
+        assert!(wait_parent(std::process::id(), &old).is_err());
+        assert!(start.elapsed() < Duration::from_secs(5));
+        assert!(!retry.join("helper-ready").exists());
+        assert!(old.join("helper-cancelled").is_file());
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn updater_button_and_cancel_preserve_session() {
+        use crate::{app::{App,Action},dialog::{self,Then,Next,Reply,Answer}};
+        let mut app=App::new(None);
+        status().lock().unwrap().ready=Some(PathBuf::from("test-only"));
+        assert_eq!(display().0,"Restart");
+        for width in [900,1600] {
+            let mut canvas=os_ui::Canvas::new(width,900,1.0).unwrap();app.paint(&mut canvas,None);
+            let hit=app.hits.iter().find(|h|h.action==Action::Updates).expect("update button");
+            assert!(hit.rect.x>=0. && hit.rect.right()<=width as f32);
+            assert_eq!(app.top_hit(hit.rect.cx(),hit.rect.cy()).map(|h|&h.action),Some(&Action::Updates));
+            let cpu=app.hits.iter().find(|h|h.action==Action::CpuPanel).expect("CPU visible");
+            let ai=app.hits.iter().find(|h|h.action==Action::Ai).unwrap();
+            // The combined audio monitor is taller/wider than the former compact CPU badge.
+            assert!(cpu.rect.x>=0. && cpu.rect.w>0. && cpu.rect.intersect(&ai.rect).is_empty() && cpu.rect.h>0. && cpu.rect.h<=40.);
+            let donate=app.hits.iter().find(|h|h.action==Action::Donate).expect("donate button");
+            assert!(hit.rect.w<100.0 && (donate.rect.w-84.0*crate::views::band_k(&app.state)).abs()<0.01 && donate.rect.intersect(&hit.rect).is_empty() && donate.rect.right()<=width as f32);
+            let minimize=app.hits.iter().find(|h|h.action==Action::Minimize).unwrap();
+            let maximize=app.hits.iter().find(|h|h.action==Action::Maximize).unwrap();
+            let close=app.hits.iter().find(|h|h.action==Action::Close).unwrap();
+            assert!(minimize.rect.x-donate.rect.right()>=32.);
+            assert!(maximize.rect.x>=minimize.rect.right() && close.rect.x>=maximize.rect.right());
+            assert!(close.rect.right()<=width as f32 && close.rect.x>=width as f32-64.);
+            assert_eq!(app.top_hit(maximize.rect.cx(),maximize.rect.cy()).map(|h|&h.action),Some(&Action::Maximize));
+            assert_eq!(app.hits.iter().filter(|h|h.action==Action::Close).count(),1);
+            if let Some(dir)=std::env::var_os("LEMON_UPDATE_PREVIEW") {let dir=PathBuf::from(dir);fs::create_dir_all(&dir).unwrap();canvas.pixmap.save_png(dir.join(format!("updates-{width}.png"))).unwrap();}
+        }
+        dialog::fake::live(true);
+        app.state.tempo+=1.0;
+        app.act(Action::Updates);
+        assert!(!app.want_exit && !app.restart_update);
+        assert!(!app.state.dialogs.is_empty());
+        app.dialog_done(Then::Discard(Next::Update),Reply::Button(Answer::Cancel));
+        assert!(!app.want_exit && !app.restart_update);
+        app.dialog_done(Then::Discard(Next::Update),Reply::Button(Answer::No));
+        assert!(!app.want_exit && !app.restart_update, "failed handoff must leave the app open");
+        assert!(app.modal_open(), "the failure is shown in a dialog");
+        status().lock().unwrap().ready=None;
+        dialog::fake::live(false);
+
+        app.menu_item(crate::views::menus::HELP_MENU, crate::views::menus::HELP_ABOUT);
+        assert!(app.state.settings.open);
+        assert_eq!(app.state.settings.tab, crate::views::settings::ABOUT);
+    }
+
+    #[test]
+    fn updater_reports_helper_exit_and_rejects_timeout() {
+        let stage = std::env::temp_dir().join(format!("lemon-update-handoff-{}", std::process::id()));
+        fs::create_dir(&stage).unwrap();
+        fs::write(stage.join("result.txt"), "Signed update manifest could not be read").unwrap();
+        #[cfg(windows)]
+        let mut command = std::process::Command::new("cmd.exe");
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x08000000).args(["/d", "/c", "exit 42"]);
+        }
+        #[cfg(unix)]
+        let mut command = {
+            let mut command = std::process::Command::new("/bin/sh");
+            command.args(["-c", "exit 42"]);
+            command
+        };
+        let error = wait_for_helper(command.spawn().unwrap(), &stage, Duration::from_secs(5)).unwrap_err();
+        assert!(error.to_string().contains("Signed update manifest could not be read"));
+        #[cfg(windows)]
+        let mut waiting = std::process::Command::new("ping.exe");
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            waiting.creation_flags(0x08000000).args(["-n", "5", "127.0.0.1"]);
+        }
+        #[cfg(unix)]
+        let mut waiting = {
+            let mut command = std::process::Command::new("/bin/sleep");
+            command.arg("5");
+            command
+        };
+        let error = wait_for_helper(waiting.spawn().unwrap(), &stage, Duration::ZERO).unwrap_err();
+        assert!(error.to_string().contains("did not respond in time"));
+        assert!(stage.join("helper-cancelled").is_file());
+        fs::remove_file(stage.join("helper-cancelled")).unwrap();
+        fs::remove_file(stage.join("result.txt")).unwrap();
+        fs::remove_dir(stage).unwrap();
+    }
+    #[cfg(unix)]
+    #[test]
+    fn unix_flat_install_keeps_permissions_and_waits_for_exit() {
+        use std::os::unix::fs::PermissionsExt;
+        let root=std::env::temp_dir().join(format!("lemon-unix-update-{}",std::process::id()));
+        let stage=root.join("stage");let app=root.join("app");fs::create_dir_all(&stage).unwrap();fs::create_dir_all(&app).unwrap();
+        let files:Vec<_>=[EXE,"LICENSE"].iter().map(|n|{fs::write(stage.join(n),b"new payload").unwrap();fs::write(app.join(n),b"old payload").unwrap();File{name:n.to_string(),size:11,sha256:hex(&Sha256::digest(b"new payload"))}}).collect();
+        let m=Manifest{product:PRODUCT.into(),version:VERSION+1,label:"Test".into(),notes:"".into(),files};
+        install_files(&stage,&app.join(EXE),&m).unwrap();
+        assert_eq!(fs::metadata(app.join(EXE)).unwrap().permissions().mode()&0o777,0o755);
+        assert_eq!(fs::read(app.join(EXE)).unwrap(),b"new payload");
+        let mut child=std::process::Command::new("/bin/sleep").arg("0.3").spawn().unwrap();
+        let pid=child.id();let thread=std::thread::spawn(move||child.wait().unwrap());
+        let start=Instant::now();wait_parent(pid,&stage).unwrap();thread.join().unwrap();
+        assert!(start.elapsed()>=Duration::from_millis(200));assert!(stage.join("helper-ready").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os="macos")]
+    #[test]
+    #[ignore = "requires LEMON_UPDATE_TEST_BUNDLE pointing to a signed scratch bundle"]
+    fn mac_signed_bundle_update_transaction() {
+        let input=PathBuf::from(std::env::var_os("LEMON_UPDATE_TEST_BUNDLE").expect("signed bundle"));
+        let root=std::env::temp_dir().join(format!("lemon-mac-update-{}",std::process::id()));
+        let stage=root.join("stage");let app=root.join("Lemon Studio.app");
+        fs::create_dir_all(&stage).unwrap();fs::create_dir_all(&app).unwrap();
+        let files=MAC_FILES.iter().map(|name|{
+            for dir in [&stage,&app] {let dest=dir.join(name);fs::create_dir_all(dest.parent().unwrap()).unwrap();fs::copy(input.join(name),dest).unwrap();}
+            let data=fs::read(stage.join(name)).unwrap();File{name:name.to_string(),size:data.len() as u64,sha256:hex(&Sha256::digest(&data))}
+        }).collect();
+        let m=Manifest{product:PRODUCT.into(),version:VERSION+1,label:"Test".into(),notes:"".into(),files};
+        let key=SigningKey::from_bytes(&[31;32]);
+        let signed=|m:&Manifest| {let payload=serde_json::to_string(m).unwrap();let signature=hex(&key.sign(payload.as_bytes()).to_bytes());serde_json::to_vec(&Signed{payload,signature}).unwrap()};
+        assert!(verify_with(&signed(&m),&key.verifying_key()).is_ok());
+        let mut wrong=m.clone();wrong.product="lemon-studio-michael-lane-mac-x86_64-wrong".into();assert!(verify_with(&signed(&wrong),&key.verifying_key()).is_err());
+        wrong=m.clone();wrong.files[0].name="../outside".into();assert!(verify_with(&signed(&wrong),&key.verifying_key()).is_err());
+        let target=app.join("Contents/MacOS/lemonstudio");let original=fs::read(&target).unwrap();
+        fs::write(stage.join("Contents/PkgInfo"),b"tampered").unwrap();
+        assert!(install_bundle(&stage,&target,&m).is_err());assert_eq!(fs::read(&target).unwrap(),original);
+        fs::copy(input.join("Contents/PkgInfo"),stage.join("Contents/PkgInfo")).unwrap();
+        fs::write(root.join("user-project.flp"),b"keep").unwrap();
+        install_bundle(&stage,&target,&m).unwrap();
+        assert!(std::process::Command::new("/usr/bin/codesign").args(["--verify","--deep","--strict"]).arg(&app).status().unwrap().success());
+        assert!(std::process::Command::new(&target).arg("--update-version").status().unwrap().success());
+        assert_eq!(fs::read(root.join("user-project.flp")).unwrap(),b"keep");
+        assert!(fs::read_dir(&root).unwrap().flatten().any(|e|e.file_name().to_string_lossy().starts_with(".lemon-backup-")));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(not(target_os="macos"))]
+    #[test]
+    fn updater_signature_scope_and_transaction() {
+        let key=SigningKey::from_bytes(&[19;32]);
+        let root=std::env::temp_dir().join(format!("lemon-update-test-{}",std::process::id()));
+        let stage=root.join("stage");let app=root.join("app"); fs::create_dir_all(&stage).unwrap();fs::create_dir_all(&app).unwrap();
+        let files:Vec<_>=expected_files().iter().map(|n| {
+            fs::write(stage.join(n),b"new payload").unwrap();fs::write(app.join(installed_name(n)),b"old payload").unwrap();
+            File{name:n.to_string(),size:11,sha256:hex(&Sha256::digest(b"new payload"))}
+        }).collect();
+        let mut m=Manifest{product:PRODUCT.into(),version:VERSION+1,label:"Test".into(),notes:"".into(),files};
+        let signed=|m:&Manifest| {let payload=serde_json::to_string(m).unwrap();let signature=hex(&key.sign(payload.as_bytes()).to_bytes());serde_json::to_vec(&Signed{payload,signature}).unwrap()};
+        let bytes=signed(&m);assert!(verify_with(&bytes,&key.verifying_key()).is_ok());
+        assert!(verify_with(&bytes,&SigningKey::from_bytes(&[20;32]).verifying_key()).is_err());
+        m.files[0].name="../escape.exe".into();assert!(verify_with(&signed(&m),&key.verifying_key()).is_err());m.files[0].name=EXE.into();
+        m.product="another-product".into();assert!(verify_with(&signed(&m),&key.verifying_key()).is_err());m.product=PRODUCT.into();
+        m.version=VERSION;assert!(verify_with(&signed(&m),&key.verifying_key()).is_err());m.version=VERSION+1;
+        fs::write(app.join("song.flp"),b"keep my project").unwrap();
+        let plugins = app.join("VST3");
+        let downloaded = root.join("profile/Plugin Downloads/Installed/octasine");
+        let activation = root.join("profile/Licenses/ML Studio Supporter.mlsupport");
+        fs::create_dir_all(activation.parent().unwrap()).unwrap();
+        fs::write(&activation, b"existing signed supporter activation").unwrap();
+        fs::create_dir_all(&plugins).unwrap();
+        fs::create_dir_all(&downloaded).unwrap();
+        let surge = plugins.join("Surge XT.vst3");
+        let octasine = downloaded.join("OctaSine.clap");
+        fs::write(&surge, b"existing instrument").unwrap();
+        fs::write(&octasine, b"existing portable instrument").unwrap();
+        fs::write(stage.join("LICENSE"),b"bad").unwrap();assert!(install(&stage,&app.join(EXE),&m).is_err());assert_eq!(fs::read(app.join(EXE)).unwrap(),b"old payload");
+        fs::write(stage.join("LICENSE"),b"new payload").unwrap();
+        #[cfg(windows)] {
+            use std::os::windows::fs::OpenOptionsExt;
+            let locked=fs::OpenOptions::new().read(true).share_mode(0).open(app.join(EXE)).unwrap();
+            assert!(install(&stage,&app.join(EXE),&m).is_err());
+            drop(locked);
+            for file in &m.files {assert_eq!(fs::read(app.join(installed_name(&file.name))).unwrap(),b"old payload", "failed update must roll back every file");}
+        }
+        install(&stage,&app.join(EXE),&m).unwrap();
+        assert_eq!(fs::read(app.join(EXE)).unwrap(),b"new payload");
+        #[cfg(windows)] {
+            let branded = app.join(WINDOWS_EXE);
+            fs::write(&branded, b"old branded executable").unwrap();
+            install(&stage, &branded, &m).unwrap();
+            assert_eq!(fs::read(&branded).unwrap(), b"new payload");
+        }
+        assert_eq!(fs::read(app.join(SOURCE_ARCHIVE)).unwrap(),b"new payload");
+        assert!(!app.join(SOURCE_PAYLOAD).exists());
+        assert!(fs::read_dir(&app).unwrap().filter_map(std::result::Result::ok).any(|e|e.file_name().to_string_lossy().starts_with(".update-backup-") && fs::read(e.path().join(EXE)).is_ok_and(|b|b==b"old payload")));
+        assert_eq!(fs::read(app.join("song.flp")).unwrap(),b"keep my project");
+        assert_eq!(fs::read(surge).unwrap(), b"existing instrument");
+        assert_eq!(fs::read(octasine).unwrap(), b"existing portable instrument");
+        assert_eq!(fs::read(activation).unwrap(), b"existing signed supporter activation", "app updates never replace profile activation");
+        fs::remove_dir_all(root).unwrap();
+    }
+}

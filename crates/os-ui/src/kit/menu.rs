@@ -105,6 +105,41 @@ pub fn metrics(scale: f32) -> Metrics {
     Metrics { row: (em + 7.0) / k, head: (em + 4.0) / k, sep: (2.0 * gap + 1.0) / k, sep_line: gap / k, line: 1.0 / k, border: 2.0 / k }
 }
 
+/// App menu lettering, shared by dropdowns and context menus.
+pub fn app_font(t: &Palette, size: u16) -> Font {
+    if t.style.vintage_2005 { Font::vintage(size) } else { Font::new(size + 2) }
+}
+
+/// Shortcuts use the same upright lettering as their row in the modern theme.
+pub fn app_shortcut_font(t: &Palette, font: Font) -> Font {
+    if super::lemon::on(t) { font } else { font.italic() }
+}
+
+pub fn app_row_text_y(c: &mut Canvas, t: &Palette, row: Rect, font: Font, legacy_offset: f32) -> f32 {
+    if super::lemon::on(t) {
+        (row.cy() - c.line_height(font) / 2.0).round()
+    } else {
+        row.y + legacy_offset + (row.h - ROW) / 2.0
+    }
+}
+
+/// Raised steel border with square corners and a device-pixel bevel.
+pub fn vintage_frame(c: &mut Canvas, t: &Palette, r: Rect, m: &Metrics) {
+    c.fill_rect(r, t.menu_pop_border);
+    let inner = r.inset(m.line);
+    c.fill_rect(inner, t.menu_pop_head);
+    c.fill_rect(Rect::new(inner.x, inner.y, inner.w, m.line), Color::rgb(0xcad2d1));
+    c.fill_rect(Rect::new(inner.x, inner.y, m.line, inner.h), Color::rgb(0xcad2d1));
+    c.fill_rect(r.inset(m.border), t.menu_pop);
+}
+
+pub fn vintage_highlight(c: &mut Canvas, t: &Palette, r: Rect) {
+    let edge = 1.0 / c.scale;
+    c.fill_rect(r, t.menu_pop_hi);
+    c.fill_rect(Rect::new(r.x, r.y, r.w, edge), Color::rgb(0x687e76));
+    c.fill_rect(Rect::new(r.x, r.bottom() - edge, r.w, edge), Color::rgb(0xd9e4db));
+}
+
 fn font(style: MenuStyle) -> Font {
     match style {
         MenuStyle::Context => Font::new(14),
@@ -217,10 +252,17 @@ pub fn paint(c: &mut Canvas, t: &Palette, items: &[MenuItem], l: &MenuLayout, st
             MenuItem::Item { label, shortcut, mark, sub, enabled } => {
                 let on = lit == Some(i) && (*enabled || style == MenuStyle::List);
                 if on {
-                    c.fill_rect(rr, hi);
+                    if c.stock_editor.is_some() && *enabled {
+                        c.fill_rect(rr, Color::rgb(0x2b3340));
+                        c.fill_rect(Rect::new(rr.x, rr.y, 2.0, rr.h), os_theme::design::lemon::MAIN);
+                    } else {
+                        c.fill_rect(rr, hi);
+                    }
                 }
                 let col = if !enabled {
                     dim
+                } else if on && c.stock_editor.is_some() {
+                    Color::rgb(0xf2f2f2)
                 } else if on && style == MenuStyle::List {
                     t.tx(0xffffff)
                 } else {
@@ -259,6 +301,49 @@ pub fn body(t: &Palette, style: MenuStyle) -> Color {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stock_selection_keeps_label_contrast_when_hover_moves() {
+        use os_theme::design::{NEON_INKS, StockEditorLook};
+        let items = [MenuItem::item("Frequency shift"), MenuItem::item("Reverse polarity")];
+        let palette = os_theme::design::palette(os_theme::design::Design::Lemon, None);
+        for scale in [1.0, 1.5, 2.0] {
+            let mut canvas = Canvas::new((210.0 * scale) as u32, (84.0 * scale) as u32, scale).unwrap();
+            for (name, inks, spread) in [
+                ("factory", NEON_INKS, 0),
+                ("custom", [Color::rgb(0x185b45), Color::rgb(0x7654bd), Color::rgb(0xf2954b)], 100),
+            ] {
+                canvas.set_stock_editor_look(Some(StockEditorLook {
+                    inks, spread, glow: 125, background: Default::default(),
+                }));
+                let layout = layout(&mut canvas, &items, MenuStyle::List);
+                for hover in [None, Some(1)] {
+                    canvas.begin_frame(None);
+                    canvas.clear(Color::rgb(0x222222));
+                    paint(&mut canvas, &palette, &items, &layout, MenuStyle::List, 0., 0., hover, Some(0));
+                    let row = layout.rows[hover.unwrap_or(0)];
+                    let mut frame = vec![0; canvas.pixmap.width() as usize * canvas.pixmap.height() as usize];
+                    canvas.copy_to_xrgb(&mut frame);
+                    let luma = |x: usize, y: usize| {
+                        let [_, r, g, b] = frame[y * canvas.pixmap.width() as usize + x].to_be_bytes();
+                        (54 * u32::from(r) + 183 * u32::from(g) + 19 * u32::from(b)) / 256
+                    };
+                    let backdrop = luma(((row.right() - 3.) * scale) as usize, (row.cy() * scale) as usize);
+                    let xs = ((row.x + 6.) * scale) as usize..((row.right() - 4.) * scale) as usize;
+                    let ys = ((row.y + 2.) * scale) as usize..((row.bottom() - 2.) * scale) as usize;
+                    let bright = ys.map(|y| xs.clone().filter(|&x| luma(x, y) > backdrop + 90).count()).sum::<usize>();
+                    assert!(bright > 10, "selected label lost contrast at {scale}x ({name}, {hover:?})");
+                    if let Some(dir) = std::env::var_os("ML_STOCK_SELECTION_PREVIEW") {
+                        super::super::lemon::editor_mode_tab(&mut canvas, Rect::new(2., 54., 82., 24.), "Normal", hover.is_none());
+                        super::super::lemon::editor_mode_tab(&mut canvas, Rect::new(86., 54., 82., 24.), "Advanced", hover.is_some());
+                        let file = format!("selection-{name}-{scale}-{}.png", hover.unwrap_or(0));
+                        canvas.save_presented_png(std::path::Path::new(&dir).join(file)).unwrap();
+                    }
+                }
+                canvas.set_stock_editor_look(None);
+            }
+        }
+    }
 
     #[test]
     fn columns_and_hit_test() {

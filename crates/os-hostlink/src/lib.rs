@@ -19,14 +19,8 @@
 //! compiled into Lemon Studio share this crate with the app; a copy loaded from a bundle has its own registry and is never
 //! hosted, as in another DAW.
 //!
-//! On the audio side, [`levels`] hands a Lemon instrument the channel's volume and pan. Both sides read a plugin's
-//! saved state with [`state`].
-//!
 //! Spec: `plugins/host-link.md`. This is a Lemon Studio design, not FL's protocol.
 // spec: plugins/host-link.md
-
-pub mod levels;
-pub mod state;
 
 /// Name passed to `RegisterWindowMessageW`.
 pub const MESSAGE_NAME: &str = "OpenStudio.HostLink.1";
@@ -63,10 +57,9 @@ pub enum Cmd {
     /// instance and answers 1; 0 = not handled (a plugin that never got the hello keeps the entry disabled).
     Automate = 10,
     /// Plugin -> host: an audio file for the project (Tesla's "Send to playlist as audio clip" / "Send to selected
-    /// channel" / "Send to new Lemon Slicer channel"), `lparam` = [`AudioTo`]: 0 = to the playlist as an audio clip,
-    /// 1 = into the selected channel, 2 = into a new Lemon Slicer channel (sliced at the file's cue points). The file's
-    /// path waits in the process's outbox ([`post_audio`]; the host takes it with [`take_audio`]). The host answers 1;
-    /// 0 = not handled (the plugin empties the outbox again).
+    /// channel"), `lparam` 0 = to the playlist as an audio clip, 1 = into the selected channel. The file's path waits in
+    /// the process's outbox ([`post_audio`]; the host takes it with [`take_audio`]). The host answers 1; 0 = not
+    /// handled (the plugin empties the outbox again).
     Audio = 11,
     /// Host -> plugin: whether the editor can be resized by the host's frame. Answer: its smallest content size in
     /// logical px ([`pack_size`]); 0 = a fixed size (unanswered messages return 0 too).
@@ -75,10 +68,12 @@ pub enum Cmd {
     /// ([`pack_size`]). The plugin resizes its editor (to at least its smallest size) and answers 1; [`Cmd::Metrics`]
     /// then gives the size it took, and the frame follows.
     SetSize = 13,
-    /// Plugin -> host: notes for the plugin's channel in the current pattern (Lemon Slicer's dump), replacing the
-    /// channel's notes there. `lparam` = the token [`post_notes`] gave; the host takes the notes with [`take_notes`]
-    /// and answers 1; 0 = not handled (the plugin takes them back).
-    Notes = 14,
+    /// Plugin -> host: open the sample chooser for this channel (argument 1 reveals its sample in the Browser).
+    BrowseSample = 14,
+    /// Plugin -> host: sampler fit command (0 detect, 1 fit, 2 enter BPM, 3 reset, 100+n beats, 1000+n bars, 1000000+source milli-BPM).
+    SampleFit = 15,
+    /// Plugin -> host: completed persistent-state edit; argument is a bounded outbox token.
+    StateEdit = 16,
 }
 
 impl Cmd {
@@ -97,75 +92,27 @@ impl Cmd {
             11 => Cmd::Audio,
             12 => Cmd::Resizable,
             13 => Cmd::SetSize,
-            14 => Cmd::Notes,
+            14 => Cmd::BrowseSample,
+            15 => Cmd::SampleFit,
+            16 => Cmd::StateEdit,
             _ => return None,
         })
     }
 }
 
-/// Where an audio file sent with [`Cmd::Audio`] goes (the message's `lparam`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AudioTo {
-    /// The playlist, as an audio clip at the song position.
-    Playlist = 0,
-    /// The selected channel's sample (a new sampler channel when it isn't a sampler).
-    Channel = 1,
-    /// A new Lemon Slicer channel, sliced at the file's cue points.
-    Slicer = 2,
-}
+static OUTBOX: std::sync::Mutex<Vec<(String, bool)>> = std::sync::Mutex::new(Vec::new());
 
-impl AudioTo {
-    pub fn from_isize(v: isize) -> AudioTo {
-        match v {
-            1 => AudioTo::Channel,
-            2 => AudioTo::Slicer,
-            _ => AudioTo::Playlist,
-        }
-    }
-}
-
-static OUTBOX: std::sync::Mutex<Vec<(String, AudioTo)>> = std::sync::Mutex::new(Vec::new());
-
-/// Plugin: a file for the host to take with the next [`Cmd::Audio`], and where it goes. Plugins built into the host
-/// share its process, so the path need not travel in the message.
-pub fn post_audio(path: &str, to: AudioTo) {
+/// Plugin: a file for the host to take with the next [`Cmd::Audio`] (`channel`: into the selected channel rather than
+/// the playlist). Plugins built into the host share its process, so the path need not travel in the message.
+pub fn post_audio(path: &str, channel: bool) {
     if let Ok(mut o) = OUTBOX.lock() {
-        o.push((path.to_string(), to));
+        o.push((path.to_string(), channel));
     }
 }
 
 /// Host (or a plugin whose message went unanswered): the files posted since the last call, oldest first.
-pub fn take_audio() -> Vec<(String, AudioTo)> {
+pub fn take_audio() -> Vec<(String, bool)> {
     OUTBOX.lock().map(|mut o| std::mem::take(&mut *o)).unwrap_or_default()
-}
-
-/// A note for [`Cmd::Notes`]: start and end in beats from the pattern's start, key (60 = C5), velocity (0..=127).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct NoteOut {
-    pub start: f64,
-    pub end: f64,
-    pub key: u8,
-    pub velocity: u8,
-}
-
-static NOTES: std::sync::Mutex<(isize, Vec<(isize, Vec<NoteOut>)>)> = std::sync::Mutex::new((0, Vec::new()));
-
-/// Plugin: notes for the host to take with the next [`Cmd::Notes`]; the token to send as its `lparam`.
-pub fn post_notes(notes: Vec<NoteOut>) -> isize {
-    let Ok(mut o) = NOTES.lock() else { return 0 };
-    o.0 = o.0 % 0x7fff_ffff + 1;
-    let token = o.0;
-    o.1.push((token, notes));
-    token
-}
-
-/// Host (or the plugin whose message went unanswered): the notes posted under `token` (empty when there are none).
-pub fn take_notes(token: isize) -> Vec<NoteOut> {
-    let Ok(mut o) = NOTES.lock() else { return Vec::new() };
-    match o.1.iter().position(|(t, _)| *t == token) {
-        Some(i) => o.1.remove(i).1,
-        None => Vec::new(),
-    }
 }
 
 /// The icon of a page tab. The ids are the protocol; the host maps them to its icon set.
@@ -468,6 +415,16 @@ mod local {
         QUEUE.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default()
     }
 
+    pub fn take_host_state_messages() -> Vec<(u64, Cmd, isize)> {
+        let mut out = Vec::new();
+        if let Ok(mut queue) = QUEUE.lock() {
+            queue.retain(|message| {
+                if message.1 == Cmd::StateEdit { out.push(*message); false } else { true }
+            });
+        }
+        out
+    }
+
     /// Host side: a connection to the editor of a Lemon plugin.
     pub struct Link {
         peer: Arc<Peer>,
@@ -537,7 +494,7 @@ mod local {
 }
 
 #[cfg(not(windows))]
-pub use local::{set_host_waker, take_host_messages, Link, Peer};
+pub use local::{set_host_waker, take_host_messages, take_host_state_messages, Link, Peer};
 
 #[cfg(test)]
 mod tests {
@@ -589,9 +546,36 @@ mod tests {
         assert_eq!(Cmd::from_usize(Cmd::SetPage as usize), Some(Cmd::SetPage));
         assert_eq!(Cmd::from_usize(10), Some(Cmd::Automate));
         assert_eq!(Cmd::from_usize(13), Some(Cmd::SetSize));
-        assert_eq!(Cmd::from_usize(14), Some(Cmd::Notes));
         assert_eq!(PageIcon::from_id(99), PageIcon::Plugin);
         assert_eq!(unpack_note(pack_note(67, 100, true)), (67, 100, true));
         assert_eq!(unpack_note(pack_note(0, 0, false)), (0, 0, false));
+    }
+}
+
+/// JSON object containing the previous values of changed NIH `fields` and `params`.
+/// Null removes a newly added key. Only completed editor transactions use this path;
+/// normal parameter gestures continue through the plugin API.
+static STATE_EDITS: std::sync::Mutex<Vec<(usize, String)>> = std::sync::Mutex::new(Vec::new());
+static STATE_TOKEN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
+pub const STATE_EDIT_BUDGET: usize = 128 * 1024 * 1024;
+pub fn post_state_edit(edit: String) -> Option<usize> {
+    let mut queue = STATE_EDITS.lock().ok()?;
+    if edit.len() > STATE_EDIT_BUDGET { return None; }
+    while queue.len() >= 128 || queue.iter().map(|(_, e)| e.len()).sum::<usize>() + edit.len() > STATE_EDIT_BUDGET {
+        queue.remove(0);
+    }
+    let token = STATE_TOKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    queue.push((token, edit));
+    Some(token)
+}
+pub fn take_state_edit(token: usize) -> Option<String> {
+    let mut queue = STATE_EDITS.lock().ok()?;
+    let index = queue.iter().position(|(id, _)| *id == token)?;
+    Some(queue.remove(index).1)
+}
+#[cfg(windows)]
+pub fn send_state_edit(editor: isize, edit: String) {
+    if let Some(token) = post_state_edit(edit) {
+        if to_host(editor, Cmd::StateEdit, token as isize) != 1 { take_state_edit(token); }
     }
 }

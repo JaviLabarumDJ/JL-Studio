@@ -1,0 +1,5 @@
+TIME-12 1.2.3 by Tilr, GPL-3.0. Upstream v1.2.3 is cb86fd616c10b8368119b01bcdcabc1654899031.
+Corresponding source: https://github.com/tiagolr/time12/tree/v1.2.3
+JUCE submodule: 10a589619b452c261b2940767eb253171eb5a823.
+
+Windows includes the ML Studio 3036 display adaptation. The VST3 class IDs and processor source are the upstream versions. The Linux and macOS archives in this checkout are the original v1.2.3 builds. To regenerate an adapted platform archive, use packaging/build-time12.py with the corresponding v1.2.3 checkout and JUCE submodule. The editor patch is 3036-editor.patch. Its two shared display files live in plugins/lemon-master-assistant/Source/GUI. The build stages project sources under the supplied build directory and disables installation into system VST3 folders.

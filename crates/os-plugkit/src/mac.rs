@@ -83,6 +83,7 @@ enum Ev {
     Wheel { at: At, notches: f32 },
     Leave,
     Key { sym: u32 },
+    KeyUp { sym: u32 },
     Expose,
     Drop(String),
     /// A press outside every surface while a popup or box is open.
@@ -207,10 +208,10 @@ pub fn spawn(parent: Parent, size: (u32, u32), slot: &Slot, run: impl FnOnce(Win
         scale,
         mods: (false, false, false),
         locked: false,
+        key_releases: false,
         pointer: (0, 0),
         next_tick: Instant::now() + TICK,
         raw: VecDeque::new(),
-        queue: VecDeque::new(),
     };
     let Ok(thread) = std::thread::Builder::new().name("plugin editor".into()).spawn(move || run(win)) else {
         close_all(&shared);
@@ -362,6 +363,7 @@ fn view_class() -> &'static AnyClass {
                 sel!(mouseEntered:),
                 sel!(mouseExited:),
                 sel!(keyDown:),
+                sel!(keyUp:),
             ] {
                 b.add_method(s, on_event as extern "C-unwind" fn(_, _, _));
             }
@@ -481,6 +483,10 @@ extern "C-unwind" fn on_event(v: &NSView, _: Sel, e: Option<&NSEvent>) {
         NSEventType::MouseExited => Ev::Leave,
         NSEventType::KeyDown => match key_sym(e) {
             Some(sym) => Ev::Key { sym },
+            None => return,
+        },
+        NSEventType::KeyUp => match key_sym(e) {
+            Some(sym) => Ev::KeyUp { sym },
             None => return,
         },
         _ => return,
@@ -690,6 +696,7 @@ fn remove_monitors(id: u64) {
 
 /// An editor's view, as its GUI thread sees it.
 pub struct Window {
+    key_releases: bool,
     shared: Arc<Shared>,
     /// The editor view's surface.
     id: u64,
@@ -702,14 +709,15 @@ pub struct Window {
     next_tick: Instant,
     /// Events taken from the main thread, not looked at yet.
     raw: VecDeque<Raw>,
-    /// Inputs made, not handed out yet.
-    queue: VecDeque<Input>,
 }
 
 impl Window {
+    pub fn key_releases(&mut self) {
+        self.key_releases = true;
+    }
     /// No input is waiting: a good moment to paint (once per burst of events).
     pub fn idle(&self) -> bool {
-        self.queue.is_empty()
+        self.raw.is_empty()
     }
 
     /// Ctrl, Shift, Alt held at the last event (Command counts as Ctrl).
@@ -723,16 +731,12 @@ impl Window {
             if self.shared.quitting() {
                 return None;
             }
-            if let Some(i) = self.queue.pop_front() {
-                return Some(i);
-            }
-            while let Some(r) = self.raw.pop_front() {
-                if let Some(i) = self.convert(r) {
-                    self.queue.push_back(i);
+            // A press can lock the cursor or open a menu. Interpret the next raw
+            // event only after the editor has acted on the preceding one.
+            while let Some(event) = self.raw.pop_front() {
+                if let Some(input) = self.convert(event) {
+                    return Some(input);
                 }
-            }
-            if !self.queue.is_empty() {
-                continue;
             }
             let now = Instant::now();
             if now >= self.next_tick {
@@ -803,10 +807,11 @@ impl Window {
             }
             Ev::Wheel { at, notches } => Some(Input::Wheel { x: at.x, y: at.y, notches }),
             Ev::Leave => Some(Input::Leave),
-            Ev::Key { sym } => Some(Input::Key { sym, text: keysym_char(sym) }),
+            Ev::Key { sym } => Some(Input::Key { sym, text: keysym_char(sym), pressed: true }),
+            Ev::KeyUp { sym } if self.key_releases => Some(Input::Key { sym, text: None, pressed: false }),
             Ev::Expose => Some(Input::Expose),
             Ev::Drop(path) => Some(Input::Drop { path }),
-            Ev::Outside => None,
+            Ev::Outside | Ev::KeyUp { .. } => None,
         }
     }
 
@@ -958,7 +963,7 @@ impl Window {
         on_main(move |_| close(id));
     }
 
-    fn show(&self, id: u64, c: &Canvas) {
+    fn show(&self, id: u64, c: &mut Canvas) {
         let (w, h) = (c.pixmap.width(), c.pixmap.height());
         let mut px = vec![0u32; (w * h) as usize];
         c.copy_to_xrgb(&mut px);
@@ -1002,11 +1007,12 @@ impl Window {
         let Some(pop) = self.overlay([px, py, w, h]) else { return PopRes::Cancel };
         let mut hover: Option<usize> = None;
         let paint = |canvas: &mut Canvas, hover: Option<usize>| {
+            canvas.sync_stock_editor_theme();
             canvas.begin_frame(None);
             kmenu::paint(canvas, pal, &def.items, &layout, def.style, 0.0, 0.0, hover, def.current);
         };
         paint(&mut canvas, hover);
-        self.show(pop, &canvas);
+        self.show(pop, &mut canvas);
         let rect = [px, py, px + w, py + h];
         let inside = |r: &[i32; 4], (sx, sy): (i32, i32)| sx >= r[0] && sx < r[2] && sy >= r[1] && sy < r[3];
         let item_at = |(sx, sy): (i32, i32)| layout.item_at(&def.items, (sx - px) as f32 / scale, (sy - py) as f32 / scale);
@@ -1016,7 +1022,7 @@ impl Window {
         let result = loop {
             let Some(e) = self.event() else { break PopRes::Cancel };
             match e.ev {
-                Ev::Expose if e.surface == pop => self.show(pop, &canvas),
+                Ev::Expose if e.surface == pop => self.show(pop, &mut canvas),
                 Ev::Outside => break PopRes::Cancel,
                 Ev::Move { at, .. } => {
                     let cur = (at.sx, at.sy);
@@ -1031,7 +1037,7 @@ impl Window {
                     if hov != hover {
                         hover = hov;
                         paint(&mut canvas, hover);
-                        self.show(pop, &canvas);
+                        self.show(pop, &mut canvas);
                     }
                     // Submenu: opens while its row is hovered, until the pointer moves on to another row of this menu.
                     if let Some((i, sub)) = hov.and_then(|i| Some((i, def.sub(i)?))) {
@@ -1078,7 +1084,7 @@ impl Window {
                             }
                             hover = Some(i);
                             paint(&mut canvas, hover);
-                            self.show(pop, &canvas);
+                            self.show(pop, &mut canvas);
                         }
                         keysym::RETURN | keysym::KP_ENTER => {
                             if let Some(i) = hover.filter(|&i| def.items[i].clickable() && def.sub(i).is_none()) {
@@ -1117,6 +1123,7 @@ impl Window {
         let paint = |canvas: &mut Canvas, s: &[char], caret: usize, all: bool| {
             let (lw, lh) = (w as f32 / scale, h as f32 / scale);
             let f = Font::new(14);
+            canvas.sync_stock_editor_theme();
             canvas.begin_frame(None);
             canvas.clear(Color::rgb(0xffffff));
             for r in [Rect::new(0.0, 0.0, lw, 1.0), Rect::new(0.0, lh - 1.0, lw, 1.0), Rect::new(0.0, 0.0, 1.0, lh), Rect::new(lw - 1.0, 0.0, 1.0, lh)] {
@@ -1137,12 +1144,12 @@ impl Window {
             }
         };
         paint(&mut canvas, &s, caret, all);
-        self.show(boxw, &canvas);
+        self.show(boxw, &mut canvas);
         let r = [x, y, x + w, y + h];
         let result = loop {
             let Some(e) = self.event() else { break None };
             match e.ev {
-                Ev::Expose if e.surface == boxw => self.show(boxw, &canvas),
+                Ev::Expose if e.surface == boxw => self.show(boxw, &mut canvas),
                 Ev::Outside => break None,
                 Ev::Down { at, .. } => {
                     let (sx, sy) = (at.sx, at.sy);
@@ -1194,7 +1201,7 @@ impl Window {
                         _ => {}
                     }
                     paint(&mut canvas, &s, caret, all);
-                    self.show(boxw, &canvas);
+                    self.show(boxw, &mut canvas);
                 }
                 _ => {}
             }
@@ -1218,4 +1225,30 @@ enum PopRes<C> {
     Cancel,
     /// The mouse went back to the parent menu.
     Back,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn batched_knob_drag_uses_lock_and_modifiers_from_each_event() {
+        let shared = Arc::new(Shared { state: Mutex::default(), cv: Condvar::new(),
+            quit: AtomicBool::new(false), held: AtomicBool::new(false) });
+        let at = At { x: 10., y: 10., sx: 10, sy: 10 };
+        let raw = [
+            (Ev::Down { at, btn: Button::Left, dbl: false }, false),
+            (Ev::Move { at, dx: 0., dy: 12. }, true),
+            (Ev::Up { at, btn: Button::Left }, false),
+        ].into_iter().map(|(ev, shift)| Raw { surface: 1, ev, mods: (false, shift, false) }).collect();
+        let mut window = Window { shared, id: 1, scale: 2., key_releases: false, mods: (false, false, false),
+            locked: false, pointer: (0, 0), next_tick: Instant::now(), raw };
+        assert!(matches!(window.next(), Some(Input::Down { .. })));
+        window.locked = true;
+        assert!(matches!(window.next(), Some(Input::Delta { dy: 12., .. })));
+        assert!(window.mods().1);
+        assert!(matches!(window.next(), Some(Input::Up { .. })));
+        assert!(!window.mods().1);
+        window.locked = false;
+    }
 }

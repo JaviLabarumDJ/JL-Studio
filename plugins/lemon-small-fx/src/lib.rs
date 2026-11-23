@@ -3,38 +3,33 @@
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! Lemon Studio's small effects as VST3 / CLAP plugins (nih-plug): Lemon Soft Clipper, Lemon Fast Distortion, Lemon
-//! Balance, Lemon Stereo Enhancer, Lemon Transient Processor, Lemon Chorus, Lemon Stereo Shaper, Lemon Filter, Lemon
-//! Flanger and Lemon Phaser (and the settings and editors of the controllers, Lemon Peak Controller's
-//! [`peak_controller`] and Lemon Formula Controller's [`formula_controller`], with the ticks they share, [`ticks`], and
-//! Lemon Vocoder's, [`vocoder`]).
-//! Each is a handful of settings over a sound of `os_engine::effects`, so they share everything but their
-//! description: the plugin, its parameters and saved state ([`params`]), the Pith editor ([`editor`], [`view`]). A
-//! description ([`Spec`]) gives the settings, their value texts, the editor's cards and controls, and the sound. The
-//! plugin modules (`plugins/lemon-soft-clipper` and the others) export one each.
+//! Balance, Lemon Stereo Enhancer, Lemon Transient Processor, Lemon Chorus and Lemon Stereo Shaper. Each is a handful
+//! of settings over a sound of
+//! `os_engine::effects`, so they share
+//! everything but their description: the plugin, its parameters and saved state ([`params`]), the Pith editor
+//! ([`editor`], [`view`]). A description ([`Spec`]) gives the settings, their value texts, the editor's cards and
+//! controls, and the sound. The plugin modules (`plugins/lemon-soft-clipper` and the others) export one each.
 //!
 // spec: plugins/lemon-small-effects.md (§1 how they are built, §5 parameters and state), the plugin pages
 // (plugins/lemon-soft-clipper.md, lemon-fast-distortion.md, lemon-balance.md, lemon-stereo-enhancer.md,
-// lemon-transient-processor.md, lemon-chorus.md, lemon-stereo-shaper.md, lemon-filter.md, lemon-flanger.md,
-// lemon-phaser.md), plugins/plugin-formats.md
+// lemon-transient-processor.md, lemon-chorus.md, lemon-stereo-shaper.md), plugins/plugin-formats.md
 #![allow(semicolon_in_expressions_from_non_local_macros)]
 
+pub mod tape;
+pub mod hall;
 pub mod balance;
 pub mod chorus;
 pub mod editor;
+pub mod state_undo;
 pub mod fast_distortion;
-pub mod filter;
-pub mod flanger;
-pub mod formula_controller;
 pub mod params;
-pub mod peak_controller;
-pub mod phaser;
 pub mod soft_clipper;
 pub mod stereo_enhancer;
 pub mod stereo_shaper;
-pub mod ticks;
 pub mod transient_processor;
 pub mod view;
-pub mod vocoder;
+mod quality;
+pub use os_plugkit::visibility::STOCK_DSP_CONTROLS;
 
 use std::marker::PhantomData;
 use std::num::NonZeroU32;
@@ -46,11 +41,12 @@ use os_ui::{Canvas, Color, Rect};
 
 use params::FxParams;
 
-/// The most settings an effect here has.
-pub const MAX: usize = 20;
+/// Capacity of shared parameter/editor snapshots, including Lemon Wave.
+pub const MAX: usize = 384;
 
 /// One setting: the original's saved state holds it as int `k` (its place in [`Spec::settings`], unless
 /// [`Spec::fields`] maps it).
+#[derive(Clone, Copy)]
 pub struct Setting {
     /// The parameter's id (host automation and saved sessions).
     pub id: &'static str,
@@ -80,10 +76,6 @@ pub enum Control {
     /// A tile (Lemon Chorus's grid): its own card over `x0..x1`, `y0..y1`, a small dial at the left, the caption in a
     /// field at the top right and the value text under it.
     Tile { id: &'static str, x0: f32, y0: f32, x1: f32, y1: f32, caption: &'static str },
-    /// A line of text kept in the saved state, not a parameter (Lemon Formula Controller's formula): a field over
-    /// `x0..x1`, `y0..y1` showing the text, a status line under it. `show` reads the text and the status from the saved
-    /// state, `edit` gives the saved state with a typed text. A click opens the type-in box on it.
-    Text { id: &'static str, x0: f32, y0: f32, x1: f32, y1: f32, show: fn(&[u8]) -> (String, String), edit: fn(&[u8], &str) -> Vec<u8> },
 }
 
 impl Control {
@@ -93,8 +85,7 @@ impl Control {
             | Control::Choice { id, .. }
             | Control::Fader { id, .. }
             | Control::Shape { id, .. }
-            | Control::Tile { id, .. }
-            | Control::Text { id, .. } => id,
+            | Control::Tile { id, .. } => id,
         }
     }
 }
@@ -135,31 +126,26 @@ pub trait Sound: Send {
 
 /// Everything that makes one of the effects.
 pub struct Spec {
-    /// "Lemon Soft Clipper": the plugin's name.
+    /// "ML Soft Clipper": the plugin's name.
     pub name: &'static str,
     /// The wordmark's word: "SOFT CLIPPER".
     pub word: &'static str,
-    /// The About menu's line: "Lemon Studio's soft clipper".
+    /// The About menu's line: "ML Studio's soft clipper".
     pub about: &'static str,
     /// The settings in the original's saved order.
     pub settings: &'static [Setting],
+    /// Number of ML-specific settings at the end of the list.
+    pub studio_settings: usize,
     /// The version the original's saved state starts with (an int before the settings), if it has one. A stored
     /// state with a higher version is not read (spec §5), unless `any_version`.
     pub version: Option<i32>,
     /// Every version of the saved state is read the same way (Fruity Stereo Shaper's).
     pub any_version: bool,
     /// The int (after the version) each setting is, when that is not its place: an int left out is kept as stored
-    /// (Lemon Stereo Shaper leaves out the difference output); [`params::BYTE`] for a switch stored in the byte after
-    /// the ints (Lemon Filter's Center). Empty: setting k is int k.
+    /// (Lemon Stereo Shaper leaves out the difference output). Empty: setting k is int k.
     pub fields: &'static [usize],
     /// The bytes a new instance's saved state has after the settings (kept as stored otherwise).
     pub tail: &'static [u8],
-    /// A new instance's whole saved state, when the description makes it (Vocodex's, with its curves and the ints no
-    /// setting covers); `None`: the version, the settings' starts and the tail.
-    pub blank: Option<fn() -> Vec<u8>>,
-    /// Where the settings' ints start in a stored state, for a state whose part before them varies in length
-    /// (Vocodex's curves): `None` from it when the state cannot be read. `None` here: right after the version.
-    pub locate: Option<fn(&[u8]) -> Option<usize>>,
     /// Editor size in logical pixels.
     pub size: (u32, u32),
     pub cards: &'static [Card],
@@ -186,6 +172,10 @@ impl Spec {
         self.settings.iter().position(|s| s.id == id)
     }
 
+    pub fn legacy_settings(&self) -> usize {
+        self.settings.len() - self.studio_settings
+    }
+
     /// The settings a new instance starts on.
     pub fn start(&self) -> Vec<i32> {
         self.settings.iter().map(|s| s.start).collect()
@@ -204,6 +194,8 @@ pub trait Kind: 'static + Send + Sync {
 
 /// What the audio thread and the editor share.
 pub struct Shared {
+    /// Optional instrument-specific controls; ordinary effects leave this unset.
+    pub extension: Option<Arc<dyn editor::Extension>>,
     pub rate: AtomicU32,
     /// Set while an editor is open.
     pub editor_open: AtomicBool,
@@ -211,7 +203,7 @@ pub struct Shared {
 
 impl Default for Shared {
     fn default() -> Self {
-        Shared { rate: AtomicU32::new(44100), editor_open: AtomicBool::new(false) }
+        Shared { extension: None, rate: AtomicU32::new(44100), editor_open: AtomicBool::new(false) }
     }
 }
 
@@ -261,7 +253,7 @@ impl<K: Kind> SmallFx<K> {
 
 impl<K: Kind> Plugin for SmallFx<K> {
     const NAME: &'static str = K::SPEC.name;
-    const VENDOR: &'static str = "Lemon Studio";
+    const VENDOR: &'static str = "ML Studio";
     const URL: &'static str = "";
     const EMAIL: &'static str = "";
     const VERSION: &'static str = env!("CARGO_PKG_VERSION");
@@ -334,7 +326,7 @@ impl<K: Kind> Vst3Plugin for SmallFx<K> {
 mod tests {
     use super::*;
 
-    pub const SPECS: [&Spec; 13] = [
+    pub const SPECS: [&Spec; 9] = [
         soft_clipper::SPEC,
         fast_distortion::SPEC,
         balance::SPEC,
@@ -342,12 +334,8 @@ mod tests {
         transient_processor::SPEC,
         chorus::SPEC,
         stereo_shaper::SPEC,
-        filter::SPEC,
-        flanger::SPEC,
-        phaser::SPEC,
-        peak_controller::SPEC,
-        formula_controller::SPEC,
-        vocoder::SPEC,
+        tape::SPEC,
+        hall::SPEC,
     ];
 
     /// Every effect: ids unique, starts inside the ranges, a control per setting, the plugin ids distinct.
@@ -369,9 +357,11 @@ mod tests {
                     assert_eq!((s.text)(k, back), t, "{} {} {v}", s.name, set.id);
                 }
             }
-            assert!(s.name.starts_with("Lemon "));
+            assert!(s.name.starts_with("ML "));
         }
         let ids = [
+            <hall::LemonHall as ClapPlugin>::CLAP_ID,
+            <tape::LemonTape as ClapPlugin>::CLAP_ID,
             <soft_clipper::LemonSoftClipper as ClapPlugin>::CLAP_ID,
             <fast_distortion::LemonFastDistortion as ClapPlugin>::CLAP_ID,
             <balance::LemonBalance as ClapPlugin>::CLAP_ID,
@@ -379,11 +369,10 @@ mod tests {
             <transient_processor::LemonTransientProcessor as ClapPlugin>::CLAP_ID,
             <chorus::LemonChorus as ClapPlugin>::CLAP_ID,
             <stereo_shaper::LemonStereoShaper as ClapPlugin>::CLAP_ID,
-            <filter::LemonFilter as ClapPlugin>::CLAP_ID,
-            <flanger::LemonFlanger as ClapPlugin>::CLAP_ID,
-            <phaser::LemonPhaser as ClapPlugin>::CLAP_ID,
         ];
         let classes = [
+            <hall::LemonHall as Vst3Plugin>::VST3_CLASS_ID,
+            <tape::LemonTape as Vst3Plugin>::VST3_CLASS_ID,
             <soft_clipper::LemonSoftClipper as Vst3Plugin>::VST3_CLASS_ID,
             <fast_distortion::LemonFastDistortion as Vst3Plugin>::VST3_CLASS_ID,
             <balance::LemonBalance as Vst3Plugin>::VST3_CLASS_ID,
@@ -391,9 +380,6 @@ mod tests {
             <transient_processor::LemonTransientProcessor as Vst3Plugin>::VST3_CLASS_ID,
             <chorus::LemonChorus as Vst3Plugin>::VST3_CLASS_ID,
             <stereo_shaper::LemonStereoShaper as Vst3Plugin>::VST3_CLASS_ID,
-            <filter::LemonFilter as Vst3Plugin>::VST3_CLASS_ID,
-            <flanger::LemonFlanger as Vst3Plugin>::VST3_CLASS_ID,
-            <phaser::LemonPhaser as Vst3Plugin>::VST3_CLASS_ID,
         ];
         for i in 0..ids.len() {
             for j in i + 1..ids.len() {
@@ -401,7 +387,7 @@ mod tests {
                 assert_ne!(classes[i], classes[j]);
             }
         }
-        assert_eq!(<balance::LemonBalance as Plugin>::NAME, "Lemon Balance");
+        assert_eq!(<balance::LemonBalance as Plugin>::NAME, "ML Balance");
     }
 
     #[test]
@@ -428,10 +414,11 @@ mod tests {
     #[test]
     fn factory_presets_list_every_parameter_and_hold_fls_states() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/os-app/factory-presets");
+        let source_name = |spec: &Spec| spec.name.replacen("ML ", "Lemon ", 1);
         // Every preset of a plugin, as `[category/]name`.
         let all = |spec: &Spec| -> Vec<String> {
             let mut names = Vec::new();
-            for e in std::fs::read_dir(root.join(spec.name)).unwrap() {
+            for e in std::fs::read_dir(root.join(source_name(spec))).unwrap() {
                 let e = e.unwrap();
                 let name = e.file_name().into_string().unwrap();
                 if e.file_type().unwrap().is_dir() {
@@ -446,11 +433,11 @@ mod tests {
             names
         };
         let read = |spec: &Spec, preset: &str| -> Vec<i32> {
-            let text = std::fs::read_to_string(root.join(spec.name).join(format!("{preset}.ospreset"))).unwrap();
+            let text = std::fs::read_to_string(root.join(source_name(spec)).join(format!("{preset}.ospreset"))).unwrap();
             let mut lines = text.lines();
             assert_eq!(lines.next(), Some("OSPRESET 1"));
             let head = lines.next().unwrap();
-            assert!(head.starts_with(&format!("plugin={}	", spec.name)), "{head}");
+            assert!(head.starts_with(&format!("plugin={}	", source_name(spec))), "{head}");
             let mut v: Vec<Option<i32>> = vec![None; spec.settings.len()];
             for l in lines.filter(|l| !l.starts_with('#') && !l.trim().is_empty()) {
                 let (name, steps) = l.split_once(" = ").unwrap();
@@ -462,7 +449,7 @@ mod tests {
             }
             v.into_iter().map(|x| x.expect("every parameter listed")).collect()
         };
-        for spec in [soft_clipper::SPEC, fast_distortion::SPEC, stereo_enhancer::SPEC, transient_processor::SPEC, chorus::SPEC, stereo_shaper::SPEC, filter::SPEC] {
+        for spec in [hall::SPEC, soft_clipper::SPEC, fast_distortion::SPEC, stereo_enhancer::SPEC, transient_processor::SPEC, chorus::SPEC, stereo_shaper::SPEC] {
             for name in all(spec) {
                 read(spec, &name);
             }
@@ -473,38 +460,20 @@ mod tests {
             }
             assert_eq!(read(spec, "Default"), start, "{}", spec.name);
         }
-        assert_eq!(read(fast_distortion::SPEC, "Compressor"), [192, 1, 0, 104, 93]);
-        assert_eq!(read(fast_distortion::SPEC, "Warmth"), [82, 7, 0, 128, 128]);
-        assert_eq!(read(stereo_enhancer::SPEC, "For strings"), [-18, 256, -54, -248, 1, 0]);
-        assert_eq!(read(stereo_enhancer::SPEC, "Subtle"), [0, 256, -40, -24, 1, 0]);
-        assert_eq!(read(transient_processor::SPEC, "Overdriven"), [120, 110, 160, 53, 2, 1, 50, 80, 1]);
-        assert_eq!(read(transient_processor::SPEC, "Subtle attack"), [132, 0, 80, 80, 0, 1, 0, 80, 1]);
-        assert_eq!(std::fs::read_dir(root.join(transient_processor::SPEC.name)).unwrap().count(), 10);
-        assert_eq!(read(chorus::SPEC, "Detune"), [40, 4375, 149, 3229, 0, 781, 587, 0, 1024, 65, 4531, 491]);
-        assert_eq!(read(chorus::SPEC, "Ensemble"), [115, 3669, 0, 1458, 0, 0, 0, 0, 0, 0, 1719, 0]);
+        assert_eq!(read(fast_distortion::SPEC, "Compressor"), [192, 1, 0, 104, 93, 0]);
+        assert_eq!(read(fast_distortion::SPEC, "Warmth"), [82, 7, 0, 128, 128, 0]);
+        assert_eq!(read(stereo_enhancer::SPEC, "For strings"), [-18, 256, -54, -248, 1, 0, 0]);
+        assert_eq!(read(stereo_enhancer::SPEC, "Subtle"), [0, 256, -40, -24, 1, 0, 0]);
+        assert_eq!(read(transient_processor::SPEC, "Overdriven"), [120, 110, 160, 53, 2, 1, 50, 80, 1, 0]);
+        assert_eq!(read(transient_processor::SPEC, "Subtle attack"), [132, 0, 80, 80, 0, 1, 0, 80, 1, 0]);
+        assert_eq!(std::fs::read_dir(root.join(source_name(transient_processor::SPEC))).unwrap().count(), 10);
+        assert_eq!(read(chorus::SPEC, "Detune"), [40, 4375, 149, 3229, 0, 781, 587, 0, 1024, 65, 4531, 491, 0, 0]);
+        assert_eq!(read(chorus::SPEC, "Ensemble"), [115, 3669, 0, 1458, 0, 0, 0, 0, 0, 0, 1719, 0, 0, 0]);
         assert_eq!(all(chorus::SPEC).len(), 8);
         // The Stereo Shaper's presets without the difference output (it has no parameter): FL's 21 of 25.
         assert_eq!(read(stereo_shaper::SPEC, "Mixing/LR to MS"), [8076, 8076, -8076, 8076, 0, 0, 1]);
         assert_eq!(read(stereo_shaper::SPEC, "Effects/Stereoize 3"), [0, 12800, 12800, 0, 1408, -2496, 1]);
         assert_eq!(read(stereo_shaper::SPEC, "Effects/Narrow"), [8176, 12800, 12800, 8076, -1952, 0, 0]);
         assert_eq!(all(stereo_shaper::SPEC).len(), 21);
-        // FL's four, Center on in each.
-        assert_eq!(read(filter::SPEC, "Party next door"), [160, 1024, 864, 0, 0, 0, 1]);
-        assert_eq!(read(filter::SPEC, "Tiny speakers"), [544, 0, 0, 1024, 464, 1, 1]);
-        assert_eq!(all(filter::SPEC).len(), 4);
-        // FL's 27 Flanger and 27 Phaser presets. Their Default presets are not what a new instance holds: the Flanger's has
-        // the phase at 119 and the feedback at 24 (a new one 118 and 23), the Phaser's is a slower, all-wet sweep.
-        for spec in [flanger::SPEC, phaser::SPEC] {
-            for name in all(spec) {
-                read(spec, &name);
-            }
-            assert_eq!(all(spec).len(), 27, "{}", spec.name);
-        }
-        let mut start = flanger::SPEC.start();
-        (start[os_engine::effects::flanger::PHASE], start[os_engine::effects::flanger::FEED]) = (119, 24);
-        assert_eq!(read(flanger::SPEC, "Default"), start);
-        assert_eq!(read(flanger::SPEC, "Rotary"), [597, 938, 4740, 165, 4010, 501, 82, 629, 747, 4323, 3281, 4323]);
-        assert_eq!(read(phaser::SPEC, "Default"), [1500, 0, 900, 0, 512, 11, 693, 0, 2500]);
-        assert_eq!(read(phaser::SPEC, "Whale song"), [547, 953, 1000, 1024, 512, 22, 990, 0, 3047]);
     }
 }

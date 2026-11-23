@@ -20,9 +20,12 @@
 
 #[cfg(target_os = "macos")]
 pub mod bundle;
+#[cfg(target_os = "macos")]
+pub mod audio_unit;
 pub mod guard;
 mod guarded;
 mod meter;
+mod smart_disable;
 #[cfg(unix)]
 pub mod runloop;
 
@@ -41,6 +44,7 @@ pub enum Format {
     Clap,
     Vst3,
     Vst2,
+    AudioUnit,
     /// Plugins written against the native SDK of the DAW whose projects Lemon Studio opens (`os-native`).
     Native,
 }
@@ -52,13 +56,14 @@ impl Format {
             Format::Clap => "clap",
             Format::Vst3 => "vst3",
             Format::Vst2 => "vst2",
+            Format::AudioUnit => "au",
             Format::Native => "native",
         }
     }
 
     /// The format named by `as_str`.
     pub fn parse(s: &str) -> Option<Format> {
-        [Format::Clap, Format::Vst3, Format::Vst2, Format::Native].into_iter().find(|f| f.as_str() == s)
+        [Format::Clap, Format::Vst3, Format::Vst2, Format::AudioUnit, Format::Native].into_iter().find(|f| f.as_str() == s)
     }
 }
 
@@ -73,6 +78,9 @@ pub enum Kind {
     #[default]
     Other,
 }
+
+/// Scan-cache marker for a Windows x86 VST2 hosted by the optional bridge.
+pub const VST2_X86: &str = "windows-vst2-x86";
 
 /// A plugin a library offers.
 #[derive(Debug, Clone, PartialEq)]
@@ -105,7 +113,12 @@ impl Descriptor {
     /// The plugin's identity for project files and plugin lists: `format:id` (e.g. `clap:org.openstudio.open-sampler`,
     /// `vst3:` + 32 hex digits). The path is not part of it (plugins move between folders and machines).
     pub fn uid(&self) -> String {
-        format!("{}:{}", self.format.as_str(), self.id)
+        let architecture = if self.is_vst2_x86() { ":x86" } else { "" };
+        format!("{}:{}{architecture}", self.format.as_str(), self.id)
+    }
+
+    pub fn is_vst2_x86(&self) -> bool {
+        self.format == Format::Vst2 && self.features.iter().any(|f| f == VST2_X86)
     }
 }
 
@@ -144,6 +157,9 @@ pub enum ParamEvent {
     Begin(u32),
     /// Parameter id, new normalized value.
     Value(u32, f64),
+    /// Controller value mirrored from playback/host state; refresh the baseline
+    /// without treating it as a user edit, automation recording or an Undo step.
+    Sync(u32, f64),
     End(u32),
 }
 
@@ -179,24 +195,56 @@ pub trait Library: Send + Sync {
     fn create(self: Arc<Self>, id: &str) -> Result<SharedPlugin, String>;
 }
 
-/// The names of the parameters through which the built-in Lemon instruments take a note's mod X as per-note
-/// modulation (`use_note_levels`): Lemon Sampler's and Lemon Trio's filter frequency (spec: plugins/lemon-sampler.md,
-/// plugins/3x-osc.md parameter names), Citrus's Mod X (spec: plugins/citrus.md §2).
-pub const NOTE_MOD_X: [&str; 2] = ["Filter frequency (modulation X)", "Mod A"];
+/// The parameter of a built-in Lemon instrument that takes a note's mod X as per-note modulation (`use_note_levels`;
+/// spec: plugins/lemon-sampler.md, plugins/3x-osc.md parameter names).
+pub const NOTE_MOD_X: &str = "Filter frequency (modulation X)";
 /// The same for a note's mod Y.
-pub const NOTE_MOD_Y: [&str; 2] = ["Filter bandwidth (modulation Y)", "Mod B"];
+pub const NOTE_MOD_Y: &str = "Filter bandwidth (modulation Y)";
+
+/// ARA editor requests, drained by the main thread after releasing the plugin lock.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PlaybackRequest {
+    Start,
+    Stop,
+    /// Source-document seconds, not arrangement seconds.
+    Seek(f64),
+    Cycle(Option<(f64, f64)>),
+}
+
+/// UI-thread editor lifecycle operation.
+#[derive(Clone, Copy)]
+pub enum EditorAction {
+    Open { parent: *mut c_void, scale: f32 },
+    Close,
+}
+/// Prepared under the instance lock, executed immediately on the UI thread after releasing it.
+/// Implementations must isolate editor state from audio processing and retain their interface lifetimes.
+pub type EditorJob = Box<dyn FnOnce() -> Result<(u32, u32), String>>;
+/// UI-only controller work prepared under the audio instance lock. Run immediately
+/// on that same UI thread, after releasing the lock and before removing the plugin.
+pub type UiJob = Box<dyn FnOnce()>;
+/// Read controller values on the UI thread without excluding audio processing.
+/// Like `UiJob`, execute immediately after releasing the instance lock. The job
+/// must retain its interfaces and must not access mutable processor state.
+pub type ParamValuesJob = Box<dyn FnOnce() -> Vec<(u32, f64)>>;
 
 /// A plugin instance, whatever its format.
-///
 /// Main-thread calls (everything except the `Instrument` / `HostedEffect` methods) come from the UI thread only.
 pub trait Plugin: Instrument + HostedEffect + Send {
+    /// Optional host-native editor model. Audio processing never inspects it.
+    fn host_extension(&self) -> Option<Arc<dyn std::any::Any + Send + Sync>> { None }
+    /// Finite tail in frames for Smart Disable, queried on the processing thread.
+    /// None keeps processing: unknown/infinite tails, autonomous playback, an open
+    /// editor, queued events or reconfiguration. This query must never block.
+    fn smart_disable_tail(&self) -> Option<u64> { None }
+    /// Advance host clocks and consume this block's transport without calling DSP.
+    /// Only called after smart_disable_tail permits suspension.
+    fn advance_silent(&mut self, _rate: u32, _frames: usize) {}
+    fn editor_job(&mut self, _action: EditorAction) -> Option<EditorJob> { None }
+    /// MPE delivery path: 0 unavailable, 1 channel MIDI (instrument mode required),
+    /// 2 native per-note expressions. This does not promise patch mappings.
+    fn mpe_support(&self)->u8{0}
     fn desc(&self) -> &Descriptor;
-
-    /// The plugin's help page, for its menu's Help (spec: ui/plugin-window.md "Help"): a CLAP plugin's manual URL, else
-    /// its URL; a VST3 plug-in's factory URL. `None`: the plugin names none.
-    fn help_url(&self) -> Option<String> {
-        None
-    }
 
     /// Activates at `rate` (UI thread); reactivates when the rate changes. The audio thread renders silence (an
     /// instrument) or passes the sound through (an effect) until the instance is active at the stream's rate, and asks
@@ -205,9 +253,25 @@ pub trait Plugin: Instrument + HostedEffect + Send {
 
     /// UI-thread housekeeping, every tick: callbacks the plugin asked for, restarts, rate changes.
     fn idle(&mut self);
+    /// Detach pending display updates from the audio state when the format permits.
+    /// Other formats continue to deliver their updates through `idle`.
+    fn take_ui_job(&mut self) -> Option<UiJob> { None }
+    /// Native editor transactions include persistent assets and grouped parameter changes.
+    /// When supported these replace per-parameter undo, but not automation recording.
+    fn state_undo_supported(&self) -> bool { false }
+    fn take_state_edits(&mut self) -> Vec<String> { Vec::new() }
+    /// Formats with an independent UI controller can snapshot parameter values
+    /// outside the audio lock. None uses the serialized parameter API instead.
+    fn param_values_job(&self) -> Option<ParamValuesJob> { None }
+    /// Optional bounded controller read in parameter-index order. A UI may spread
+    /// large banks across frames; None uses serialized reads for that range.
+    fn param_values_job_range(&self, _range: std::ops::Range<usize>) -> Option<ParamValuesJob> { None }
 
     /// The plugin has an editor that can be embedded in a host window.
     fn has_editor(&self) -> bool;
+    /// (program selector, program index, display name) supplied by the plugin.
+    fn programs(&self)->Vec<(u32,u32,String)> { Vec::new() }
+    fn select_program(&mut self,_selector:u32,_index:u32)->bool {false}
     fn editor_open(&self) -> bool;
     /// Embeds the plugin's editor in `parent` (a host window handle: HWND on Windows); returns its size in pixels.
     /// The host draws the window frame around it (spec: ui/plugin-window.md). `scale` is the parent window's DPI
@@ -215,6 +279,11 @@ pub trait Plugin: Instrument + HostedEffect + Send {
     fn open_editor(&mut self, parent: *mut c_void, scale: f32) -> Result<(u32, u32), String>;
     /// The editor's current size in pixels (when open). The host polls it: a plugin that resizes itself is followed.
     fn editor_size(&self) -> Option<(u32, u32)>;
+    /// Whether the open editor accepts host-driven resizing (UI thread).
+    fn editor_resizable(&self) -> bool { false }
+    /// Requests an editor size in device pixels; returns the size accepted by the plugin.
+    fn resize_editor(&mut self, _width: u32, _height: u32) -> Option<(u32, u32)> { None }
+
     fn close_editor(&mut self);
 
     /// The plugin's whole state as bytes, in the format's own layout (UI thread). Round-trips through `load_state`
@@ -222,6 +291,8 @@ pub trait Plugin: Instrument + HostedEffect + Send {
     fn save_state(&self) -> Option<Vec<u8>>;
     /// Restores a `save_state` blob (UI thread).
     fn load_state(&mut self, data: &[u8]) -> bool;
+    /// A format-specific channel file drop. None leaves delivery to the editor.
+    fn load_dropped_file(&mut self, _path: &str) -> Option<bool> { None }
 
     /// Processing latency the plugin reports, in frames (0 when it reports none).
     fn latency(&self) -> u32 {
@@ -236,9 +307,9 @@ pub trait Plugin: Instrument + HostedEffect + Send {
     }
 
     /// Sends each note's own pan and mod X / Y (`Instrument::note_start`) to the instance: the pan as a per-note
-    /// expression, the mods as per-note modulation of the parameters named in [`NOTE_MOD_X`] / [`NOTE_MOD_Y`] where it
-    /// has them (UI thread). For the built-in Lemon plugins only (an OpenStudio choice: other plugins have no agreed way
-    /// to take FL-style note levels). False when the format cannot.
+    /// expression, the mods as per-note modulation of the parameters named [`NOTE_MOD_X`] / [`NOTE_MOD_Y`] where it has
+    /// them (UI thread). For the built-in Lemon plugins only (an OpenStudio choice: other plugins have no agreed way to
+    /// take FL-style note levels). False when the format cannot.
     fn use_note_levels(&mut self) -> bool {
         false
     }
@@ -247,21 +318,6 @@ pub trait Plugin: Instrument + HostedEffect + Send {
     /// each clip's fades and gain on that clip's voice (UI thread). For Lemon Sampler only (it moves to them as the
     /// engine expects). False when the format cannot.
     fn use_voice_gains(&mut self) -> bool {
-        false
-    }
-
-    /// Sends each audio clip voice's end (`Instrument::voice_start`) as per-note modulation of the parameter named
-    /// `name`; the instance then ends the voice there itself (`Instrument::voice_ends`; UI thread). For Lemon Sampler
-    /// only (spec: audio/audio-clips.md "What a clip plays"). False when the plugin or format cannot.
-    fn use_end_param(&mut self, name: &str) -> bool {
-        let _ = name;
-        false
-    }
-
-    /// Sends the channel's volume and pan (`Instrument::channel_levels`) to the instance, which works them into its
-    /// voices' final levels; the engine then leaves its output as it is (UI thread). For Lemon Sampler only (spec:
-    /// plugins/host-link.md "Channel levels"). False when the format cannot.
-    fn use_channel_levels(&mut self) -> bool {
         false
     }
 
@@ -296,6 +352,9 @@ pub trait Plugin: Instrument + HostedEffect + Send {
         let _ = (id, value);
         false
     }
+    /// Non-parameter document edits (for example ARA); consumed on the UI thread.
+    fn take_state_changed(&mut self) -> bool { false }
+    fn take_playback_requests(&mut self) -> Vec<PlaybackRequest> { Vec::new() }
     /// Parameter changes the plugin made by itself since the last call (its editor), oldest first.
     fn take_param_events(&mut self) -> Vec<ParamEvent> {
         Vec::new()
@@ -333,33 +392,6 @@ pub trait Plugin: Instrument + HostedEffect + Send {
     fn attention(&self) -> Option<Arc<Attention>> {
         None
     }
-
-    /// Keeps the notes the plugin puts out (a CLAP note output port, VST 3 output events) from now on, for
-    /// [`Plugin::take_notes_out`]; off drops them again. The channel menu's Burn MIDI to records them (spec:
-    /// ui/channel-rack.md §18). Default: a plugin that puts out no notes.
-    fn capture_notes(&mut self, on: bool) {
-        let _ = on;
-    }
-    /// Whether it can put out notes at all: it declares a CLAP note output port or a VST 3 event output bus. Burn MIDI
-    /// to plays only those through a pass. Default: none.
-    fn puts_out_notes(&self) -> bool {
-        false
-    }
-    /// The notes put out during the `process` calls since the last call, oldest first, while capturing.
-    fn take_notes_out(&mut self) -> Vec<NoteOut> {
-        Vec::new()
-    }
-}
-
-/// A note a plugin put out: a note on (velocity 0..1; a MIDI note on of velocity 0 is a note off) or off, on `key`
-/// and MIDI `channel` (0..15), `offset` frames into the `process` call it came in.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct NoteOut {
-    pub offset: u32,
-    pub key: u8,
-    pub channel: u8,
-    pub velocity: f32,
-    pub on: bool,
 }
 
 pub type SharedPlugin = Arc<Mutex<dyn Plugin>>;
@@ -482,3 +514,5 @@ mod tests {
         assert!(p.lock().unwrap().desc().is_instrument());
     }
 }
+
+pub mod instrument_outputs;

@@ -16,17 +16,21 @@
 //! (`crate::layout`), `factory_folder` (`crate::factory_folder`), the settings window's declared controls
 //! (`crate::prefs`), and `recent_project_1` .. `recent_project_50` (`crate::recent`).
 
+use std::collections::BTreeMap;
 use std::sync::{Mutex, OnceLock}; // This code is a part of L e m o n S t u d i o.
+
+type Preview = BTreeMap<&'static str, Option<String>>;
 
 /// The file's lines as read: lines of keys this version does not know are written back as they were.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct Store {
     lines: Vec<String>,
+    appearance: Option<Preview>,
 }
 
 impl Store {
     pub(crate) fn parse(text: &str) -> Store {
-        Store { lines: text.lines().map(String::from).collect() }
+        Store { lines: text.lines().map(String::from).collect(), appearance: None }
     }
 
     fn text(&self) -> String {
@@ -35,7 +39,42 @@ impl Store {
 
     /// The value of `key`: its last line's.
     pub(crate) fn get(&self, key: &str) -> Option<&str> {
+        if let Some(value) = self.appearance.as_ref().and_then(|values| values.get(key)) {
+            return value.as_deref();
+        }
         self.lines.iter().rev().filter_map(|l| l.split_once('=')).find(|(k, _)| k.trim() == key).map(|(_, v)| v.trim())
+    }
+
+    fn update(&mut self, key: &str, value: &str) -> bool {
+        if let Some(pending) = self.appearance.as_mut().and_then(|values| values.get_mut(key)) {
+            *pending = (!value.is_empty()).then(|| value.to_owned());
+            return false;
+        }
+        if self.get(key) == Some(value) { return false; }
+        self.set(key, value);
+        true
+    }
+
+    fn apply_appearance(&mut self) -> bool {
+        let Some(pending) = self.appearance.take() else { return false };
+        let mut changed = false;
+        for (key, value) in pending {
+            changed |= self.restore_appearance_value(key, value.as_deref());
+        }
+        changed
+    }
+
+    fn restore_appearance_value(&mut self, key: &str, value: Option<&str>) -> bool {
+        if self.appearance.as_ref().is_some_and(|pending| pending.contains_key(key)) {
+            return self.update(key, value.unwrap_or(""));
+        }
+        if self.get(key).filter(|v| !v.is_empty()) == value { return false; }
+        if let Some(value) = value {
+            self.set(key, value);
+        } else {
+            self.lines.retain(|line| !line.split_once('=').is_some_and(|(k, _)| k.trim() == key));
+        }
+        true
     }
 
     /// Sets `key` to `value`: its first line is replaced (and any later one dropped), or a line is added at the end.
@@ -76,44 +115,65 @@ pub(crate) fn read<R>(f: impl FnOnce(&Store) -> R) -> R {
     f(&STORE.get_or_init(|| Mutex::new(load())).lock().unwrap_or_else(|e| e.into_inner()))
 }
 
-/// Sets `key` to `value` (one line: line breaks become spaces) and keeps the file when that changed it.
-pub(crate) fn write(key: &str, value: &str) {
-    let value = value.replace(['\r', '\n'], " ");
+fn mutate(f: impl FnOnce(&mut Store) -> bool) {
     #[cfg(test)]
-    TEST.with(|s| s.borrow_mut().set(key, &value));
+    TEST.with(|s| { f(&mut s.borrow_mut()); });
     #[cfg(not(test))]
     {
         let mut s = STORE.get_or_init(|| Mutex::new(load())).lock().unwrap_or_else(|e| e.into_inner());
-        if s.get(key) != Some(value.as_str()) {
-            s.set(key, &value);
-            save(&s);
-        }
+        if f(&mut s) { save(&s); }
     }
+}
+
+pub(crate) fn begin_appearance_preview(keys: &[&'static str]) {
+    mutate(|s| {
+        if s.appearance.is_none() {
+            s.appearance = Some(keys.iter().map(|&key| (key, s.get(key).filter(|v| !v.is_empty()).map(str::to_owned))).collect());
+        }
+        false
+    });
+}
+
+pub(crate) fn finish_appearance_preview(apply: bool) {
+    mutate(|s| {
+        if apply {
+            s.apply_appearance()
+        } else {
+            s.appearance = None;
+            false
+        }
+    });
+}
+
+pub(crate) fn restore_appearance(values: &[(&'static str, Option<String>)]) {
+    mutate(|s| {
+        let mut changed = false;
+        for (key, value) in values {
+            changed |= s.restore_appearance_value(key, value.as_deref());
+        }
+        changed
+    });
+}
+
+/// Sets `key` to `value` (one line: line breaks become spaces) and keeps the file when that changed it.
+pub(crate) fn write(key: &str, value: &str) {
+    let value = value.replace(['\r', '\n'], " ");
+    mutate(|s| s.update(key, &value));
 }
 
 /// Sets each key to its value as `write` does, keeping the file once. A key without a line stays without one when its
 /// value is empty.
 pub(crate) fn write_all(pairs: &[(String, String)]) {
-    let set = |s: &mut Store| {
+    mutate(|s| {
         let mut changed = false;
         for (key, value) in pairs {
             let value = value.replace(['\r', '\n'], " ");
             if s.get(key).unwrap_or("") != value {
-                s.set(key, &value);
-                changed = true;
+                changed |= s.update(key, &value);
             }
         }
         changed
-    };
-    #[cfg(test)]
-    TEST.with(|s| set(&mut s.borrow_mut()));
-    #[cfg(not(test))]
-    {
-        let mut s = STORE.get_or_init(|| Mutex::new(load())).lock().unwrap_or_else(|e| e.into_inner());
-        if set(&mut s) {
-            save(&s);
-        }
-    }
+    });
 }
 
 /// `key`'s value as text, `None` when it is not set or empty.
@@ -155,6 +215,23 @@ fn save(s: &Store) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn appearance_preview_isolation_keeps_unrelated_writes_and_commits_only_on_apply() {
+        let mut store = Store::parse("glow=35\nother=first\n");
+        store.appearance = Some(BTreeMap::from([("glow", Some("35".into())), ("tint", None)]));
+        assert!(!store.update("glow", "70"));
+        assert!(!store.update("tint", "plum"));
+        assert!(store.update("other", "second"));
+        assert_eq!(store.get("glow"), Some("70"));
+        assert_eq!(store.text(), "glow=35\nother=second\n");
+        store.appearance = None;
+        assert_eq!(store.get("tint"), None);
+        assert_eq!(store.get("glow"), Some("35"));
+        store.appearance = Some(BTreeMap::from([("glow", None), ("tint", Some("plum".into()))]));
+        assert!(store.apply_appearance());
+        assert_eq!(store.text(), "other=second\ntint=plum\n");
+    }
 
     /// The file's rules: the last line of a key wins on reading; setting replaces its first line and drops the later
     /// ones, or adds a line; unknown lines and lines without `=` are written back as they were.

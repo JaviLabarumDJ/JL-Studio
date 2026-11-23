@@ -12,6 +12,8 @@ use os_ui::kit::{self, lemon as lk};
 use os_ui::{tabler, Color, Font, Rect};
 
 use super::lemon;
+use crate::prefs::language::Language;
+fn tr(s: &str) -> &str { Language::current().text(s) }
 use crate::app::{Action, State, Ui};
 use crate::dialog::{Body, DHit, Field, Kind, Modal, Msg};
 use crate::filedlg::{self as fd, FileDlg, Focus, Mode, PlaceKind, SortBy, HEAD_H, ROW_H};
@@ -47,24 +49,43 @@ pub fn paint(ui: &mut Ui, s: &State) {
     let full = Rect::new(0.0, 0.0, s.screen.0, s.screen.1);
     for m in &s.dialogs {
         ui.c.fill_rect(full, Color::rgb(0).with_alpha(80));
-        ui.hit(full, Action::Swallow, "");
+        let voice_orb = matches!(m.body, Body::VoiceAssistant) && matches!(s.voice_ui.screen,
+            crate::voice_assistant::Screen::Listening | crate::voice_assistant::Screen::Processing |
+            crate::voice_assistant::Screen::Ready | crate::voice_assistant::Screen::Result);
+        ui.hit(full, if voice_orb { Action::Dlg(DHit::Voice(crate::voice_assistant::Button::Dismiss)) } else { Action::Swallow }, "");
         match &m.body {
+            Body::Patch(f)=>{let r=place(s,m,(s.screen.0-24.).clamp(760.,1120.),(s.screen.1-30.).clamp(620.,680.));frame(ui,r,"ML Patch");crate::ml_patch::paint(ui,r,f);},
+            Body::ClipFx(channel,page)=>{let r=place(s,m,510.,386.);frame(ui,r,"Clip Effects");crate::clip_effects::paint(ui,s,r,*channel,*page);},
+            Body::Collaboration(f)=>{let r=place(s,m,594.,454.);frame(ui,r,"Collaborate - direct host");crate::collaboration::paint(ui,r,f);},
+            Body::NoteProperties(f)=>{let r=place(s,m,460.,420.);frame(ui,r,"Note properties");crate::piano_note_properties::paint(ui,r,f);},
+            Body::Normalize(f)=>{let r=place(s,m,440.,260.);frame(ui,r,"Normalize audio clips");crate::clip_normalize::paint(ui,r,f);},
+            Body::StripSilence(f)=>{let r=place(s,m,550.,470.);frame(ui,r,"Strip silence");crate::strip_silence::paint(ui,r,f);},
+            Body::VocalAlign(form) => {
+                let r = place(s, m, (s.screen.0 - 24.).clamp(500., 830.), 438.);
+                frame(ui, r, "Vocal Align");
+                crate::vocal_align::paint(ui, r, form);
+            }
+            Body::Ai => ai_box(ui,s,m),
+            Body::VoiceAssistant => voice_box(ui, s, m),
+            Body::RoutePicker(f) => route_picker_box(ui,s,m,f),
+            Body::MixAssistant(form) => crate::mix_assistant::paint(ui, s, m, form),
+            Body::MixerInsert(f) => mixer_insert_box(ui, s, m, f),
+            Body::Headphones(f) => headphones_box(ui,s,m,f),
             Body::Msg(msg) => msg_box(ui, s, m, msg),
             Body::File(f) => file_box(ui, s, m, f),
             Body::Shortcuts(f) => shortcuts_box(ui, s, m, f),
             Body::TimeSig(f) => sig_box(ui, s, m, f),
-            Body::Markers(f) => markers_box(ui, s, m, f),
             Body::Project(f) => super::project_forms::paint(ui, s, m, f),
         }
     }
 }
 
 pub(super) fn hit(ui: &mut Ui, r: Rect, h: DHit, hint: &'static str) -> bool {
-    ui.hit(r, Action::Dlg(h), hint)
+    ui.hit(r, Action::Dlg(h), tr(hint).to_owned())
 }
 
 /// Where a dialog of `w` x `h` sits: where its caption was dragged, else centred; inside the window either way.
-pub(super) fn place(s: &State, m: &Modal, w: f32, h: f32) -> Rect {
+pub(crate) fn place(s: &State, m: &Modal, w: f32, h: f32) -> Rect {
     let (sw, sh) = s.screen;
     let (x, y) = m.at.unwrap_or(((sw - w) / 2.0, (sh - h) / 2.0));
     let r = Rect::new(x.min(sw - w).max(0.0).round(), y.min(sh - h).max(0.0).round(), w, h);
@@ -73,7 +94,8 @@ pub(super) fn place(s: &State, m: &Modal, w: f32, h: f32) -> Rect {
 }
 
 /// Border, caption (title, ×) and the frame colour under everything else.
-pub(super) fn frame(ui: &mut Ui, r: Rect, title: &str) {
+pub(crate) fn frame(ui: &mut Ui, r: Rect, title: &str) {
+    let title=tr(title);
     let t = ui.t;
     let lemon = lemon(ui);
     hit(ui, r, DHit::Body, "");
@@ -90,8 +112,11 @@ pub(super) fn frame(ui: &mut Ui, r: Rect, title: &str) {
     ui.c.text_clip(f, r.x + if lemon { 11.0 } else { 7.0 }, (r.y + 1.0 + (CAP_H - lh) / 2.0).round(), r.w - 40.0, t.text, title);
     hit(ui, Rect::new(r.x, r.y, r.w - 30.0, CAP_H), DHit::Caption, "Drag to move");
     let x = Rect::new(r.right() - 26.0, r.y + 3.0, 21.0, 21.0);
-    let hov = super::close_button(ui, x, x, Action::Dlg(DHit::Close), "Close (Esc)");
-    ui.c.icon(&tabler::X, x.inset(5.0), if hov { t.tx(0xffffff) } else { t.text_dim });
+    let hov = hit(ui, x, DHit::Close, "Close (Esc)");
+    if hov && lemon {
+        lk::window_button_hover(ui.c, t, x, true);
+    }
+    crate::icons::draw(ui.c, crate::icons::Icon::Close, x.inset(5.0), if hov { t.glyph } else { t.text_dim });
 }
 
 /// A body panel: square with darker lines along its top and bottom (Classic), an outlined rounded panel (Lemon).
@@ -108,6 +133,31 @@ pub(super) fn panel(ui: &mut Ui, r: Rect) {
 
 // ---------------------------------------------------------------- message box
 
+fn mixer_insert_box(ui: &mut Ui, s: &State, m: &Modal, form: &crate::mixer::InsertTracks) {
+    let r = place(s, m, 332., 150.);
+    frame(ui, r, "Insert Multiple Tracks");
+    panel(ui, Rect::new(r.x + 5., r.y + 28., r.w - 10., 72.));
+    let prompt = format!("Insert after {}", crate::mixer::name(s, form.after));
+    ui.c.text_clip(Font::new(14), r.x + 16., r.y + 36., r.w - 32., ui.t.text, &prompt);
+    field(ui, Rect::new(r.x + 16., r.y + 63., 88., 27.), &form.field, true, DHit::MixerCount, "Number of Mixer tracks");
+    ui.c.text(
+        Font::new(12), r.x + 116., r.y + 70.,
+        if form.count().is_some() { ui.t.text_dim } else { ui.t.text },
+        &format!("Enter 1 to {}", form.max),
+    );
+
+    for (label, action, x, primary) in [
+        ("✓ Confirm", DHit::Accept, r.right() - 202., true),
+        ("✕ Cancel", DHit::Cancel, r.right() - 105., false),
+    ] {
+        let b = Rect::new(x, r.bottom() - 40., 92., BTN_H);
+        let valid = !primary || form.count().is_some();
+        let hover = valid && hit(ui, b, action, label);
+        let down = valid && ui.down(b, &Action::Dlg(action));
+        button(ui, b, label, primary && valid, hover, down, false);
+    }
+}
+
 fn msg_box(ui: &mut Ui, s: &State, m: &Modal, msg: &Msg) {
     let t = ui.t;
     let lemon = lemon(ui);
@@ -119,9 +169,15 @@ fn msg_box(ui: &mut Ui, s: &State, m: &Modal, msg: &Msg) {
     let buttons_w = widths.iter().sum::<f32>() + 6.0 * widths.len().saturating_sub(1) as f32;
     // Remember my choice sits left of the buttons (spec: ui/settings-choices.md "Hints and warnings: Manage messages
     // and Project data size warning (2026-10-16)").
-    let remember_w = if msg.remember.is_some() { super::remember_width(ui) + 24.0 } else { 0.0 };
-    let w = (text_w + TEXT_X + TEXT_R).max(buttons_w + 24.0 + remember_w).max(MIN_W).ceil();
-    let body_h = (27.0 + lines.len() as f32 * LINE).max(91.0);
+    let remember_label = if msg.then == crate::dialog::Then::WarpApply {
+        "Don't show again"
+    } else {
+        super::REMEMBER
+    };
+    let remember_w = if msg.remember.is_some() { super::remember_width(ui, remember_label) + 24.0 } else { 0.0 };
+    let w = (text_w + TEXT_X + TEXT_R).max(buttons_w + 24.0 + remember_w).max(if msg.progress.is_some() {500.0} else {MIN_W}).ceil();
+    let choices = if let crate::dialog::Then::StemChoose(_,mask)=msg.then {Some(mask)} else {None};
+    let body_h = (27.0 + lines.len() as f32 * LINE).max(91.0) + if choices.is_some() {150.0} else {0.0} + if msg.progress.is_some() {48.0} else {0.0};
     let r = place(s, m, w, 28.0 + body_h + 63.0);
     frame(ui, r, &msg.title);
     let body = Rect::new(r.x + 5.0, r.y + 28.0, r.w - 10.0, body_h);
@@ -138,17 +194,42 @@ fn msg_box(ui: &mut Ui, s: &State, m: &Modal, msg: &Msg) {
             x += ui.c.text(font, x, y, col, run);
         }
     }
+    if let Some((done,total))=msg.progress {
+        let bar=Rect::new(r.x+TEXT_X,body.bottom()-39.0,r.w-TEXT_X-TEXT_R,8.0);
+        let fraction=if total>0 {(done as f64/total as f64).clamp(0.0,1.0) as f32} else {0.0};
+        ui.c.fill_rrect(bar,4.0,t.s(WELL));
+        if fraction>0.0 {ui.c.fill_rrect(Rect::new(bar.x,bar.y,bar.w*fraction,bar.h),4.0,t.brand_lit(brand::MAIN));}
+        let label=if total>0 {format!("{:.1} / {:.1} MB  -  {}%",done as f64/1_000_000.0,total as f64/1_000_000.0,(fraction*100.0).floor() as u32)} else {"Preparing files...".into()};
+        ui.c.text(Font::new(12),bar.x,bar.y+14.0,t.text_dim,&label);
+    }
+    if let Some(mask)=choices {
+        for (n,label) in ["Vocals", "Drums", "Bass", "Instruments", "All stems"].iter().enumerate() {
+            let y=body.bottom()-145.0+n as f32*28.0;
+            let b=Rect::new(r.x+TEXT_X,y+4.0,15.0,15.0);
+            let on=if n==4 {mask==15} else {mask & (1<<n)!=0};
+            let hov=hit(ui,Rect::new(b.x-4.0,y,240.0,24.0),DHit::StemToggle(n),"Choose stems (1-4; A for all)");
+            ui.c.fill_rrect(b,2.0,t.s(0x141516));
+            ui.c.stroke_rrect(b,2.0,1.0,if hov {t.glyph_dim} else {t.text_dim});
+            if on {kit::tick(ui.c,b,t.glyph);}
+            ui.c.text(font,b.x+24.0,y+2.0,t.text,label);
+        }
+    }
     let by = body.bottom() + 20.0;
     if let Some((_, ticked)) = msg.remember {
-        super::remember_check(ui, r.x + 14.0, by + BTN_H / 2.0, ticked, Action::Dlg(DHit::Remember));
+        super::remember_check(ui, r.x + 14.0, by + BTN_H / 2.0, ticked, remember_label, Action::Dlg(DHit::Remember));
     }
     let mut bx = r.right() - 12.0 - buttons_w;
+    let show_accelerators = !matches!(
+        msg.then,
+        crate::dialog::Then::Discard(crate::dialog::Next::Close | crate::dialog::Next::Quit)
+    );
     for (i, bw) in widths.into_iter().enumerate() {
         let b = Rect::new(bx, by, bw, BTN_H);
         let act = Action::Dlg(DHit::Button(i));
         let down = ui.down(b, &act);
-        let hov = ui.hit(b, act, msg.label(i));
-        button(ui, b, msg.label(i), i == msg.focus, hov, down, true);
+        let enabled=!(choices==Some(0) && msg.buttons[i]==crate::dialog::Answer::Ok);
+        let hov = enabled && ui.hit(b, act, msg.label(i));
+        button(ui, b, msg.label(i), i == msg.focus, hov, down, enabled && show_accelerators);
         bx += bw + 6.0;
     }
 }
@@ -245,7 +326,8 @@ fn icon(ui: &mut Ui, kind: Kind, cx: f32, cy: f32) {
 
 /// A dialog button (spec §1d, §3). `main`: the focused (message box) or default (file dialog) button. `accel`: the first
 /// letter gets the dotted underline.
-pub(super) fn button(ui: &mut Ui, b: Rect, label: &str, main: bool, hov: bool, down: bool, accel: bool) {
+pub(crate) fn button(ui: &mut Ui, b: Rect, label: &str, main: bool, hov: bool, down: bool, accel: bool) {
+    let label=tr(label);
     let t = ui.t;
     let ink = if lemon(ui) {
         let rad = lk::r_btn(t);
@@ -268,7 +350,7 @@ pub(super) fn button(ui: &mut Ui, b: Rect, label: &str, main: bool, hov: bool, d
         }
         if hov { t.glyph } else { t.text }
     };
-    let f = Font::new(13);
+    let f = ui.c.fit_font(Font::new(13),label,(b.w-12.).max(12.));
     let tw = ui.c.text_width(f, label);
     let lh = ui.c.line_height(f);
     let (x, y) = ((b.x + (b.w - tw) / 2.0).round(), (b.cy() - lh / 2.0).round());
@@ -292,57 +374,42 @@ pub(super) fn button(ui: &mut Ui, b: Rect, label: &str, main: bool, hov: bool, d
 fn sig_box(ui: &mut Ui, s: &State, m: &Modal, f: &SigForm) {
     let t = ui.t;
     let font = Font::new(13);
+    let project = f.target == crate::timesig::Target::Project;
     let labels = ["Numerator", "Denominator"];
     let label_w = labels.iter().map(|l| ui.c.text_width(font, l)).fold(0.0, f32::max).ceil();
-    let box_w = 48.0;
-    let r = place(s, m, (12.0 + label_w + 10.0 + box_w + 12.0).max(156.0), 143.0);
-    frame(ui, r, "Time signature change");
+    let box_w = 84.0;
+    let r = place(s, m, (12.0 + label_w + 10.0 + box_w + 12.0).max(230.0), 143.0);
+    frame(ui, r, if project { "Project numerator" } else { "Time signature change" });
     panel(ui, Rect::new(r.x + 5.0, r.y + 28.0, r.w - 10.0, 72.0));
     let lh = ui.c.line_height(font);
     let open = crate::timesig::list_open(s);
-    for (i, (label, value)) in labels.into_iter().zip([f.num, f.den]).enumerate() {
+    for (i, label) in labels.into_iter().enumerate() {
         let den = i == 1;
+        if project && den { break; }
         let cy = r.y + if den { 75.0 } else { 49.0 };
-        ui.c.text(font, r.x + 12.0, (cy - lh / 2.0).round(), t.text, label);
+        ui.c.text(font, r.x + 12.0, (cy - lh / 2.0).round(), t.text, tr(label));
         let b = Rect::new(r.right() - 12.0 - box_w, (cy - 10.0).round(), box_w, 20.0);
-        let hov = hit(ui, b, DHit::SigValue(den), if den { "Denominator: click to choose" } else { "Numerator: click to choose" });
-        kit::combo(ui.c, t, b, &value.to_string(), font, kit::State::new(hov, open == Some(den), false));
+        if den {
+            let hov = hit(ui, b, DHit::SigValue(true), "Denominator: click to choose");
+            kit::combo(ui.c, t, b, &f.den.to_string(), font, kit::State::new(hov, open == Some(true), false));
+        } else {
+            let arrow = Rect::new(b.right() - 22.0, b.y, 22.0, b.h);
+            let hov = hit(ui, arrow, DHit::SigValue(false), "Choose a numerator");
+            kit::combo(ui.c, t, arrow, "", font, kit::State::new(hov, open == Some(false), false));
+            field(ui, Rect::new(b.x, b.y, b.w - arrow.w - 2.0, b.h), &f.num,
+                open.is_none(), DHit::SigNumerator, "Type the numerator (1–255)");
+        }
+    }
+    let valid = f.numerator().is_some();
+    if !valid {
+        ui.c.text(Font::new(11), r.x + 12.0, r.y + 86.0, t.text, tr("Enter a number from 1 to 255."));
     }
     let bw = (ui.c.text_width(font, "Accept") + 28.0).max(BTN_W).round();
     let b = Rect::new(r.right() - 12.0 - bw, r.y + 105.0, bw, BTN_H);
     let act = Action::Dlg(DHit::Accept);
     let down = ui.down(b, &act);
     let hov = ui.hit(b, act, "Enter");
-    button(ui, b, "Accept", true, hov, down, false);
-}
-
-/// Prepare for performance mode's Marker settings (spec: ui/performance-mode.md §1): Marker count and Spacing (in
-/// bars), each a value box with a list, and Accept; laid out as the time signature dialog.
-fn markers_box(ui: &mut Ui, s: &State, m: &Modal, f: &crate::perform::MarkerForm) {
-    let t = ui.t;
-    let font = Font::new(13);
-    let labels = ["Marker count", "Spacing (bars)"];
-    let label_w = labels.iter().map(|l| ui.c.text_width(font, l)).fold(0.0, f32::max).ceil();
-    let box_w = 48.0;
-    let r = place(s, m, (12.0 + label_w + 10.0 + box_w + 12.0).max(156.0), 143.0);
-    frame(ui, r, "Marker settings");
-    panel(ui, Rect::new(r.x + 5.0, r.y + 28.0, r.w - 10.0, 72.0));
-    let lh = ui.c.line_height(font);
-    let open = s.playlist.popup.is_some();
-    for (i, (label, value)) in labels.into_iter().zip([f.count, f.spacing]).enumerate() {
-        let spacing = i == 1;
-        let cy = r.y + if spacing { 75.0 } else { 49.0 };
-        ui.c.text(font, r.x + 12.0, (cy - lh / 2.0).round(), t.text, label);
-        let b = Rect::new(r.right() - 12.0 - box_w, (cy - 10.0).round(), box_w, 20.0);
-        let hov = hit(ui, b, DHit::MarkerValue(spacing), if spacing { "Spacing in bars: click to choose" } else { "Marker count: click to choose" });
-        kit::combo(ui.c, t, b, &value.to_string(), font, kit::State::new(hov, open, false));
-    }
-    let bw = (ui.c.text_width(font, "Accept") + 28.0).max(BTN_W).round();
-    let b = Rect::new(r.right() - 12.0 - bw, r.y + 105.0, bw, BTN_H);
-    let act = Action::Dlg(DHit::Accept);
-    let down = ui.down(b, &act);
-    let hov = ui.hit(b, act, "Enter");
-    button(ui, b, "Accept", true, hov, down, false);
+    button(ui, b, "Accept", valid, hov, down, false);
 }
 
 // ---------------------------------------------------------------- file dialog
@@ -366,7 +433,7 @@ fn layout(r: Rect, f: &FileDlg) -> Layout {
     let ty = panel.y + 30.0;
     let back = Rect::new(panel.x + 8.0, ty, 26.0, 26.0);
     let up = Rect::new(back.right() + 4.0, ty, 26.0, 26.0);
-    let new_folder = (f.mode != Mode::Open).then(|| Rect::new(panel.right() - 34.0, ty, 26.0, 26.0));
+    let new_folder = Some(Rect::new(panel.right() - 34.0, ty, 26.0, 26.0));
     let path = Rect::span(up.right() + 6.0, new_folder.map_or(panel.right() - 8.0, |n| n.x - 4.0), ty, ty + 26.0);
     let name_y = panel.bottom() - 34.0;
     let combo = (f.mode != Mode::Folder && !f.filters.is_empty()).then(|| Rect::new(panel.right() - 238.0, name_y, 230.0, 26.0));
@@ -391,31 +458,37 @@ fn file_box(ui: &mut Ui, s: &State, m: &Modal, f: &FileDlg) {
     if let Some(n) = l.new_folder {
         tool(ui, n, Icon::FolderPlus, DHit::NewFolder, "New folder", true);
     }
-    field(ui, l.path, &f.path, f.focus == Focus::Path, DHit::PathField, "The folder shown: type a path and press Enter to go there");
+    field(ui, l.path, &f.path, f.focus == Focus::Path && !f.list_focus, DHit::PathField, "The folder shown: type a path and press Enter to go there");
     places(ui, f, l.places);
     list(ui, f, l.list);
     let font = Font::new(13);
     let lh = ui.c.line_height(font);
     let label = if f.mode == Mode::Folder { "Folder" } else { "File name" };
-    ui.c.text(font, l.panel.x + 10.0, (l.name_y + 13.0 - lh / 2.0).round(), t.text, label);
-    field(ui, l.name, &f.name, f.focus == Focus::Name, DHit::NameField, "");
+    ui.c.text(font, l.panel.x + 10.0, (l.name_y + 13.0 - lh / 2.0).round(), t.text, tr(label));
+    field(ui, l.name, &f.name, f.focus == Focus::Name && !f.list_focus, DHit::NameField, "");
     if let Some(c) = l.combo {
         let hov = hit(ui, c, DHit::Filter, "The type of file listed");
         let label = f.chosen().map(fd::Filter::label).unwrap_or_default();
         kit::combo(ui.c, t, c, &label, font, kit::State::new(hov, f.filter_open, false));
     }
     // The band: the status, then the main button and Cancel.
-    let main = match f.mode {
+    let main = if f.renaming.is_some() {"Rename"} else {match f.mode {
         Mode::Open => "Open",
         Mode::Save => "Save",
         Mode::Folder => "Select folder",
-    };
-    let bw = |ui: &mut Ui, s: &str| (ui.c.text_width(font, s) + 28.0).max(84.0).round();
+    }};
+    let bw = |ui: &mut Ui, s: &str| (ui.c.text_width(font, tr(s)) + 28.0).max(84.0).round();
     let (mw, cw) = (bw(ui, main), bw(ui, "Cancel"));
     let cancel = Rect::new(r.right() - 12.0 - cw, r.bottom() - 37.0, cw, 30.0);
     let ok = Rect::new(cancel.x - 6.0 - mw, cancel.y, mw, 30.0);
     let col = if f.status.is_some() { t.h(0xff9e00) } else { t.text_dim };
+    if matches!(f.then,crate::dialog::Then::RackSample(_) | crate::dialog::Then::BrowserSample) {
+        let b=Rect::new(r.x+14.,cancel.y,116.,cancel.h);
+        let hov=hit(ui,b,DHit::SamplePreview,"Audition the selected sample without loading it into the channel");
+        button(ui,b,if f.preview {"Preview: On"}else{"Preview: Off"},f.preview,hov,false,false);
+    }else{
     ui.c.text_clip(font, r.x + 14.0, (cancel.cy() - lh / 2.0).round(), ok.x - r.x - 26.0, col, &f.status_text());
+    }
     for (b, label, h, is_main) in [(ok, main, DHit::Accept, true), (cancel, "Cancel", DHit::Cancel, false)] {
         let act = Action::Dlg(h);
         let down = ui.down(b, &act);
@@ -448,20 +521,20 @@ fn shortcuts_box(ui: &mut Ui, s: &State, m: &Modal, f: &crate::shortcuts::Form) 
     let font = Font::new(13);
     let lh = ui.c.line_height(font);
     let groups_h: f32 = GROUPS.iter().map(|g| sc_group_h(g.1) + 6.0).sum();
-    let r = place(s, m, SC_W, 28.0 + 4.0 + groups_h + 47.0);
+    let r = place(s, m, SC_W+340., 28.0 + 4.0 + groups_h + 47.0);
     frame(ui, r, TITLE);
     let mut y = r.y + 32.0;
     let mut row = 0;
     let mut open_box = None;
     for (title, n) in GROUPS {
-        let p = Rect::new(r.x + 8.0, y, r.w - 16.0, sc_group_h(n));
+        let p = Rect::new(r.x + 8.0, y, SC_W - 16.0, sc_group_h(n));
         section(ui, p, title);
         for k in 0..n {
             let b = Rect::new(p.x + 10.0, p.y + 30.0 + k as f32 * SC_ROW, SC_BOX.0, SC_BOX.1);
             let open = f.open == Some(row);
             let hov = hit(ui, b, DHit::Shortcut(row), ROWS[row].label);
             kit::combo(ui.c, t, b, f.text(row), font, kit::State::new(hov, open, false));
-            ui.c.text(font, b.right() + 10.0, (b.cy() - lh / 2.0).round(), t.text, ROWS[row].label);
+            ui.c.text(font, b.right() + 10.0, (b.cy() - lh / 2.0).round(), t.text, tr(ROWS[row].label));
             if open {
                 open_box = Some((row, b));
             }
@@ -469,7 +542,23 @@ fn shortcuts_box(ui: &mut Ui, s: &State, m: &Modal, f: &crate::shortcuts::Form) 
         }
         y = p.bottom() + 6.0;
     }
-    let bw = |ui: &mut Ui, s: &str| (ui.c.text_width(font, s) + 28.0).max(BTN_W).round();
+    let commands=crate::shortcuts::COMMANDS;
+    let p=Rect::new(r.x+SC_W,r.y+32.,328.,groups_h-6.);
+    section(ui,p,"Common commands — click a key to change it");
+    let start=f.page*crate::shortcuts::COMMAND_PAGE;
+    for (i,(_,label,_)) in commands.iter().enumerate().skip(start).take(crate::shortcuts::COMMAND_PAGE) {
+        let row=Rect::new(p.x+10.,p.y+32.+(i-start) as f32*32.,p.w-20.,29.);
+        ui.c.text(font,row.x,row.y+7.,t.text,label);
+        let b=Rect::new(row.right()-132.,row.y,132.,row.h);
+        let hov=hit(ui,b,DHit::CommandShortcut(i),"Press a new shortcut; Backspace clears it");
+        let text=if f.capture==Some(i){"Press key…"}else if f.bindings[i].is_empty(){"Unassigned"}else{&f.bindings[i]};
+        button(ui,b,text,f.capture==Some(i),hov,false,false);
+    }
+    let page=Rect::new(p.x+10.,p.bottom()-65.,120.,25.);
+    let hov=hit(ui,page,DHit::CommandPage,"Next page of commands");
+    button(ui,page,&format!("Page {} / {}",f.page+1,commands.len().div_ceil(crate::shortcuts::COMMAND_PAGE)),false,hov,false,false);
+    ui.c.text_clip(Font::new(11),p.x+10.,p.bottom()-38.,p.w-20.,t.text,&f.notice);
+    let bw = |ui: &mut Ui, s: &str| (ui.c.text_width(font, tr(s)) + 28.0).max(BTN_W).round();
     let (rw, aw) = (bw(ui, "Reset all"), bw(ui, "Apply"));
     let by = r.bottom() - 8.0 - BTN_H;
     let reset = Rect::new(r.x + 12.0, by, rw, BTN_H);
@@ -516,12 +605,13 @@ fn shortcut_list(ui: &mut Ui, f: &crate::shortcuts::Form, row: usize, b: Rect, d
             }
         }
         let col = if i == f.vals[row] { if lemon(ui) { t.brand_sel(brand::MAIN) } else { t.glyph } } else { t.text };
-        ui.c.text_clip(font, rr.x + 10.0, (rr.cy() - lh / 2.0).round(), rr.w - 16.0, col, ch);
+        ui.c.text_clip(font, rr.x + 10.0, (rr.cy() - lh / 2.0).round(), rr.w - 16.0, col, tr(ch));
     }
 }
 
 /// A section panel with its header tab (as the Settings window's groups and FL's Save as form).
 pub(super) fn section(ui: &mut Ui, p: Rect, title: &str) {
+    let title=tr(title);
     let t = ui.t;
     let f = Font::new(13).bold();
     if lemon(ui) {
@@ -580,23 +670,17 @@ pub(super) fn field(ui: &mut Ui, r: Rect, fl: &Field, focused: bool, h: DHit, hi
     hit(ui, r, h, hint);
     well(ui, r, focused.then_some(if lemon { t.brand_sel(brand::MAIN) } else { FOCUS_BLUE }));
     let f = Font::new(13);
-    let lh = ui.c.line_height(f);
     let inner = Rect::new(r.x + 7.0, r.y + 2.0, r.w - 14.0, r.h - 4.0);
-    let caret_x = ui.c.text_width(f, fl.before_caret());
-    let shift = (caret_x - (inner.w - 2.0)).max(0.0);
-    let (x, y) = (inner.x - shift, (r.cy() - lh / 2.0).round());
-    ui.c.push_clip(inner);
-    let mut ink = t.text;
-    if focused && fl.all {
-        let w = ui.c.text_width(f, &fl.text);
-        ui.c.fill_rect(Rect::new(x - 1.0, y, w + 2.0, lh), if lemon { t.brand_sel(brand::COLORED_DARK) } else { SEL_BLUE });
-        ink = if lemon { t.brand_sel(brand::HIGHLIGHT) } else { Color::rgb(0xffffff) };
+    let selection = if lemon { t.brand_sel(brand::COLORED_DARK) } else { SEL_BLUE };
+    let x = crate::dialog::text::paint(ui, inner, fl, focused, f, t.text, selection, "");
+    use crate::dialog::TextTarget as Target;
+    let target=match h { DHit::NameField=>Some(Target::Name), DHit::PathField=>Some(Target::Path),
+        DHit::Form(crate::project_forms::FHit::Field(i))=>Some(Target::Project(i)),
+        DHit::HeadphoneSearch=>Some(Target::HeadphoneSearch), DHit::RouteSearch=>Some(Target::RouteSearch),
+        DHit::MixerCount=>Some(Target::MixerCount), DHit::SigNumerator=>Some(Target::SigNumerator), _=>None };
+    if let Some(target)=target {
+        crate::dialog::text::carets(ui, r, fl, f, x, |i| Action::Dlg(DHit::TextCaret(target, i)), hint);
     }
-    ui.c.text(f, x, y, ink, &fl.text);
-    if focused && !fl.all {
-        ui.c.fill_rect(Rect::new((x + caret_x).round(), y, 1.0, lh), t.glyph);
-    }
-    ui.c.pop_clip();
 }
 
 /// A row's background: selected or hovered.
@@ -648,19 +732,27 @@ fn places(ui: &mut Ui, f: &FileDlg, r: Rect) {
         let hov = ui.hit(row.intersect(&clip), Action::Dlg(DHit::Place(i)), p.path.display().to_string());
         let sel = now == Some(i);
         row_bg(ui, row, sel, hov);
+        use crate::icons::Icon;
         let shape = match p.kind {
-            PlaceKind::Home => &tabler::USER,
-            PlaceKind::Desktop => &tabler::LAYOUT_ROWS,
-            PlaceKind::Documents => &tabler::FILE_TEXT,
-            PlaceKind::Downloads => &tabler::DOWNLOAD,
-            PlaceKind::Music => &tabler::MUSIC,
-            PlaceKind::Start => &tabler::FOLDER_OPEN,
-            PlaceKind::Drive => &tabler::BOX,
+            PlaceKind::Home => Icon::User,
+            PlaceKind::Desktop => Icon::Playlist,
+            PlaceKind::Documents => Icon::FileText,
+            PlaceKind::Downloads => Icon::Download,
+            PlaceKind::Music => Icon::Note,
+            PlaceKind::Start => Icon::FolderOpen,
+            PlaceKind::Drive => Icon::Drive,
         };
         let ink = row_ink(ui, sel, hov);
         let ic = if sel && lemon(ui) { t.brand_sel(brand::MAIN) } else if sel || hov { t.glyph } else { t.text_dim };
-        ui.c.icon(shape, Rect::new(row.x + 8.0, row.y + 3.0, 16.0, 16.0), ic);
-        ui.c.text_clip(font, row.x + 30.0, (row.cy() - lh / 2.0).round(), row.w - 36.0, ink, &p.label);
+        let r = Rect::new(row.x + 8.0, row.y + 3.0, 16.0, 16.0);
+        let original = match p.kind {
+            PlaceKind::Desktop => &tabler::LAYOUT_ROWS,
+            PlaceKind::Documents => &tabler::FILE_TEXT,
+            PlaceKind::Downloads => &tabler::DOWNLOAD,
+            _ => crate::icons::default_shape(shape),
+        };
+        crate::icons::draw_with_default(ui.c, shape, original, r, ic);
+        ui.c.text_clip(font, row.x + 30.0, (row.cy() - lh / 2.0).round(), row.w - 36.0, ink, if matches!(p.kind,PlaceKind::Start | PlaceKind::Drive) { &p.label } else { tr(&p.label) });
         y += 22.0;
     }
     ui.c.pop_clip();
@@ -670,8 +762,8 @@ fn places(ui: &mut Ui, f: &FileDlg, r: Rect) {
 fn file_icon(name: &str) -> Icon {
     let ext = std::path::Path::new(name).extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
     match ext.as_str() {
-        "flp" | "lemon" => Icon::FileProject,
-        "wav" | "mp3" | "flac" | "ogg" | "aif" | "aiff" | "m4a" => Icon::FileAudio,
+        "lmn" | "flp" => Icon::FileProject,
+        "wav" | "mp3" | "flac" | "ogg" | "aif" | "aiff" | "wv" | "rx2" | "rex" | "rcy" => Icon::FileAudio,
         "zip" => Icon::FileZip,
         "txt" | "flstheme" => Icon::FileText,
         e if e == crate::presets::EXT => Icon::FilePreset,
@@ -683,7 +775,7 @@ fn list(ui: &mut Ui, f: &FileDlg, r: Rect) {
     let t = ui.t;
     let lemon = lemon(ui);
     well(ui, r, None);
-    hit(ui, r, DHit::List, "");
+    hit(ui, r, DHit::List, if cfg!(windows) {"File actions: right-click for Explorer commands; F2 renames; F5 refreshes"}else{"F2 renames the selected file or folder; F5 refreshes"});
     let font = Font::new(13);
     let lh = ui.c.line_height(font);
     let head = Rect::new(r.x + 1.0, r.y + 1.0, r.w - 2.0, HEAD_H);
@@ -707,10 +799,10 @@ fn list(ui: &mut Ui, f: &FileDlg, r: Rect) {
         let hr = Rect::span(x0, x1, head.y, head.bottom() - 1.0);
         let hov = hit(ui, hr, DHit::Header(by), "Sort by this column (again: the other way round)");
         let col = if hov { t.glyph } else { t.text_dim };
-        let tw = ui.c.text_width(font, label);
+        let tw = ui.c.text_width(font, tr(label));
         let tx = if right { hr.right() - 8.0 - tw } else { hr.x + if by == SortBy::Name { 30.0 } else { 6.0 } };
         let ty = (hr.cy() - lh / 2.0).round();
-        ui.c.text(font, tx, ty, col, label);
+        ui.c.text(font, tx, ty, col, tr(label));
         if f.sort == by {
             let cx = if right { tx - 8.0 } else { tx + tw + 8.0 };
             kit::chevron(ui.c, cx, hr.cy(), 3.0, if f.reversed { kit::Dir::Up } else { kit::Dir::Down }, if lemon { t.brand_lit(brand::MAIN) } else { t.text_dim });
@@ -788,5 +880,343 @@ fn filter_list(ui: &mut Ui, f: &FileDlg, c: Rect, dlg: Rect) {
         }
         let col = if i == f.filter { if lemon(ui) { t.brand_sel(brand::MAIN) } else { t.glyph } } else { t.text };
         ui.c.text_clip(font, row.x + 10.0, (row.cy() - lh / 2.0).round(), row.w - 16.0, col, &flt.label());
+    }
+}
+
+
+fn headphones_box(ui:&mut Ui,s:&State,m:&Modal,f:&crate::headphones::Form){
+ let r=place(s,m,620f32.min(s.screen.0),505f32.min(s.screen.1));
+ frame(ui,r,"Headphone correction");
+ let ink=ui.t.text;let dim=ui.t.text_dim;
+ ui.c.text_clip(Font::new(13).bold(),r.x+18.,r.y+40.,r.w-36.,ink,"Choose your headphones");
+ ui.c.text_clip(Font::new(11),r.x+18.,r.y+62.,r.w-36.,dim,"Monitor only — never applied to exports, stems or bounced tracks.");
+ let search=Rect::new(r.x+18.,r.y+86.,r.w-36.,29.);
+ field(ui,search,&f.search,true,DHit::HeadphoneSearch,"Search model, brand, impedance or variant. Enter loads the highlighted profile.");
+ if f.search.text.is_empty(){ui.c.text_clip(Font::new(12),search.x+8.,search.y+7.,search.w-16.,dim,"Search headphone models...");}
+ let row_h=((r.h-245.)/10.).clamp(15.,26.);
+ let list=Rect::new(r.x+18.,r.y+126.,r.w-36.,row_h*10.);
+ ui.c.fill_rrect(list,5.,ui.t.s(0x151c20));
+ let cat=crate::headphones::catalog();
+ for (n,&i) in f.results.iter().enumerate().skip(f.scroll).take(10){
+  let row=Rect::new(list.x+3.,list.y+(n-f.scroll) as f32*row_h,list.w-6.,row_h);
+  let (name,path)=cat[i];let source=path.split('/').next().unwrap_or("AutoEq").replace("%20"," ");
+  let load_hint=if crate::headphones::is_bundled(path){"Available offline. Click to enable."}else{"Click to download and enable."};
+  let hover=ui.hit(row,Action::Dlg(DHit::Headphone(i)),format!("{name} | Measurement: {source} | {load_hint} Match your exact headphone variant."));
+  if hover || n==f.selected {ui.c.fill_rrect(row,3.,if hover{ui.t.button_hi}else{ui.t.s(0x263b40)});}
+  ui.c.text_clip(Font::new(12),row.x+8.,row.y+5.,row.w-145.,if s.headphones.name==name{ui.t.accent}else{ink},name);
+  ui.c.text_clip(Font::new(10),row.right()-128.,row.y+6.,120.,dim,&source);
+ }
+ if f.results.is_empty(){ui.c.text_clip(Font::new(12),list.x+12.,list.y+18.,list.w-24.,dim,"No measured profile found. Try the brand or model number.");}
+ let y=list.bottom()+8.;
+ ui.c.text_clip(Font::new(10),r.x+18.,y+6.,r.w-180.,dim,&format!("{} matches | Scroll or use arrow keys",f.results.len()));
+ for (next,x,label) in [(false,r.right()-148.,"Previous"),(true,r.right()-80.,"Next")]{let b=Rect::new(x,y,62.,23.);let hover=hit(ui,b,DHit::HeadphonePage(next),"Browse headphone profiles");ui.c.fill_rrect(b,4.,if hover{ui.t.button_hi}else{ui.t.s(0x303b40)});ui.c.text_center(Font::new(10),b,ink,label);}
+ let on=s.headphones.on;let b=Rect::new(r.x+18.,y+37.,76.,26.);
+ let hover=hit(ui,b,DHit::HeadphoneToggle,"Enable / bypass the selected headphone correction");
+ ui.c.fill_rrect(b,4.,if on{ui.t.s(0x416c52)}else if hover{ui.t.button_hi}else{ui.t.s(0x303b40)});ui.c.text_center(Font::new(11).bold(),b,ink,if on{"ON"}else{"OFF"});
+ let show_auto_gain=crate::workspace_visibility::shown(crate::headphones::AUTO_GAIN_VISIBILITY);
+ let name_width=r.w-124.-if show_auto_gain{126.}else{0.};
+ ui.c.text_clip(Font::new(12),r.x+106.,y+42.,name_width,ink,if s.headphones.name.is_empty(){"No headphones selected"}else{&s.headphones.name});
+ if show_auto_gain {
+     let button=Rect::new(r.right()-132.,y+37.,114.,26.);
+     let hovered=hit(ui,button,DHit::HeadphoneAutoGain,"Match headphone correction to the bypass level. Off uses the original profile headroom.");
+     let active=s.headphones.auto_gain;
+     ui.c.fill_rrect(button,4.,if hovered{ui.t.button_hi}else if active{ui.t.s(0x416c52)}else{ui.t.s(0x303b40)});
+     ui.c.text_center(Font::new(11).bold(),button,ink,if active{"Auto gain: On"}else{"Auto gain: Off"});
+ }
+ let status=if s.headphones.status.is_empty(){"Downloaded and bundled profiles work offline."}else{&s.headphones.status};
+ let sr=Rect::new(r.x+18.,y+69.,r.w-36.,20.);ui.hit(sr,Action::Swallow,status.to_string());
+ ui.c.text_clip(Font::new(10),sr.x,sr.y,sr.w,dim,status);
+ ui.c.text_clip(Font::new(10),r.x+18.,r.bottom()-20.,r.w-98.,dim,"Correction depends on fit and individual headphones.");
+ let cr=Rect::new(r.right()-78.,r.bottom()-24.,60.,18.);hit(ui,cr,DHit::HeadphoneCredits,"Headphone profile sources and licenses");ui.c.text_center(Font::new(10),cr,ui.t.accent,"Credits");
+}
+
+
+fn route_picker_box(ui:&mut Ui,s:&State,m:&Modal,f:&crate::route_picker::Form){
+ use crate::route_picker::{COLS,ROWS};
+ let r=place(s,m,840f32.min(s.screen.0-12.),462f32.min(s.screen.1-12.));
+ frame(ui,r,"Send to mixer track");
+ ui.c.text_clip(Font::new(12).bold(),r.x+14.,r.y+36.,r.w-28.,ui.t.text,&format!("Choose a destination for {}",f.channel));
+ ui.c.text_clip(Font::new(10),r.x+14.,r.y+55.,r.w-28.,ui.t.text_dim,if let Some((_,spread))=&f.rack {if *spread {"Choose the first mixer insert. Channels follow in Channel Rack order."} else {"All selected channels will use this mixer destination."}} else {"Shared sample clips use the same routing. Use Make Unique first for independent routing."});
+ field(ui,Rect::new(r.x+14.,r.y+75.,r.w-28.,26.),&f.search,true,DHit::RouteSearch,"Filter by track name or number");
+ if f.search.text.is_empty(){ui.c.text_clip(Font::new(11),r.x+23.,r.y+81.,r.w-46.,ui.t.text_dim,"Find a track by name or number...");}
+ let grid=Rect::new(r.x+14.,r.y+110.,r.w-28.,r.h-151.);
+ let (cw,ch)=(grid.w/COLS as f32,grid.h/ROWS as f32);
+ for (pos,&i) in f.shown.iter().skip(f.first).take(COLS*ROWS).enumerate(){
+  let t=&f.tracks[i];let cell=Rect::new(grid.x+(pos%COLS) as f32*cw+2.,grid.y+(pos/COLS) as f32*ch+2.,cw-4.,ch-4.);
+  let current=t.index==f.current;let color=t.color.map(super::rgb).unwrap_or(ui.t.accent);
+  let hover=ui.hit(cell,Action::Dlg(DHit::RoutePick(t.index)),format!("{} — {}{} | Click to route",t.index,t.name,if current{" (current)"}else{""}));
+  ui.c.fill_rrect(cell,4.,if hover{ui.t.button_hi}else{ui.t.s(0x252d30)});
+  ui.c.stroke_rrect(cell,4.,1.,if current||hover{ui.t.accent}else{ui.t.s(0x3b464b)});
+  ui.c.text_center(Font::new(11).bold(),Rect::new(cell.x,cell.y+1.,cell.w,14.),if current{ui.t.accent}else{ui.t.text},&t.index.to_string());
+  let strip=Rect::new(cell.cx()-11.,cell.y+18.,22.,(ch-50.).clamp(12.,28.));
+  ui.c.fill_rrect(strip,2.,ui.t.s(0x101719));ui.c.fill_rect(Rect::new(strip.x,strip.y,strip.w,2.),color);
+  ui.c.line(strip.cx(),strip.y+5.,strip.cx(),strip.bottom()-3.,1.,ui.t.s(0x718087));
+  let y=strip.bottom()-4.-t.level.clamp(0.,1.) as f32*(strip.h-10.);
+  ui.c.fill_rrect(Rect::new(strip.cx()-5.,y-2.,10.,4.),1.,color);
+  let font=Font::new(10);let mut lines=vec![String::new()];
+  for word in t.name.split_whitespace(){let last=lines.last().unwrap();let next=if last.is_empty(){word.into()}else{format!("{last} {word}")};if !last.is_empty()&&ui.c.text_width(font,&next)>cell.w-6.&&lines.len()<2{lines.push(word.into());}else{*lines.last_mut().unwrap()=next;}}
+  for (n,line) in lines.iter().take(2).enumerate(){ui.c.text_clip(font,cell.x+3.,strip.bottom()+4.+n as f32*11.,cell.w-6.,ui.t.text,line);}
+ }
+ if f.shown.is_empty(){ui.c.text_clip(Font::new(12),grid.x+10.,grid.y+20.,grid.w-20.,ui.t.text_dim,"No tracks match. Try another name or number.");}
+ let footer=Rect::new(r.x+14.,r.bottom()-30.,r.w-28.,22.);
+ ui.c.text_clip(Font::new(10),footer.x,footer.y+5.,footer.w-156.,ui.t.text_dim,&format!("{} tracks | Current: {} | Scroll to browse",f.shown.len(),f.current));
+ for (next,x,label) in [(false,r.right()-153.,"Previous"),(true,r.right()-82.,"Next")]{let b=Rect::new(x,footer.y,66.,22.);let hover=hit(ui,b,DHit::RoutePage(next),"Browse mixer tracks");ui.c.fill_rrect(b,3.,if hover{ui.t.button_hi}else{ui.t.s(0x303b40)});ui.c.text_center(Font::new(10),b,ui.t.text,label);}
+}
+
+
+/// Projected, continuously deforming sphere. All geometry stays on the UI thread;
+/// microphone capture and inference never perform animation work.
+fn paint_voice_orb(c: &mut os_ui::Canvas, center: (f32, f32), radius: f32, time: f32, energy: f32, analyzing: bool, opacity: f32) {
+    let alpha = |value: f32| (value * opacity) as u8;
+    use std::f32::consts::{PI, TAU};
+    let speed = if analyzing { 1.7 } else { 1.05 };
+    let t = time * speed;
+    let cx = center.0 + (time*0.63).sin()*3.;
+    let cy = center.1 + (time*0.81).sin()*4.;
+    let r = radius * (1. + 0.025*time.sin() + energy*0.09);
+    let blue = Color::rgb(0x299dff);
+    for i in (1..=14).rev() {
+        c.fill_circle(cx,cy,r*(1.+i as f32*0.037),blue.with_alpha(alpha(2.+energy*2.)));
+        let f=i as f32/14.;
+        let shadow: Vec<_>=(0..=48).map(|j| {
+            let a=j as f32*TAU/48.;
+            (cx+a.cos()*r*f,center.1+r+25.+a.sin()*5.*f)
+        }).collect();
+        c.fill_polygon(&shadow,blue.with_alpha(alpha(3.)));
+    }
+    let contour = |scale: f32, offset: (f32,f32)| -> Vec<(f32,f32)> {
+        (0..=96).map(|i| {
+            let a=i as f32*TAU/96.;
+            let wave=(a*3.+t).sin()*0.075+(a*5.-t*1.3).cos()*0.04
+                +energy*(a*4.-t*2.).sin()*0.065;
+            (cx+offset.0+a.cos()*r*scale*(1.+wave),cy+offset.1+a.sin()*r*scale*(1.+wave))
+        }).collect()
+    };
+    let edge=contour(1.,(0.,0.));
+    c.fill_polygon(&edge,Color::rgb(0x031c49).with_alpha(alpha(190.)));
+    // Offset translucent contours make a continuous highlight instead of a flat disc.
+    for i in (1..=26).rev() {
+        let f=i as f32/26.;
+        c.fill_polygon(&contour(f,(-r*(1.-f)*0.28,-r*(1.-f)*0.36)),Color::rgb(0x32aafa).with_alpha(alpha(10.)));
+    }
+    c.polyline(&edge,5.,blue.with_alpha(alpha(20.)));
+    c.polyline(&edge,1.,Color::rgb(0x77ddff).with_alpha(alpha(145.)));
+    // Latitude ribbons rotate in 3D. Depth determines brightness and thickness.
+    // Draw the far hemisphere first so the near filaments read as a curved volume.
+    for front in [false,true] {
+        for band in 0..19 {
+            let latitude=-PI*0.46+band as f32*PI*0.92/18.;
+            let mut previous: Option<(f32,f32,f32)>=None;
+            for step in 0..=96 {
+                let lon=step as f32*TAU/96.;
+                let lat=latitude+0.08*(lon*3.+t+band as f32*0.32).sin()*(1.+energy);
+                let ripple=1.+0.045*(lon*3.+t*1.2+lat*4.).sin()+energy*0.06*(lon*5.-t*2.).sin();
+                let x=lat.cos()*(lon+t*0.32).cos()*r*ripple;
+                let y=lat.sin()*r*ripple;
+                let z=lat.cos()*(lon+t*0.32).sin()*r*ripple;
+                let tilt=0.42+0.18*(t*0.3).sin();
+                let yy=y*tilt.cos()-z*tilt.sin();
+                let zz=y*tilt.sin()+z*tilt.cos();
+                let roll=0.28*(t*0.4).sin();
+                let p=(cx+x*roll.cos()-yy*roll.sin(),cy+x*roll.sin()+yy*roll.cos(),zz);
+                if let Some(old)=previous {
+                    if (zz>=0.)==front && (old.2>=0.)==front {
+                        let depth=(zz/r).clamp(0.,1.);
+                        let shimmer=(lon*2.-t*1.8+latitude*3.).sin()*0.5+0.5;
+                        let brightness=if front { 65.+depth*100.+shimmer*65. } else { 18. };
+                        let ink=if shimmer>0.8 {Color::rgb(0xb3f1ff)} else {Color::rgb(0x3ab9ff)};
+                        c.line(old.0,old.1,p.0,p.1,if front {0.8+depth*0.65} else {0.6},ink.with_alpha(alpha(brightness)));
+                    }
+                }
+                previous=Some(p);
+            }
+        }
+    }
+    // Small orbiting sparks add parallax without obscuring the listening label.
+    for i in 0..14 {
+        let a=i as f32*TAU/14.+t*0.6;
+        let z=a.sin();
+        let x=cx+a.cos()*r*1.22;
+        let y=cy+z*r*0.30+(a*2.+t).sin()*7.;
+        c.fill_circle(x,y,1.+(z+1.)*0.6,Color::rgb(0xa3eaff).with_alpha(alpha(55.+(z+1.)*75.)));
+    }
+}
+
+fn voice_box(ui: &mut Ui, s: &State, modal: &Modal) {
+    use crate::voice_assistant::{Button, Screen};
+    let area = place(s, modal, 480.0_f32.min(s.screen.0 - 12.0), 416.0_f32.min(s.screen.1 - 12.0));
+    let voice = &s.voice_ui;
+    let orb = matches!(voice.screen, Screen::Listening | Screen::Processing | Screen::Ready | Screen::Result);
+    if !orb { frame(ui, area, "AI assistant"); }
+    let button = |ui: &mut Ui, rect, action, label| {
+        let hot = hit(ui, rect, DHit::Voice(action), "");
+        ui.c.fill_rrect(rect, 7.0, if hot { ui.t.button_hi } else { ui.t.s(0x263e50) });
+        ui.c.text_center(Font::new(12).bold(), rect, ui.t.text, tr(label));
+    };
+    if voice.screen == Screen::Choose {
+        ui.c.text_center(Font::new(22).bold(), Rect::new(area.x, area.y+57., area.w, 32.), ui.t.text, "Choose your AI assistant");
+        let selected = crate::settings_file::read(|s| s.get("ai_assistant_mode").unwrap_or("").to_owned());
+        button(ui, Rect::new(area.x+28., area.y+113., area.w-56., 44.), Button::Local,
+            if selected == "local" { "Local AI assistant (selected)" } else { "Use local AI assistant" });
+        ui.c.text_center(Font::new(11), Rect::new(area.x, area.y+162., area.w, 20.), ui.t.text_dim, "One-time download. Speech stays on this computer.");
+        button(ui, Rect::new(area.x+28., area.y+201., area.w-56., 44.), Button::External,
+            if selected == "mcp" { "MCP / own assistant (selected)" } else { "Use MCP / your own assistant" });
+        ui.c.text_center(Font::new(11), Rect::new(area.x, area.y+250., area.w, 20.), ui.t.text_dim, "Change this anytime in Options > Settings > AI assistant settings.");
+        ui.c.text_center(Font::new(11), Rect::new(area.x, area.y+282., area.w, 20.), ui.t.text, &voice.status);
+        return;
+    }
+    let phase = voice.phase;
+    let energy = (voice.level * 16.0).clamp(0.0, 1.0).sqrt();
+    let center = (area.cx(), area.y + 136.0);
+    let radius = 77.0;
+    let blue = Color::rgb(0x38aaff);
+    paint_voice_orb(ui.c, center, radius, phase, energy, voice.screen == Screen::Processing, 1.);
+    if matches!(voice.screen, Screen::Listening | Screen::Ready | Screen::Result) {
+        // A stable target surrounds the moving surface, so it never slips away from a click.
+        hit(ui, Rect::new(center.0-105., center.1-105., 210., 210.),
+            DHit::Voice(if voice.screen == Screen::Listening { Button::Finish } else { Button::Listen }), "Click to finish or start listening");
+    }
+    let title = match voice.screen {
+        Screen::Choose => "Choose your assistant".into(),
+        Screen::Setup => "Download the offline assistant".into(),
+        Screen::Download => format!("Downloading... {}%", voice.progress),
+        Screen::Ready => "Ready to listen".into(),
+        Screen::Listening => "Listening".into(),
+        Screen::Processing => "Analyzing".into(),
+        Screen::Result => "Let's try again".into(),
+    };
+    ui.c.text_center(Font::new(25), Rect::new(area.x, area.y+253., area.w, 34.), Color::rgb(0xc9eaff), &title);
+    if matches!(voice.screen, Screen::Listening | Screen::Processing) {
+        for i in 0..27 {
+            let x = (i as f32 - 13.) / 13.;
+            let envelope = (1.-x*x).max(0.);
+            let movement = if voice.screen == Screen::Processing {
+                0.35 + 0.65*(phase*3.-x*5.).sin().powi(2)
+            } else { energy * (0.25 + 0.75*(phase*2.5+x*9.).sin().abs()) };
+            let height = 2. + envelope * (3.+movement*15.);
+            ui.c.fill_rrect(Rect::new(area.cx()+i as f32*5.-66.,area.y+302.-height*0.5,2.,height),1.,
+                Color::rgb(0x71ceff).with_alpha((95.+movement*140.) as u8));
+        }
+    }
+    let detail = if !voice.status.is_empty() { voice.status.as_str() } else { match voice.screen {
+        Screen::Setup => "One-time download, 745 MB. Then fully offline.",
+        Screen::Download => "Downloading and verifying your assistant",
+        Screen::Listening => "Say Set tempo to 128 BPM. Pause or click the orb to finish.",
+        Screen::Processing => "Turning your words into action",
+        _ => "Click the orb to speak again.",
+    }};
+    if !orb || !voice.status.is_empty() { ui.c.text_clip(Font::new(12), area.x+18., area.y+322., area.w-36., ui.t.text, detail); }
+    if matches!(voice.screen, Screen::Listening | Screen::Ready | Screen::Result) {
+        button(ui, Rect::new(area.cx()-66., area.y+352.,132.,28.), Button::KeepActive,
+            if voice.keep_active { "Minimize" } else { "Keep active" });
+    }
+    if voice.screen == Screen::Download {
+        let bar=Rect::new(area.x+26., area.y+349., area.w-52., 8.);
+        ui.c.fill_rrect(bar,4.,ui.t.sunken);
+        ui.c.fill_rrect(Rect::new(bar.x,bar.y,bar.w*voice.progress as f32/100.,bar.h),4.,blue);
+    }
+    if voice.screen == Screen::Setup {
+        button(ui, Rect::new(area.x+18., area.bottom()-44., 180., 28.), Button::Download, "Download and start");
+    }
+    if !orb && voice.screen != Screen::Download {
+        button(ui, Rect::new(area.right()-156., area.bottom()-44., 138., 28.), Button::Choose, "Assistant settings");
+    }
+}
+
+pub(crate) fn mcp_orb_bounds(s: &State) -> Rect {
+    let (width, height) = s.screen;
+    Rect::new((width - 132.).max(0.), (height - 140.).max(0.), 132., 140.)
+}
+
+pub(crate) fn paint_mcp_orb(ui: &mut Ui, s: &State) {
+    if s.native_view.is_some() || !s.ai.orb_active() {
+        return;
+    }
+    let Some((phase, opacity)) = s.ai.orb_frame(std::time::Instant::now()) else {
+        return;
+    };
+    let area = mcp_orb_bounds(s);
+    paint_voice_orb(ui.c, (area.cx(), area.y + 54.), 31., phase, 0., true, opacity);
+    let label = Rect::new(area.cx() - 37., area.y + 104., 74., 23.);
+    ui.c.fill_rrect(label, 9., Color::rgb(0x102437).with_alpha((220. * opacity) as u8));
+    ui.c.text_center(Font::new(12).bold(), label,
+        Color::rgb(0xc9eaff).with_alpha((255. * opacity) as u8), "Working");
+}
+
+/// Non-modal companion. Only its own controls capture clicks; the workspace stays editable.
+pub fn paint_voice_dock(ui: &mut Ui, s: &State) {
+    if !s.voice_ui.keep_active || !crate::voice_assistant::available() || !s.dialogs.is_empty() || s.native_view.is_some() {return;}
+    let r=Rect::new((s.screen.0-112.).max(0.),(s.screen.1-116.).max(0.),100.,100.);
+    let t=s.voice_ui.dock_progress.clamp(0.,1.);
+    let ease=1.-(1.-t).powi(3);
+    let origin=(s.screen.0*0.5,s.screen.1*0.5-72.);
+    let center=(origin.0+(r.cx()-origin.0)*ease,origin.1+(r.y+40.-origin.1)*ease);
+    let radius=77.+(27.-77.)*ease;
+    paint_voice_orb(ui.c,center,radius,s.voice_ui.phase,0.,false,1.);
+    if t<1. {return;}
+    ui.hit(Rect::new(r.x+12.,r.y+6.,76.,70.),Action::Ai,"AI assistant: click to speak. Microphone is off while idle.");
+    ui.c.text_center(Font::new(10),Rect::new(r.x,r.y+75.,r.w,16.),Color::rgb(0xaedbfa),"Click to speak");
+    let close=Rect::new(r.right()-18.,r.y-2.,18.,18.);
+    ui.hit(close,Action::Voice(crate::voice_assistant::Button::HideDock),"Dismiss the assistant orb");
+    ui.c.fill_rrect(close,9.,Color::rgb(0x153348).with_alpha(220));
+    ui.c.text_center(Font::new(12),close,Color::rgb(0xaedbfa),"×");
+}
+
+fn ai_box(ui:&mut Ui,s:&State,m:&Modal){
+ let r=place(s,m,600f32.min(s.screen.0-12.),410f32.min(s.screen.1-12.));frame(ui,r,"AI control");
+ let a=&s.ai;let ink=ui.t.text;let dim=ui.t.text_dim;
+ ui.c.text_clip(Font::new(19).bold(),r.x+22.,r.y+43.,r.w-44.,ink,"Your studio. Your assistant.");
+ ui.c.text_clip(Font::new(12),r.x+22.,r.y+74.,r.w-44.,dim,"Connect a compatible AI assistant to read and edit your project.");
+ ui.c.text_clip(Font::new(11),r.x+22.,r.y+94.,r.w-44.,dim,"Off by default. No model downloads or background AI processing.");
+ let button=|ui:&mut Ui,b:Rect,h:DHit,label:&str,lit:bool|{let hover=hit(ui,b,h,"");ui.c.fill_rrect(b,5.,if lit{ui.t.s(0x486c45)}else if hover{ui.t.button_hi}else{ui.t.s(0x303b40)});ui.c.text_center(Font::new(12).bold(),b,ui.t.text,label);};
+ button(ui,Rect::new(r.x+22.,r.y+126.,155.,32.),DHit::AiEnable,if a.enabled{"Turn AI control OFF"}else{"Enable AI control"},a.enabled);
+ ui.c.text_clip(Font::new(12),r.x+193.,r.y+135.,r.w-215.,if a.enabled{ui.t.accent}else{dim},if !a.enabled{"Disconnected"}else if a.client.is_empty(){"Waiting for assistant"}else{&a.client});
+ if !a.pending.is_empty(){
+  ui.c.fill_rrect(Rect::new(r.x+20.,r.y+174.,r.w-40.,121.),6.,ui.t.s(0x283c42));
+  ui.c.text_clip(Font::new(13).bold(),r.x+32.,r.y+186.,r.w-64.,ink,&format!("{} wants to connect",a.pending));
+  ui.c.text_clip(Font::new(11),r.x+32.,r.y+207.,r.w-64.,dim,"Allow this assistant to read and change the open project?");
+  let check=Rect::new(r.x+32.,r.y+229.,240.,20.);hit(ui,check,DHit::AiRemember,"Remember this assistant and its private local connection key");ui.c.text_clip(Font::new(11),check.x,check.y,check.w,ink,if a.remember{"[x] Remember this assistant"}else{"[ ] Remember this assistant"});
+  button(ui,Rect::new(r.right()-220.,r.y+251.,90.,29.),DHit::AiApprove(false),"Decline",false);
+  button(ui,Rect::new(r.right()-120.,r.y+251.,88.,29.),DHit::AiApprove(true),"Allow",true);
+ }else{
+  button(ui,Rect::new(r.x+22.,r.y+181.,210.,31.),DHit::AiSetup,"Save setup on Desktop",false);
+  button(ui,Rect::new(r.x+244.,r.y+181.,170.,31.),DHit::AiForget,"Forget assistant",false);
+  ui.c.text_clip(Font::new(11),r.x+22.,r.y+231.,r.w-44.,dim,"1. Enable AI.  2. Import the setup into your assistant.  3. Approve it here.");
+  ui.c.text_clip(Font::new(11),r.x+22.,r.y+252.,r.w-44.,dim,"Your chosen assistant may send project data to its AI provider.");
+  ui.c.text_clip(Font::new(11),r.x+22.,r.y+273.,r.w-44.,dim,"Turning this off immediately revokes access. Audio keeps running.");
+ }
+ let status=Rect::new(r.x+22.,r.y+313.,r.w-44.,45.);ui.hit(status,Action::Swallow,a.status.clone());
+ let mut y=status.y;let mut line=String::new();for word in a.status.split_whitespace(){let next=if line.is_empty(){word.into()}else{format!("{line} {word}")};if ui.c.text_width(Font::new(11),&next)>status.w&&!line.is_empty(){ui.c.text_clip(Font::new(11),status.x,y,status.w,ink,&line);y+=16.;line=word.into();if y>status.bottom(){break;}}else{line=next;}}if y<=status.bottom(){ui.c.text_clip(Font::new(11),status.x,y,status.w,ink,&line);}
+ ui.c.text_clip(Font::new(10),r.x+22.,r.bottom()-26.,r.w-44.,dim,&format!("Local connection only  |  {} commands this session  |  MCP compatible",a.calls));
+}
+
+#[cfg(test)]
+mod voice_orb_visual {
+    #[test]
+    #[ignore = "Local AI experiment is on hold"]
+    fn renders_living_orb_states_without_microphone() {
+        let mut app = crate::app::App::new(None);
+        app.show_form(crate::dialog::Body::VoiceAssistant);
+        let mut canvas = os_ui::Canvas::new(1280, 800, 1.).unwrap();
+        let mut previous = Vec::new();
+        for (name, phase, level, state) in [
+            ("listening-quiet", 0.2, 0.0, crate::voice_assistant::Screen::Listening),
+            ("listening-voice", 2.4, 0.055, crate::voice_assistant::Screen::Listening),
+            ("analyzing", 4.8, 0.0, crate::voice_assistant::Screen::Processing),
+        ] {
+            app.state.voice_ui.phase = phase;
+            app.state.voice_ui.level = level;
+            app.state.voice_ui.screen = state;
+            app.invalidate();
+            app.paint(&mut canvas, None);
+            assert!(app.voice_session.is_none());
+            assert_ne!(previous, canvas.pixmap.data());
+            previous = canvas.pixmap.data().to_vec();
+            if let Some(out) = std::env::var_os("OS_SHOT_DIR") {
+                let out = std::path::PathBuf::from(out);
+                std::fs::create_dir_all(&out).unwrap();
+                canvas.pixmap.save_png(out.join(format!("orb-{name}.png"))).unwrap();
+            }
+        }
     }
 }

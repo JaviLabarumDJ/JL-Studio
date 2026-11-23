@@ -8,11 +8,11 @@
 //!
 // spec: plugins/lemon-sampler.md (§Controls: ids, ranges, defaults, value texts)
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 
 use nih_plug::prelude::*;
-use os_dsp::articulator::Record;
+use os_engine::envelope;
 use os_model::SampleFx;
 
 pub type Fmt = Arc<dyn Fn(f32) -> String + Send + Sync>;
@@ -24,6 +24,8 @@ pub type Fmt = Arc<dyn Fn(f32) -> String + Send + Sync>;
 /// [`Live::live`]: the editor's newest value wins until the host's own value moves to it (confirmed) or away from the
 /// value it had at the edit (automation / undo in the host). Entries are keyed by the parameter's address, unique per
 /// plugin instance.
+// Updated under LIVE so the audio thread can bypass the lock when there are no pending edits.
+static HAS_LIVE_EDITS: AtomicBool = AtomicBool::new(false);
 static LIVE: std::sync::Mutex<Vec<LiveEdit>> = std::sync::Mutex::new(Vec::new());
 
 #[derive(Clone, Copy)]
@@ -42,6 +44,7 @@ pub fn live_set(addr: usize, norm: f32, host: f32) {
         if (norm - host).abs() > 1e-7 {
             l.push(LiveEdit { addr, norm, base: host });
         }
+        HAS_LIVE_EDITS.store(!l.is_empty(), Ordering::Release);
     }
 }
 
@@ -56,6 +59,7 @@ pub fn live_norm(addr: usize, host: f32) -> Option<f32> {
     } else {
         // Confirmed, or the host changed it since: the host's value from now on.
         l.swap_remove(i);
+        HAS_LIVE_EDITS.store(!l.is_empty(), Ordering::Release);
         None
     }
 }
@@ -64,6 +68,7 @@ pub fn live_norm(addr: usize, host: f32) -> Option<f32> {
 fn live_forget(from: usize, to: usize) {
     if let Ok(mut l) = LIVE.lock() {
         l.retain(|e| e.addr < from || e.addr >= to);
+        HAS_LIVE_EDITS.store(!l.is_empty(), Ordering::Release);
     }
 }
 
@@ -93,6 +98,7 @@ pub trait Live {
 impl Live for FloatParam {
     type Plain = f32;
     fn live(&self) -> f32 {
+        if !HAS_LIVE_EDITS.load(Ordering::Acquire) { return self.value(); }
         match live_norm(self as *const Self as usize, self.unmodulated_normalized_value()) {
             Some(n) => self.preview_plain(n),
             None => self.value(),
@@ -103,6 +109,7 @@ impl Live for FloatParam {
 impl Live for IntParam {
     type Plain = i32;
     fn live(&self) -> i32 {
+        if !HAS_LIVE_EDITS.load(Ordering::Acquire) { return self.value(); }
         match live_norm(self as *const Self as usize, self.unmodulated_normalized_value()) {
             Some(n) => self.preview_plain(n),
             None => self.value(),
@@ -113,6 +120,7 @@ impl Live for IntParam {
 impl Live for BoolParam {
     type Plain = bool;
     fn live(&self) -> bool {
+        if !HAS_LIVE_EDITS.load(Ordering::Acquire) { return self.value(); }
         match live_norm(self as *const Self as usize, self.unmodulated_normalized_value()) {
             Some(n) => self.preview_plain(n),
             None => self.value(),
@@ -148,9 +156,7 @@ pub const START_OFFSET_POLY: u32 = 0;
 /// audio/voice-levels.md "Final levels", audio/channel-filter.md "Knob positions").
 pub const MOD_X_POLY: u32 = 1;
 pub const MOD_Y_POLY: u32 = 2;
-/// Poly modulation id of the hidden "Clip end": a host ends one note's voice that far into the sample (a trimmed audio
-/// clip's end, spec §7).
-pub const CLIP_END_POLY: u32 = 3;
+pub const ECHO_PITCH_POLY: u32 = 8;
 
 /// A 0..1 knob shown in percent.
 pub fn knob(name: &str, default: f32) -> FloatParam {
@@ -186,12 +192,12 @@ pub fn note_name(key: i32) -> String {
 }
 
 pub const DECLICK: &[&str] = &[
-    "Fade out only",
-    "Transient",
-    "Transient (tail continues)",
-    "Standard (tail continues)",
-    "Smooth (tail continues)",
-    "Crossfade (tail continues)",
+    "Out only (no bleeding)",
+    "Transient (no bleeding)",
+    "Transient (bleeding)",
+    "Generic (bleeding)",
+    "Smooth (bleeding)",
+    "Crossfade (bleeding)",
 ];
 /// Stretch modes in the order of the mode menu (spec §Menus: two columns with headers).
 pub const STRETCH: &[&str] =
@@ -349,36 +355,24 @@ impl EnvParams {
         }
     }
 
-    /// The channel's record of this target (spec: audio/envelopes-and-lfos.md "Settings"), the knobs back in the record's
-    /// units: `which` is its place (pan, volume, mod X, mod Y, pitch; the pitch amounts in cents, 2400 at full scale).
-    /// The volume record's envelope is 1 while it is off (the flag of value 4, which FL sets on every volume record).
-    pub fn record(&self, which: usize) -> Record {
-        let unit = |v: f32| (v * 128.0).round() as i32;
-        let scale = if which == Record::PITCH { 2400.0 } else { 128.0 };
-        let amount = |v: f32| (v * scale).round() as i32;
-        let flag = |on: bool, bit: i32| if on { bit } else { 0 };
-        Record {
-            flags: flag(self.tempo.live(), Record::TIMES_FOLLOW_TEMPO)
-                | flag(self.lfo_tempo.live(), Record::LFO_FOLLOWS_TEMPO)
-                | flag(which == Record::VOLUME, Record::ONE_WHILE_OFF)
-                | flag(self.lfo_global.live(), Record::GLOBAL_LFO),
-            on: self.on.live(),
+    /// The record in channel-envelope units, `None` when off. `amount_scale` = units of the amount at full scale.
+    pub fn envelope(&self, amount_scale: f32) -> Option<envelope::Params> {
+        if !self.on.live() { return None; }
+        let rec = os_model::Envelope {
+            enabled: true,
             delay: time_field(self.delay.live()),
             attack: time_field(self.att.live()),
             hold: time_field(self.hold.live()),
             decay: time_field(self.dec.live()),
-            sustain: unit(self.sus.live()),
+            sustain: (self.sus.live() * 128.0).round() as i32,
             release: time_field(self.rel.live()),
-            amount: amount(self.amt.live()),
-            lfo_delay: time_field(self.lfo_delay.live()),
-            lfo_attack: time_field(self.lfo_att.live()),
-            lfo_amount: amount(self.lfo_amt.live()),
-            lfo_speed: time_field(self.lfo_speed.live()),
-            lfo_shape: self.lfo_shape.live().clamp(0, 2),
-            attack_tension: unit(self.att_t.live()),
-            decay_tension: unit(self.dec_t.live()),
-            release_tension: unit(self.rel_t.live()),
-        }
+            amount: (self.amt.live() * amount_scale).round() as i32,
+            attack_tension: (self.att_t.live() * 128.0).round() as i32,
+            decay_tension: (self.dec_t.live() * 128.0).round() as i32,
+            release_tension: (self.rel_t.live() * 128.0).round() as i32,
+            ..Default::default()
+        };
+        envelope::Params::new(&rec)
     }
 }
 
@@ -408,8 +402,6 @@ pub struct SamplerParams {
     pub declick: IntParam,
     #[id = "start_offset"]
     pub start_offset: FloatParam,
-    #[id = "clip_end"]
-    pub clip_end: FloatParam,
     #[id = "loop_start"]
     pub loop_start: FloatParam,
     #[id = "loop_end"]
@@ -482,12 +474,14 @@ pub struct SamplerParams {
     pub env_pan: EnvParams,
     #[nested(id_prefix = "envvol", group = "Volume")]
     pub env_vol: EnvParams,
-    #[nested(id_prefix = "envmodx", group = "Mod A")]
+    #[nested(id_prefix = "envmodx", group = "Mod X")]
     pub env_modx: EnvParams,
-    #[nested(id_prefix = "envmody", group = "Mod B")]
+    #[nested(id_prefix = "envmody", group = "Mod Y")]
     pub env_mody: EnvParams,
     #[nested(id_prefix = "envpitch", group = "Pitch")]
     pub env_pitch: EnvParams,
+    #[id = "note_drive"]
+    pub note_drive: FloatParam,
     #[id = "f_cut"]
     pub f_cut: FloatParam,
     #[id = "f_res"]
@@ -507,6 +501,8 @@ pub struct SamplerParams {
     pub zone_lo: IntParam,
     #[id = "zone_hi"]
     pub zone_hi: IntParam,
+    #[id = "echo-pitch"]
+    pub echo_pitch: FloatParam,
 }
 
 impl Drop for SamplerParams {
@@ -532,12 +528,9 @@ impl Default for SamplerParams {
             resample: BoolParam::new("Resample", true),
             load_regions: BoolParam::new("Load regions", true),
             load_slices: BoolParam::new("Load slice markers", false),
-            declick: choice("Click removal", 0, DECLICK),
+            declick: choice("Declicking mode", 0, DECLICK),
             // A host can start one note further into the sample (a trimmed audio clip, spec §7).
             start_offset: knob("Sample start offset", 0.0).with_poly_modulation_id(START_OFFSET_POLY),
-            // ... and end one note's voice further on (a trimmed audio clip's end): per note only, the value itself
-            // does nothing. Hidden: it is the host's link, not a setting.
-            clip_end: knob("Clip end", 0.0).with_poly_modulation_id(CLIP_END_POLY).hide(),
             loop_start: FloatParam::new("Loop start position", 0.0, FloatRange::Linear { min: 0.0, max: 1.0 })
                 .with_value_to_string(samples(frames.clone())),
             loop_end: FloatParam::new("Loop end position", 1.0, FloatRange::Linear { min: 0.0, max: 1.0 })
@@ -581,9 +574,11 @@ impl Default for SamplerParams {
             fx_loop_follows: BoolParam::new("Loop points follow a reversal", true).hide(),
             env_pan: EnvParams::new("Panning", 0),
             env_vol: EnvParams::new("Volume", -101),
-            env_modx: EnvParams::new("Mod A", 0),
-            env_mody: EnvParams::new("Mod B", 0),
+            env_modx: EnvParams::new("Mod X", 0),
+            env_mody: EnvParams::new("Mod Y", 0),
             env_pitch: EnvParams::new("Pitch", 0),
+            echo_pitch: knob("Sampler echo pitch", 0.5).with_poly_modulation_id(ECHO_PITCH_POLY).hide(),
+            note_drive: knob("Per-note drive",0.).with_poly_modulation_id(7).hide(),
             f_cut: knob("Filter frequency (modulation X)", 1.0).with_poly_modulation_id(MOD_X_POLY),
             f_res: knob("Filter bandwidth (modulation Y)", 0.0).with_poly_modulation_id(MOD_Y_POLY),
             f_type: choice("Filter type", 0, FILTERS),

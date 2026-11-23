@@ -1,13 +1,12 @@
 [package]
 name = "citrus"
-description = "Citrus: Lemon Studio's six-operator synthesizer as a VST3 / CLAP plugin"
+description = "Citrus: ML Studio's six-operator synthesizer as a VST3 / CLAP plugin"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [lib]
 crate-type = ["cdylib", "lib"]
-doctest = false
 
 [features]
 # Compiled into Lemon Studio: no exported plugin entry points (they would clash with the other built-in plugins).

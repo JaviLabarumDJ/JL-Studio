@@ -8,44 +8,72 @@
 // Plugin windows exist on Windows, Linux and macOS (`plugin_window`): elsewhere what only they reach (the Misc tab, the
 // window and preset menus, their requests) is built but unused. Those builds still report real dead code.
 #![cfg_attr(not(plugin_windows), allow(dead_code))]
-// Windows: a GUI program, so started from Explorer, the Start menu or a shortcut it opens no console window beside its
-// own. Started from a terminal it still writes there (`attach_console`).
 #![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
 
+#[cfg(feature = "rt-audit")]
+#[global_allocator]
+static AUDIO_AUDIT_ALLOCATOR: os_dsp::rt_audit::Allocator = os_dsp::rt_audit::Allocator;
 mod app;
-mod arrange;
-mod audio_clipboard;
-mod help_links;
-mod diagnostics;
+#[cfg(test)]
+mod audio_test_plugin;
+mod collaboration;
+mod marker_profiles;
+mod instrument_stack;
+mod clip_effects;
+mod ml_patch;
+mod ara;
+mod ai_control;
+mod voice_assistant;
+mod studio_helper;
+mod visualizer;
+mod visualizer_video;
+mod visual_scenes;
+mod notation;
+mod helper_install;
+mod voice_runtime;
+mod voice_plan;
+mod ai_commands;
+mod updates;
+mod donate;
 mod audio_cfg;
 mod auto_close;
 mod autoscroll;
 mod backup;
+mod safe_save;
+mod job_scratch;
+#[cfg(test)] mod audit_fixes;
 #[cfg(test)]
 mod audio_bench;
 #[cfg(test)]
-mod checks;
-#[cfg(test)]
 mod open_bench;
 mod browser;
-mod browser_index;
-mod burn_midi;
+#[cfg(any(windows, target_os = "macos"))]
+mod sample_drag;
+mod browser_files;
+mod browser_preview;
+mod plugin_downloads;
+#[cfg(all(windows, target_arch = "x86_64"))]
+mod legacy_vst;
+mod plugin_picker;
+mod plugin_artwork;
+mod plugin_previews;
+mod starter_pack;
+mod feedback;
+mod change_log;
+mod help;
 mod cable;
 mod capture;
-#[cfg(target_os = "linux")]
-mod rt;
+mod input_monitor;
+mod detached;
+mod edited_sample;
 mod one_click;
-mod track_rec;
-mod audio_log;
 mod score_log;
 mod clip_colors;
 mod clock;
-mod control;
 mod cpu;
 mod data_folder;
 mod device;
 mod dialog;
-mod floating;
 mod filedlg;
 mod enable_groups;
 mod export;
@@ -53,18 +81,21 @@ mod export_form;
 mod factory_folder;
 mod high_visibility;
 mod history;
+mod plugin_state_undo;
 mod hold;
 mod keep_on_disk;
 mod icons;
 mod init;
 mod knobs;
 mod layout;
-mod lemon_state;
+mod workspace_layout;
 mod loading;
 mod missing;
-mod mix_threads;
+mod import_report;
+mod drop_preview;
+mod playlist_motion;
+mod timeline_range;
 mod zipped;
-mod logo;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
@@ -72,44 +103,77 @@ mod menu_bar;
 mod messages;
 mod meters;
 mod metronome;
+mod controller;
 mod midi_cfg;
 mod midi_file;
 mod midi_in;
+mod mpe;
 mod midi_out;
-mod lemon_midi_out;
-mod track_links;
 mod midi_play;
-mod container;
 mod mixer;
-mod mixer_state;
+mod mix_assistant;
+mod attached_mixer;
+mod playlist_tracks;
+mod playlist_links;
+mod rack_mixer;
+mod strip_layout;
+#[cfg(any(windows,target_os="macos"))] mod strip_geometry;
+#[cfg(windows)] mod strip_editor;
+#[cfg(target_os="macos")] #[path="strip_editor_mac.rs"] mod strip_editor;
+mod mini_eq;
+mod mixer_recording;
+mod recording_pickup;
+mod smart_recording;
+mod automation_feedback;
+mod recording_merge;
+mod comping;
 mod osc3;
 mod citrus;
-mod chord_tool;
-mod slicer;
-mod drums;
 mod monitor;
 mod params;
 mod piano;
+mod piano_note_mode;
+mod piano_pitch;
+mod piano_note_properties;
 mod piano_snap;
 mod piano_split;
 mod piano_tools;
 mod rack;
+mod rack_controls;
+mod rack_drag;
 mod remote;
+mod peak_link;
 mod render;
 mod pattern_render;
+mod track_render;
+mod quick_sidechain;
+mod headphones;
+#[cfg(feature = "master-assistant")]
+mod master_assistant;
+#[cfg(not(feature = "master-assistant"))]
+#[path = "master_assistant_disabled.rs"]
+mod master_assistant;
+mod route_picker;
 mod patterns;
 mod perf;
-mod perform;
 mod playlist;
+mod scoring;
+mod loop_fit;
+mod stem_separation;
+mod playlist_controls;
+mod playlist_grid;
+mod playlist_tools;
+mod clip_picker;
 mod plugin_db;
 mod plugin_manager;
 mod plugin_menu;
-mod plugin_palette;
 mod plugin_popup;
 mod plugin_rebuild;
 mod plugin_scan;
 #[cfg(plugin_windows)]
 mod plugin_window;
+mod stock_editor_bridge;
+mod synthwave;
 mod plugins;
 mod ppi;
 mod prefs;
@@ -122,25 +186,43 @@ mod project_plugins;
 mod presets;
 mod misc;
 mod misc_page;
+mod typing_layout;
+mod sample_route;
+mod clip_normalize;
+mod clip_cleanup;
+mod strip_silence;
 mod note_names;
 mod save_form;
 mod scroll_speed;
 mod search_folders;
 mod settings_file;
+mod workspace_visibility;
+mod vintage;
+mod vintage_cursors;
+mod vintage_rack_art;
+mod vintage_skin;
+mod menu_layout;
+mod input_bindings;
 mod shortcuts;
+mod warp;
+mod vocal_align;
+mod vocal;
+mod audio_edits;
 mod smooth;
+mod elastic_scroll;
 mod snap;
 mod song_pos;
 mod toolbar;
 mod splash;
+mod startup_sound;
 mod stall;
 mod step_edit;
 mod strum;
 mod flam;
 mod flip;
 mod levels;
-mod channel_states;
-mod chords;
+use os_model::chords;
+mod harmony;
 mod claw;
 mod limit;
 mod lfo;
@@ -151,22 +233,27 @@ mod piano_dlg;
 mod arpeggiate;
 mod tapper;
 mod touch;
-mod events;
 mod record;
+mod record_light;
+mod record_lead;
 mod recent;
 mod theme_adjust;
+mod advanced_theme;
+mod mixer_skin;
+mod theme_identity;
 mod theme_library;
 mod templates;
 mod timesig;
 mod transport;
 mod typein;
 mod views;
-mod detached_win;
 mod wallpaper;
 mod waves;
 mod win_clamp;
 #[cfg(windows)]
 mod file_assoc;
+#[cfg(target_os = "linux")]
+mod linux_launcher;
 
 use std::num::NonZeroU32;
 use std::rc::Rc;
@@ -184,6 +271,9 @@ use os_ui::Canvas;
 
 struct Shell {
     app: App,
+    detached: detached::Windows,
+    main_mouse: (f32,f32),
+    display_layout: Vec<[i32;4]>,
     window: Option<Rc<Window>>,
     surface: Option<softbuffer::Surface<Rc<Window>, Rc<Window>>>,
     canvas: Option<Canvas>,
@@ -195,15 +285,16 @@ struct Shell {
     /// The held cursor is locked by the window system (Wayland's pointer lock): it stays put by itself and cannot be
     /// warped. Otherwise (Windows, X11) it is warped back to the anchor after each move.
     pointer_locked: bool,
-    /// The held cursor's window: a detached window's (`detached_win`), or the main window's (`None`).
-    lock_on: Option<app::Win>,
-    cursor: app::Cursor,
+    cursor: Option<CursorStyle>,
+    tool_cursors: CursorCache,
     /// Main-window border in device pixels (left, top, right, bottom); zero when maximized.
     inset: (u32, u32, u32, u32),
     /// The border edge under the mouse (drags resize the OS window).
     edge: Option<ResizeDirection>,
     /// A title-bar move or edge resize done by hand: cursor and window rect (screen px) at the press, and the edge
     /// (None = move). The system's own move / size loops block the event loop, which froze all drawing.
+    dropped_files: Vec<std::path::PathBuf>,
+    stem_anchor:Option<(u16,u32)>,
     grab: Option<Grab>,
     /// A press on the maximized window's title bar: the cursor (screen px) and its height in the window (physical px).
     /// The window is restored under the cursor and moved once the cursor travels past the drag distance; a click
@@ -230,10 +321,6 @@ struct Shell {
     /// The main window's restored frame and whether it is maximized, kept for the next start as the app closes
     /// (`layout`): the last run's at first, then followed as the window moves and resizes (`follow_frame`).
     main_win: Option<layout::MainWin>,
-    /// The detached windows' native windows (Options ▸ Detached, `detached_win`).
-    detached: Vec<detached_win::DetWin>,
-    /// The key event being handled came to this detached window: it goes to the app on that window's surface.
-    key_on: Option<app::Win>,
 }
 
 /// Frame timing for tuning (`OS_FRAMES=<file>`): per frame the time, what was repainted (`full` or the number of
@@ -297,6 +384,119 @@ fn ctrl(m: ModifiersState) -> bool {
     m.control_key() || (cfg!(target_os = "macos") && m.super_key())
 }
 
+/// Keep supported letter shortcuts available when the current layout produces another alphabet.
+fn shortcut_letter(key: &winit::keyboard::Key, physical: winit::keyboard::PhysicalKey, command: bool, alt: bool) -> Option<winit::keyboard::Key> {
+    use winit::keyboard::{Key, KeyCode::*, PhysicalKey};
+    if !command || alt {
+        return None;
+    }
+    match key {
+        Key::Character(text) if !text.is_ascii() || text.chars().any(char::is_control) => {}
+        Key::Unidentified(_) => {}
+        _ => return None,
+    }
+    let PhysicalKey::Code(code) = physical else { return None };
+    let letter = match code {
+        KeyA => "a",
+        KeyB => "b",
+        KeyC => "c",
+        KeyD => "d",
+        KeyE => "e",
+        KeyF => "f",
+        KeyG => "g",
+        KeyH => "h",
+        KeyI => "i",
+        KeyJ => "j",
+        KeyK => "k",
+        KeyL => "l",
+        KeyM => "m",
+        KeyN => "n",
+        KeyO => "o",
+        KeyP => "p",
+        KeyQ => "q",
+        KeyR => "r",
+        KeyS => "s",
+        KeyT => "t",
+        KeyU => "u",
+        KeyV => "v",
+        KeyW => "w",
+        KeyX => "x",
+        KeyY => "y",
+        KeyZ => "z",
+        _ => return None,
+    };
+    Some(Key::Character(letter.into()))
+}
+
+fn normalize_shortcut_key(app: &app::App, key: winit::keyboard::Key, physical: winit::keyboard::PhysicalKey, mods: ModifiersState) -> winit::keyboard::Key {
+    let (command, alt) = (ctrl(mods), mods.alt_key());
+    match shortcut_letter(&key, physical, command, alt) {
+        Some(letter) if !crate::input_bindings::has_keyboard_binding(app, &key, command, alt, mods.shift_key()) => letter,
+        _ => key,
+    }
+}
+
+fn native_keyboard_key(app: &app::App, event: &winit::event::KeyEvent, mods: ModifiersState) -> winit::keyboard::Key {
+    #[cfg(any(windows, target_os = "macos"))]
+    use winit::keyboard::Key;
+    #[cfg(any(windows, target_os = "macos"))]
+    let (command, alt) = (ctrl(mods), mods.alt_key());
+    #[cfg(any(windows, target_os = "macos"))]
+    let key = {
+        use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
+        let printable = event.text.as_ref().filter(|s| !s.is_empty() && !s.chars().any(char::is_control));
+        let unmodified = || match event.key_without_modifiers() {
+            Key::Character(c) if mods.shift_key() => Key::Character(c.to_uppercase().into()),
+            k => k,
+        };
+        if cfg!(target_os = "macos") && (mods.super_key() || (alt && !app.text_input_focused())) {
+            unmodified()
+        } else if matches!(event.logical_key, Key::Unidentified(_)) {
+            match printable {
+                Some(text) if !command || alt => Key::Character(text.clone()),
+                _ => unmodified(),
+            }
+        } else {
+            event.logical_key.clone()
+        }
+    };
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let key = event.logical_key.clone();
+    normalize_shortcut_key(app, key, event.physical_key, mods)
+}
+
+#[cfg(test)]
+#[test]
+fn layout_shortcuts_preserve_latin_layouts_and_text() {
+    use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
+    let key = PhysicalKey::Code(KeyCode::KeyZ);
+    let z = Key::Character("я".into());
+    assert_eq!(shortcut_letter(&z, key, true, false), Some(Key::Character("z".into())));
+    // QWERTZ already produces a Latin shortcut key. AltGr and ordinary typing keep the text.
+    assert_eq!(shortcut_letter(&Key::Character("y".into()), key, true, false), None);
+    assert_eq!(shortcut_letter(&z, key, false, false), None);
+    assert_eq!(shortcut_letter(&z, key, true, true), None);
+    assert_eq!(shortcut_letter(&Key::Character("لا".into()), PhysicalKey::Code(KeyCode::KeyB), true, false), Some(Key::Character("b".into())));
+    assert_eq!(shortcut_letter(&Key::Named(NamedKey::ArrowUp), key, true, false), None);
+}
+
+/// Route native keystrokes the same way in the main window and detached workspaces.
+fn keyboard_input(app: &mut app::App, event: winit::event::KeyEvent, mods: ModifiersState) {
+    use winit::keyboard::{KeyCode, PhysicalKey};
+    let pressed = event.state == ElementState::Pressed;
+    let (command, alt) = (ctrl(mods), mods.alt_key());
+    app.shift = mods.shift_key();
+    if let PhysicalKey::Code(code) = event.physical_key {
+        if code == KeyCode::ShiftRight { app.rshift = pressed; }
+        if app.typing_key(code, pressed, command, alt) { return; }
+    }
+    if !pressed { return; }
+    let key = native_keyboard_key(app, &event, mods);
+    app.repeat = event.repeat;
+    app.key(&key, command, alt);
+    app.repeat = false;
+}
+
 #[derive(Clone, Copy)]
 struct Grab {
     cursor: (i32, i32),
@@ -352,6 +552,36 @@ fn screen_state(_: &Window) -> Option<((i32, i32), (i32, i32, i32, i32))> {
     None
 }
 
+fn client_point(window: &Window) -> Option<(f64, f64)> {
+    let at = screen_state(window).map(|(at, _)| at);
+    #[cfg(target_os = "linux")]
+    let at = at.or_else(crate::plugin_window::pointer);
+    let (x, y) = at?;
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::POINT;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{GA_ROOT, GetAncestor, WindowFromPoint};
+        use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let RawWindowHandle::Win32(main) = window.window_handle().ok()?.as_raw() else { return None };
+        let under_cursor = unsafe { GetAncestor(WindowFromPoint(POINT { x, y }), GA_ROOT) };
+        if under_cursor != main.hwnd.get() as _ {
+            return None;
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let RawWindowHandle::AppKit(view) = window.window_handle().ok()?.as_raw() else { return None };
+        // The detached Browser can overlap the main window on the same monitor.
+        if !sample_drag::over(view.ns_view.as_ptr()) { return None; }
+    }
+    let origin = window.inner_position().ok()?;
+    let size = window.inner_size();
+    let (x, y) = (i64::from(x) - i64::from(origin.x), i64::from(y) - i64::from(origin.y));
+    (x >= 0 && y >= 0 && x < i64::from(size.width) && y < i64::from(size.height))
+        .then_some((x as f64, y as f64))
+}
+
 /// Move / resize the window to `rect` (left, top, right, bottom) in one call.
 #[cfg(windows)]
 fn set_rect(window: &Window, r: (i32, i32, i32, i32)) {
@@ -402,6 +632,17 @@ impl Grab {
         }
         (l, t, r, b)
     }
+}
+
+/// A minimized Win32 window can still report a small, nonzero client rectangle.
+fn main_surface_size(
+    size: winit::dpi::PhysicalSize<u32>,
+    minimized: Option<bool>,
+) -> Option<(NonZeroU32, NonZeroU32)> {
+    if minimized == Some(true) {
+        return None;
+    }
+    Some((NonZeroU32::new(size.width)?, NonZeroU32::new(size.height)?))
 }
 
 /// Border of the restored main window (spec ui/main-window.md §12), logical px: left, top, right, bottom.
@@ -492,36 +733,24 @@ impl Shell {
     /// with raw motion driving the virtual position `virt` (`device_event`).
     fn lock_cursor(&mut self, window: &Window, anchor: (f64, f64), virt: (f32, f32)) {
         self.lock = Some((anchor, virt));
-        self.lock_on = None;
         self.pointer_locked = window.set_cursor_grab(CursorGrabMode::Locked).is_ok();
         window.set_cursor_visible(false);
     }
 
-    /// The window holding the cursor (`lock_on`).
-    fn lock_window(&self) -> Option<Rc<Window>> {
-        match self.lock_on {
-            Some(w) => self.detached.iter().find(|d| d.win == w).map(|d| d.window.clone()),
-            None => self.window.clone(),
-        }
-    }
-
     /// Ends a held drag: the cursor shows again where the drag started, as if it never moved.
-    fn unlock_cursor(&mut self) {
-        let Some(window) = self.lock_window() else {
-            self.lock = None;
-            return;
-        };
-        let Some((anchor, _)) = self.lock.take() else { return };
+    fn unlock_cursor(&mut self, window: &Window) -> Option<(f32, f32)> {
+        let (anchor, _) = self.lock.take()?;
         // Under a pointer lock this is where the cursor reappears once unlocked.
         let _ = window.set_cursor_position(winit::dpi::PhysicalPosition::new(anchor.0, anchor.1));
         if std::mem::take(&mut self.pointer_locked) {
             let _ = window.set_cursor_grab(CursorGrabMode::None);
         }
         window.set_cursor_visible(true);
+        Some(self.to_app(window, anchor.0, anchor.1))
     }
 
     /// Show the cursor the app wants (resize arrows over edges and note ends).
-    fn sync_cursor(&mut self, window: &Window) {
+    fn sync_cursor(&mut self, window: &Window, el: &ActiveEventLoop) {
         let c = match self.edge {
             Some(ResizeDirection::East | ResizeDirection::West) => app::Cursor::EwResize,
             Some(ResizeDirection::North | ResizeDirection::South) => app::Cursor::NsResize,
@@ -529,15 +758,10 @@ impl Shell {
             Some(_) => app::Cursor::NeswResize,
             None => self.app.cursor(),
         };
-        if c != self.cursor {
-            self.cursor = c;
-            window.set_cursor(match c {
-                app::Cursor::Default => CursorIcon::Default,
-                app::Cursor::EwResize => CursorIcon::EwResize,
-                app::Cursor::NsResize => CursorIcon::NsResize,
-                app::Cursor::NwseResize => CursorIcon::NwseResize,
-                app::Cursor::NeswResize => CursorIcon::NeswResize,
-            });
+        let style = cursor_style(&self.app, window, c);
+        if self.cursor != Some(style) {
+            apply_window_cursor(window, el, style, &mut self.tool_cursors);
+            self.cursor = Some(style);
         }
     }
 
@@ -609,18 +833,53 @@ impl Shell {
 
     /// Ticks the app, asks for a frame when one is due and sets the next wake-up: from `about_to_wait`, or from a
     /// watchdog wake while a modal loop holds up winit's (`held`, see `stall`).
+    fn prepare_main(&mut self) {
+        if self.detached.restore_main(&mut self.app) {
+            self.app.mouse=self.main_mouse;
+        }
+    }
+
     fn step(&mut self, el: &ActiveEventLoop, held: bool) {
+        #[cfg(target_os = "macos")]
+        sample_drag::finish(&mut self.app);
+        if self.app.state.native_view.is_none() {self.main_mouse=self.app.mouse;}
+        self.detached.sync(&mut self.app,el,&mut self.tool_cursors);
+        let current=screens(el);
+        if current!=self.display_layout {
+            self.display_layout=current.clone();
+            if let (Some(w),Some(m))=(&self.window,self.main_win) {
+                let next=layout::on_screens(m,&current);
+                if next!=m {set_maximized(w,false);w.set_outer_position(winit::dpi::PhysicalPosition::new(next.pos.0,next.pos.1));let _=w.request_inner_size(winit::dpi::PhysicalSize::new(next.size.0,next.size.1));self.main_win=Some(next);}
+            }
+        }
+        self.prepare_main();
+        if let Some(main) = &self.window {
+            studio_helper::heartbeat(&mut self.app,main);
+            let state = &self.app.state;
+            let target = if !state.show_browser { None }
+            else if state.native_detached.contains(&app::Win::Browser) {
+                self.detached.browser_window().map(|window| (window, 0.0, 0.0, f64::from(window.inner_size().width)))
+            } else if !state.browser_auto_hidden {
+                let k = ui_scale(main);
+                let r = views::browser_content(state);
+                Some((main.as_ref(), f64::from(r.x)*k, f64::from(r.y)*k, f64::from(r.w)*k))
+            } else { None };
+            edited_sample::update_target(&self.app,target);
+            edited_sample::finish(&mut self.app);
+        }
         // Animate while playing; otherwise repaint a few times a second (peaks, clock).
-        let ms = if self.app.animating() { 16 } else { 100 };
+        let animating = self.app.animating();
+        let interval = if animating || self.app.state.sample_drop.active() {
+            paced(self.frame, animating)
+        } else if self.app.vintage_title_scrolling() {
+            Duration::from_millis(50)
+        } else {
+            Duration::from_millis(100)
+        };
         let now = Instant::now();
-        let mut wake = now + Duration::from_millis(ms);
+        let mut wake = now + interval;
         // Unsaved changes were answered (or there were none): the window closes.
         if self.app.want_exit {
-            el.exit();
-        }
-        // Ctrl+C in the terminal, or a kill: closes without asking (`exiting` keeps unsaved changes as a backup).
-        #[cfg(unix)]
-        if stop_signal::asked() {
             el.exit();
         }
         // macOS: Quit from the menu bar or the Dock asks about unsaved changes as closing the window does; AppKit waits
@@ -652,8 +911,18 @@ impl Shell {
             }
             menu_bar::update(views::menus::bar_model(&self.app.state));
         }
+        if self.app.state.sample_drop.external && self.app.state.sample_drop.surface.is_none() {
+            if let Some(window)=self.window.clone() {
+                if let (Some((at,_)),Ok(pos))=(screen_state(&window),window.inner_position()) {
+                    let (x,y)=self.to_app(&window,f64::from(at.0-pos.x),f64::from(at.1-pos.y));
+                    self.app.mouse_move(x,y);
+                }
+            }
+        }
+        self.detached.prepare_drag(&mut self.app);
         self.pending |= self.app.tick();
-        self.sync_detached(el);
+        self.prepare_main();
+        if let Some(window)=self.window.clone() { self.sync_cursor(&window,el); }
         // The startup splash: the opened project's loading moves its gauge on; once the main window has shown and
         // nothing is loading, it finishes. It is dropped when it has faded away.
         if let Some(s) = &self.splash {
@@ -686,7 +955,16 @@ impl Shell {
             let next = (self.frame_start + paced(self.frame, self.app.animating())).max(self.painted + IDLE);
             if now >= next {
                 self.pending = false;
-                if let Some(w) = &self.window {
+                if let Some(w) = self.window.clone() {
+                    // Hidden Win32 windows are not guaranteed WM_PAINT delivery. Prepare their
+                    // first frames directly through the normal rendering path before showing them.
+                    #[cfg(windows)]
+                    if !self.shown || (held&&self.app.state.sample_drop.external) {
+                        self.window_event(el, w.id(), WindowEvent::RedrawRequested);
+                    } else {
+                        w.request_redraw();
+                    }
+                    #[cfg(not(windows))]
                     w.request_redraw();
                 }
             } else {
@@ -705,7 +983,7 @@ impl ApplicationHandler for Shell {
         }
         splash::step(&self.splash, splash::WINDOW, "Opening the main window");
         let attrs = Window::default_attributes()
-            .with_title("Lemon Studio")
+            .with_title("ML Studio")
             .with_decorations(false)
             .with_inner_size(LogicalSize::new(1920.0, 1080.0))
             // Layouts are measured at 1920x1080 and are not responsive yet; below this they break.
@@ -757,6 +1035,9 @@ impl ApplicationHandler for Shell {
             let attrs = WindowAttributesExtX11::with_name(attrs, APP_ID, APP_ID);
             attrs.with_window_icon(linux_icon())
         };
+        // Windows must not expose an unpainted client area during startup.
+        #[cfg(windows)]
+        let attrs = attrs.with_visible(false);
         let window = Rc::new(el.create_window(attrs).expect("create window"));
         #[cfg(target_os = "macos")]
         if frame.is_some_and(|m| m.max) {
@@ -804,6 +1085,8 @@ impl ApplicationHandler for Shell {
         splash::step(&self.splash, splash::PLUGINS, "Loading plugins");
         self.app.start_plugins();
         splash::step(&self.splash, splash::LOADING, "Loading project");
+        window.request_redraw();
+        self.pending = true;
         self.window = Some(window);
         el.set_control_flow(ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(16)));
     }
@@ -818,6 +1101,16 @@ impl ApplicationHandler for Shell {
     }
 
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+        self.detached.flush_stems(&mut self.app);
+        let files=std::mem::take(&mut self.dropped_files);
+        let anchor=self.stem_anchor.take();
+        if !self.app.modal_open() && files.len()>1 && files.iter().all(|p|crate::views::browser::file_icon(&p.to_string_lossy())==crate::icons::Icon::FileAudio)
+            && let Some(row)=crate::playlist_tracks::drops::header_at(&self.app){
+            crate::playlist_tracks::drops::samples(&mut self.app,files.into_iter().map(|p|p.to_string_lossy().into_owned()).collect(),row);
+        }else if let Some((track,tick))=anchor.filter(|_|files.len()>1 &&
+            files.iter().all(|p|crate::views::browser::file_icon(&p.to_string_lossy())==crate::icons::Icon::FileAudio)) {
+            self.app.import_stems(files,track,tick);
+        } else { for file in files {self.app.drop_file(file);} }
         self.step(el, false);
     }
 
@@ -825,6 +1118,9 @@ impl ApplicationHandler for Shell {
     /// (`macos::answer_quit`) ends the process from AppKit, after this: the plugin windows close and the instances go as
     /// they do when `run_app` returns.
     fn exiting(&mut self, _el: &ActiveEventLoop) {
+        studio_helper::shutdown();
+        if !os_host::guard::tripped() { self.app.transport.shutdown(); }
+        self.detached.save();
         if let Some(window) = self.window.clone() {
             self.follow_frame(&window);
         }
@@ -832,11 +1128,7 @@ impl ApplicationHandler for Shell {
             layout::save_main(m);
         }
         layout::save(&self.app.state);
-        // Stopped by a signal with changes unsaved: nobody was asked, so they go to a backup.
-        #[cfg(unix)]
-        if stop_signal::asked() && self.app.unsaved() {
-            let _ = self.app.write_backup(chrono::Local::now().naive_local());
-        }
+        workspace_layout::save_session(&self.app);
         #[cfg(target_os = "macos")]
         {
             if os_host::guard::tripped() {
@@ -847,31 +1139,47 @@ impl ApplicationHandler for Shell {
         }
     }
 
-    /// Raw mouse motion drives a locked scroll-bar drag; the hidden cursor is held at the anchor. Held in a detached
-    /// window, the motion goes to that window's surface.
+    /// Raw mouse motion drives a locked scroll-bar drag; the hidden cursor is held at the anchor.
     fn device_event(&mut self, _el: &ActiveEventLoop, _id: DeviceId, event: DeviceEvent) {
-        let (DeviceEvent::MouseMotion { delta }, Some((anchor, virt)), Some(window)) = (event, self.lock, self.lock_window()) else { return };
+        let (DeviceEvent::MouseMotion { delta }, Some((anchor, virt)), Some(window)) = (event, self.lock, self.window.clone()) else { return };
         let scale = ui_scale(&window);
         let v = (virt.0 + (delta.0 / scale) as f32, virt.1 + (delta.1 / scale) as f32);
         self.lock = Some((anchor, v));
-        self.app.on(self.lock_on, |a| a.mouse_move(v.0, v.1));
+        self.app.mouse_move(v.0, v.1);
         if !self.pointer_locked {
             let _ = window.set_cursor_position(winit::dpi::PhysicalPosition::new(anchor.0, anchor.1));
-        }
-        if self.lock_on.is_some_and(|w| self.app.detached_dirty(w)) {
-            window.request_redraw();
         }
         self.pending = true;
     }
 
-    fn window_event(&mut self, el: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
-        // A detached window's native window: its own handling, but for its keys, which go where the main window's do.
-        let det = self.detached_of(id);
-        self.key_on = det.map(|i| self.detached[i].win);
-        if let Some(i) = det {
-            if !matches!(event, WindowEvent::KeyboardInput { .. } | WindowEvent::ModifiersChanged(_)) {
-                return self.detached_event(i, event);
+    fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        #[cfg(any(windows, target_os = "macos"))]
+        if matches!(event, WindowEvent::CursorMoved { .. }) && self.app.dragging_browser_samples() {
+            let source = if self.app.state.native_input == Some(app::Win::Browser) {
+                self.detached.browser_window()
+            } else { self.window.as_deref() };
+            if source.is_some_and(|window| sample_drag::handoff(&mut self.app, window)) {
+                self.pending = true;
+                return;
             }
+        }
+        if matches!(event, WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Left, .. })
+            && self.app.state.native_input == Some(app::Win::Browser)
+            && self.app.dragging_browser_samples()
+            && let Some(window) = self.window.clone()
+            && let Some((x, y)) = client_point(&window)
+        {
+            self.prepare_main();
+            let at = self.to_app(&window, x, y);
+            self.app.drop_browser_samples_on_main(at);
+            self.main_mouse = at;
+            self.pending = true;
+            return;
+        }
+        if self.detached.owns(_id) {if self.app.state.native_view.is_none(){self.main_mouse=self.app.mouse;}self.detached.event(&mut self.app,el,_id,event,&mut self.tool_cursors);self.prepare_main();self.pending|=self.app.has_damage();return;}
+        self.prepare_main();
+        if matches!(event,WindowEvent::MouseInput{state:ElementState::Pressed,..}|WindowEvent::KeyboardInput{..}|WindowEvent::Focused(true)) {
+            if self.app.state.native_input.take().is_some() {let popup=self.app.state.playlist.popup.is_some()||self.app.state.menu_open.is_some();self.app.state.playlist.popup=None;self.app.state.menu_open=None;if popup {self.app.invalidate();}}
         }
         let Some(window) = self.window.clone() else { return };
         let scale = ui_scale(&window) as f32;
@@ -886,6 +1194,22 @@ impl ApplicationHandler for Shell {
             _ => false,
         };
         if press && self.app.loading() {
+            use winit::keyboard::{Key, NamedKey};
+            if self.app.mix_assistant.busy() && crate::mix_assistant::is_open(&self.app) {
+                match &event {
+                    WindowEvent::KeyboardInput { event, .. } if event.logical_key == Key::Named(NamedKey::Escape) => {
+                        crate::mix_assistant::command(&mut self.app, crate::mix_assistant::Hit::Close);
+                    }
+                    WindowEvent::MouseInput { button: MouseButton::Left, .. } => {
+                        self.app.mouse_down();
+                    }
+                    _ => {}
+                }
+            } else if crate::visualizer_video::owns_audio(&self.app)
+                && matches!(&event, WindowEvent::KeyboardInput { event, .. } if event.logical_key == Key::Named(NamedKey::Escape))
+            {
+                crate::visualizer_video::cancel(&mut self.app);
+            }
             return;
         }
         // Linux: a wheel turn over a docked plugin window is the plugin window's alone; nothing behind it scrolls
@@ -933,17 +1257,19 @@ impl ApplicationHandler for Shell {
             WindowEvent::ModifiersChanged(m) => {
                 self.mods = m.state();
                 self.sync_mods();
+                self.sync_cursor(&window,el);
+            }
+            WindowEvent::CursorLeft { .. } if !self.app.state.native_detached.contains(&app::Win::Browser) => {
+                if self.app.state.browser_library.open {
+                    views::browser::library::leave(&mut self.app);
+                    window.request_redraw();
+                }
             }
             WindowEvent::CursorMoved { position, .. } => {
                 // Locked: turn the offset from the anchor into virtual movement, then warp back.
                 // Locked: movement comes from raw motion (`device_event`); positions are ignored,
                 // since hiding the cursor makes Windows report a jump to the window centre.
                 if self.lock.is_some() {
-                    return;
-                }
-                // A browser item dragged over a detached window goes to that window (`cross_move`).
-                if self.app.cross_drag() && self.cross_move(None, (position.x, position.y)) {
-                    self.sync_cursor(&window);
                     return;
                 }
                 if let (Some((at, grab_y)), Some((cursor, (l, _, r, _)))) = (self.unmax, screen_state(&window)) {
@@ -971,7 +1297,7 @@ impl ApplicationHandler for Shell {
                 self.edge = if self.app.drag.is_none() { self.edge_at(&window, position.x, position.y) } else { None };
                 let (mx, my) = self.to_app(&window, position.x, position.y);
                 self.app.mouse_move(mx, my);
-                self.sync_cursor(&window);
+                self.sync_cursor(&window,el);
                 self.pending |= self.app.has_damage();
             }
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
@@ -1022,12 +1348,14 @@ impl ApplicationHandler for Shell {
                 } else {
                     self.grab = None;
                     self.unmax = None;
-                    self.unlock_cursor();
-                    self.app.mouse_up_from(None);
+                    if crate::input_bindings::accepts_release(&self.app,0) {
+                        let anchor = self.unlock_cursor(&window);
+                        self.app.mouse_up_at(anchor);
+                    }
                     if self.app.resize_cursor && self.app.drag.is_none() {
                         self.app.resize_cursor = false;
                     }
-                    self.sync_cursor(&window);
+                    self.sync_cursor(&window,el);
                 }
                 self.pending = true;
             }
@@ -1044,9 +1372,11 @@ impl ApplicationHandler for Shell {
                 self.app.mouse_down_middle();
                 self.pending = true;
             }
-            WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Right | MouseButton::Middle, .. } => {
-                self.unlock_cursor();
-                self.app.mouse_up_from(None);
+            WindowEvent::MouseInput { state: ElementState::Released, button: button @ (MouseButton::Right | MouseButton::Middle), .. } => {
+                if crate::input_bindings::accepts_release(&self.app,if button==MouseButton::Right {1}else{2}) {
+                    let anchor = self.unlock_cursor(&window);
+                    self.app.mouse_up_at(anchor);
+                }
                 self.pending = true;
             }
             WindowEvent::MouseWheel { delta, .. } => {
@@ -1061,77 +1391,19 @@ impl ApplicationHandler for Shell {
                     let at = (f64::from(x) * k + f64::from(self.inset.0), f64::from(y) * k + f64::from(self.inset.1));
                     let _ = window.set_cursor_position(winit::dpi::PhysicalPosition::new(at.0, at.1));
                 }
-                self.pending = true;
+                self.pending |= self.app.has_damage();
             }
             WindowEvent::KeyboardInput { event, .. } => {
-                let pressed = event.state == ElementState::Pressed;
-                // Right Shift on its own: the playlist's quick slice (spec: ui/playlist.md §3).
-                if event.physical_key == winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::ShiftRight) {
-                    self.app.rshift = pressed;
-                }
-                // The typing keyboard plays notes by physical key (spec: ui/typing-keyboard.md).
-                if let winit::keyboard::PhysicalKey::Code(code) = event.physical_key {
-                    if self.app.typing_key(code, pressed, ctrl(self.mods), self.mods.alt_key()) {
-                        if self.app.has_damage() {
-                            window.request_redraw();
-                        }
-                        return;
-                    }
-                }
-                // Repeats go on too: a dialog, an Info box or a browser folder cell takes them (typing, moving through a
-                // list), and `App::key` keeps those of the piano roll's moving and copying keys (spec: ui/piano-keys.md
-                // §4 rule 1).
-                if pressed {
-                    // macOS: Option and Command change the character a key types (Option+S is "ß"); shortcuts go by the
-                    // key itself.
-                    #[cfg(target_os = "macos")]
-                    let event = {
-                        use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
-                        let mut event = event;
-                        if self.mods.alt_key() || self.mods.super_key() {
-                            event.logical_key = match event.key_without_modifiers() {
-                                winit::keyboard::Key::Character(c) if self.mods.shift_key() => winit::keyboard::Key::Character(c.to_uppercase().into()),
-                                k => k,
-                            };
-                        }
-                        event
-                    };
-                    // Windows: Ctrl+Alt is AltGr there, so a key that types nothing with it (Ctrl+Alt+Z, the redo) comes
-                    // with no character; shortcuts go by the key itself. A character AltGr does type is kept. Text sent
-                    // as characters rather than keys (an on-screen keyboard, a remote desktop, the emoji panel) comes as
-                    // an unidentified key carrying its text: it types that text.
-                    #[cfg(windows)]
-                    let event = {
-                        use winit::keyboard::Key;
-                        use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
-                        let mut event = event;
-                        if matches!(event.logical_key, Key::Unidentified(_)) {
-                            event.logical_key = match (event.key_without_modifiers(), &event.text) {
-                                (Key::Character(c), _) if self.mods.shift_key() => Key::Character(c.to_uppercase().into()),
-                                (Key::Character(c), _) => Key::Character(c),
-                                (_, Some(t)) if !t.chars().any(char::is_control) => Key::Character(t.clone()),
-                                (k, _) => k,
-                            };
-                        }
-                        event
-                    };
-                    self.app.repeat = event.repeat;
-                    self.app.code = match event.physical_key {
-                        winit::keyboard::PhysicalKey::Code(code) => Some(code),
-                        _ => None,
-                    };
-                    // The key acts in the window that has the keyboard (the one it came to), and a popup or box it
-                    // opens shows there.
-                    let (key, c, alt) = (&event.logical_key, ctrl(self.mods), self.mods.alt_key());
-                    self.app.key_on(self.key_on, key, c, alt);
-                    self.app.repeat = false;
-                    self.app.code = None;
+                keyboard_input(&mut self.app, event, self.mods);
+                if self.app.has_damage() {
+                    self.sync_cursor(&window, el);
                     window.request_redraw();
                 }
             }
             // Audio files dropped on the playlist become audio clips (spec: ui/playlist.md §9); a dropped project opens.
             WindowEvent::DroppedFile(path) => {
                 // No mouse moves arrive during a drag and drop: take the cursor position now.
+                if !self.dropped_files.is_empty() {self.dropped_files.push(path); return;}
                 let at = screen_state(&window).map(|s| s.0);
                 // X11 main window (Linux): the X server knows where the pointer is.
                 #[cfg(target_os = "linux")]
@@ -1140,10 +1412,15 @@ impl ApplicationHandler for Shell {
                     let (mx, my) = self.to_app(&window, f64::from(cx - p.x), f64::from(cy - p.y));
                     self.app.mouse_move(mx, my);
                 }
-                self.app.drop_file(path);
+                self.stem_anchor=if !self.app.modal_open() && self.app.top_hit(self.app.mouse.0,self.app.mouse.1).and_then(|h|h.win)==Some(app::Win::Playlist){
+                    self.app.playlist_drop_position()
+                }else{None};
+                self.dropped_files.push(path);
+                drop_preview::clear(&mut self.app);
                 window.request_redraw();
             }
-            WindowEvent::HoveredFile(_) => {}
+            WindowEvent::HoveredFile(path) => {drop_preview::hover_file(&mut self.app,path,None);window.request_redraw();}
+            WindowEvent::HoveredFileCancelled => {drop_preview::clear(&mut self.app);window.request_redraw();}
             WindowEvent::Focused(focused) => {
                 // Linux: plugin windows stay above the main window while Lemon Studio is the active application.
                 #[cfg(target_os = "linux")]
@@ -1156,6 +1433,8 @@ impl ApplicationHandler for Shell {
                     self.grab = None;
                     self.unmax = None;
                     self.app.typing_release_all();
+                    self.app.cancel_effect_drag();
+                    self.app.cancel_mouse_audition();
                     window.request_redraw();
                 }
             }
@@ -1176,7 +1455,8 @@ impl ApplicationHandler for Shell {
             WindowEvent::Moved(_) => self.follow_frame(&window),
             WindowEvent::RedrawRequested => {
                 let size = window.inner_size();
-                let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) else { return };
+                // Painting can reflow and save the workspace. Keep its last visible geometry while minimized.
+                let Some((w, h)) = main_surface_size(size, window.is_minimized()) else { return };
                 let inset = insets(&window);
                 if inset != self.inset {
                     self.inset = inset;
@@ -1211,6 +1491,9 @@ impl ApplicationHandler for Shell {
                     self.frame_monitor = monitor;
                 }
                 // Paint only what changed, then present only that region.
+                // A hidden GDI presentation does not establish the visible window contents.
+                // Keep a complete canvas through startup, including the first visible frame.
+                if !self.shown { self.app.invalidate(); }
                 let damage = self.app.take_damage();
                 let t_paint = Instant::now();
                 if damage.is_some() {
@@ -1225,6 +1508,13 @@ impl ApplicationHandler for Shell {
                 // A scrolled playlist moved its pixels instead of repainting them: the buffer moves them too.
                 let moved = self.app.take_moved();
                 let t_present = Instant::now();
+                let mut presented = false;
+                // ShowWindow may erase the client area. Reveal BEFORE the full BitBlt below,
+                // in this same event handler, while the splash still covers the transition.
+                #[cfg(windows)]
+                if !self.shown && self.app.project_loading().is_none() {
+                    window.set_visible(true);
+                }
                 if let Some(surface) = self.surface.as_mut() {
                     if surface.resize(w, h).is_ok() {
                         if let Ok(mut buf) = surface.buffer_mut() {
@@ -1238,7 +1528,7 @@ impl ApplicationHandler for Shell {
                             #[cfg(not(plugin_windows))]
                             let exposed = false;
                             match &damage {
-                                Some(Some(rects)) if age == 1 && !exposed => {
+                                Some(Some(rects)) if age == 1 && !exposed && (!canvas.neon_3036 || moved.is_empty()) => {
                                     let mut present = Vec::with_capacity(rects.len() + moved.len());
                                     let mut show = |(x, y, w, h): (usize, usize, usize, usize)| {
                                         if let (Some(width), Some(height)) = (NonZeroU32::new(w as u32), NonZeroU32::new(h as u32)) {
@@ -1263,12 +1553,13 @@ impl ApplicationHandler for Shell {
                                     };
                                     for r in rects {
                                         let px = canvas.device_rect(*r);
+                                        let px = if canvas.neon_3036 {canvas.light_damage(px)} else {px};
                                         canvas.copy_region_to_xrgb_at(&mut buf, stride, px, off);
                                         if !inside_moved(px) {
                                             show(px);
                                         }
                                     }
-                                    let _ = if present.is_empty() { buf.present() } else { buf.present_with_damage(&present) };
+                                    presented = if present.is_empty() { buf.present() } else { buf.present_with_damage(&present) }.is_ok();
                                 }
                                 // Nothing painted (the OS asked for a redraw): the buffer already
                                 // holds the last frame unless it was discarded.
@@ -1278,20 +1569,24 @@ impl ApplicationHandler for Shell {
                                         canvas.copy_region_to_xrgb_at(&mut buf, stride, (0, 0, cw as usize, ch as usize), off);
                                         draw_border(&mut buf, stride, size.height as usize, inset);
                                     }
-                                    let _ = buf.present();
+                                    presented = buf.present().is_ok();
                                 }
                                 _ => {
                                     canvas.copy_region_to_xrgb_at(&mut buf, stride, (0, 0, cw as usize, ch as usize), off);
                                     draw_border(&mut buf, stride, size.height as usize, inset);
-                                    let _ = buf.present();
+                                    presented = buf.present().is_ok();
                                 }
                             }
                         }
                     }
                 }
                 self.painted = Instant::now();
-                // The main window shows its first frame: the splash finishes once the project has loaded (`step`).
-                self.shown = true;
+                // Retire the splash only after the visible window received its full frame.
+                if presented && !self.shown && self.app.project_loading().is_none() {
+                    self.shown = true;
+                    startup_sound::play_launch();
+                }
+                if !presented {self.app.invalidate();self.pending=true;}
                 if let Some(log) = &mut self.frames {
                     let what = match &damage {
                         None => "none".to_string(),
@@ -1339,7 +1634,7 @@ const APP_ID: &str = "lemonstudio";
 /// desktop entry's).
 #[cfg(all(unix, not(target_os = "macos")))]
 pub(crate) fn icon_rgba() -> Option<(Vec<u8>, u32, u32)> {
-    let png = tiny_skia::Pixmap::decode_png(include_bytes!("../assets/lemonstudio.png")).ok()?;
+    let png = tiny_skia::Pixmap::decode_png(linux_launcher::ICON).ok()?;
     let rgba = png.pixels().iter().flat_map(|p| {
         let c = p.demultiply();
         [c.red(), c.green(), c.blue(), c.alpha()]
@@ -1417,7 +1712,7 @@ fn screenshot(args: &[String]) {
             "--browser-tab" => browser_tab = it.next().and_then(|v| v.parse().ok()),
             // The browser's width incl. its splitter, as dragged (spec: ui/browser.md §9).
             "--browser-width" => browser_w = it.next().and_then(|v| v.parse().ok()),
-            // "all" / "gen" / "fx": the plugin palette of that list near the window's top centre (spec: ui/plugin-menu.md §5, §6).
+            // "all" / "gen" / "fx": that plugin menu at the window's centre (spec: ui/plugin-menu.md §5).
             "--plugin-menu" => {
                 plugin_menu = Some(match it.next().map(String::as_str) {
                     Some("gen") => plugin_menu::Target::Gen(None),
@@ -1445,7 +1740,7 @@ fn screenshot(args: &[String]) {
                 }
             }
             // The wheel turned `dy` notches at x,y after the first paint, before the clicks (scrolls a page, e.g.
-            // `--settings 6 --wheel 960,500,-40` shows the Theme page's buttons); may be given more than once.
+            // `--settings 5 --wheel 960,500,-40` shows the Theme page's buttons); may be given more than once.
             "--wheel" => {
                 let v: Vec<f32> = it.next().map(|v| v.split(',').filter_map(|n| n.parse().ok()).collect()).unwrap_or_default();
                 if let [x, y, dy] = v[..] {
@@ -1455,7 +1750,7 @@ fn screenshot(args: &[String]) {
             "--lane" => lane = it.next().and_then(|v| v.parse().ok()),
             "--pans" => pans = it.next().map(|v| v.split(',').filter_map(|p| p.parse().ok()).collect()),
             "--settings" => settings = it.next().and_then(|v| v.parse().ok()),
-            // With --settings 8: that Info box (0 title .. 4 web link) being edited.
+            // With --settings 7: that Info box (0 title .. 4 web link) being edited.
             "--info-edit" => info_edit = it.next().and_then(|v| v.parse().ok()),
             "--lane-menu" => lane_menu = true,
             "--menu" => menu = it.next().and_then(|v| v.parse().ok()),
@@ -1563,7 +1858,7 @@ fn screenshot(args: &[String]) {
         app.state.browser_folders.push(dir);
     }
     if let Some(q) = browser_search {
-        app.state.browser_search = q;
+        app.state.browser_search.set(&q);
         app.state.browser_search_focus = true;
     }
     if browser_menu {
@@ -1571,6 +1866,10 @@ fn screenshot(args: &[String]) {
     }
     app.state.z = match view.as_str() {
         "mixer" => vec![app::Win::Mixer],
+        "traditional-mixer" => {
+            mixer::set_layout(&mut app.state,mixer::TRADITIONAL);
+            vec![app::Win::Mixer]
+        }
         "piano" => vec![app::Win::PianoRoll],
         "none" => vec![],
         _ => vec![app::Win::Playlist],
@@ -1607,7 +1906,7 @@ fn screenshot(args: &[String]) {
     }
     if let Some(target) = plugin_menu {
         let (w, h) = app.state.screen;
-        app.open_plugin_palette(target, ((w / 2.0 - crate::plugin_palette::W / 2.0).round(), (h / 4.0).round()), None);
+        app.open_plugin_menu(target, ((w / 2.0).round(), (h / 3.0).round()));
     }
     if let Some((p, piano)) = import_midi {
         // Alt: the MIDI import window's "Show every time" row as it comes.
@@ -1625,7 +1924,7 @@ fn screenshot(args: &[String]) {
         app.state.rack.filter = rack::Filter::All;
     }
     if let Some(r) = rack_scroll {
-        app.state.rack_scroll = r * views::rack::ROW_H;
+        app.state.rack_scroll = r * views::rack::row_pitch(&app.state);
     }
     // The reference views fill the workspace unless `--win` floats the window.
     if let Some(w) = app.state.z.first().copied().filter(|w| w.slot().is_some()) {
@@ -1669,7 +1968,7 @@ fn screenshot(args: &[String]) {
         // Set without keeping them (`cpu_panel.txt` stays as the user left it).
         app.state.cpu.fps_view = v == "fps";
         app.state.cpu.misc = v == "misc";
-        app.state.cpu.update(Instant::now(), None, 0, 0, 0);
+        app.state.cpu.update(Instant::now(), None, 0, 0);
     }
     // No "Opened <path>" in the title: the frame shows the project, not where it lives on disk.
     app.state.message = None;
@@ -1723,7 +2022,7 @@ fn screenshot(args: &[String]) {
         // Playback: what each tick repaints (spec: audio/transport.md; no device, the shown state is set directly).
         // About 4 ticks per frame = 60 frames a second at 140 BPM, 96 PPQ.
         for song in [false, true] {
-            let shown = |tick: f64, sounding: Vec<(u16, u16)>| app::Shown { playing: true, paused: false, tick, song, sounding, tempo: None };
+            let shown = |tick: f64, sounding: Vec<(u16, u16)>| app::Shown { playing: true, paused: false, tick, visual_tick: None, song, sounding, tempo: None };
             app.show_playback(shown(0.0, Vec::new()));
             let d = app.take_damage();
             app.paint_region(&mut canvas, d.flatten().as_deref());
@@ -1780,7 +2079,9 @@ fn screenshot(args: &[String]) {
             app.paint(&mut canvas, None);
         }
     }
-    canvas.pixmap.save_png(out.expect("--screenshot needs a path")).expect("write png");
+    canvas.save_presented_png(out.expect("--screenshot needs a path")).expect("write png");
+    drop(app);
+    plugins::sweep_retired();
 }
 
 /// Wakes the event loop from any thread (hosted plugins asking for the UI thread: a parameter flush after an editor
@@ -1799,37 +2100,6 @@ fn use_x11() -> bool {
     std::env::var_os("DISPLAY").is_some_and(|d| !d.is_empty()) && x11rb::rust_connection::RustConnection::connect(None).is_ok()
 }
 
-/// SIGINT (Ctrl+C in the terminal) and SIGTERM: the program closes as it does with its window, within a tick. A second
-/// one ends it at once, should the first not get through.
-#[cfg(unix)]
-mod stop_signal {
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    static ASKED: AtomicBool = AtomicBool::new(false);
-
-    extern "C" fn on_signal(_: libc::c_int) {
-        if ASKED.swap(true, Ordering::AcqRel) {
-            // SAFETY: ends the process; safe in a signal handler.
-            unsafe { libc::_exit(130) };
-        }
-    }
-
-    pub fn install() {
-        // SAFETY: installs a handler that only touches an atomic and may call `_exit`.
-        unsafe {
-            let mut sa: libc::sigaction = std::mem::zeroed();
-            sa.sa_sigaction = on_signal as extern "C" fn(libc::c_int) as usize;
-            libc::sigemptyset(&mut sa.sa_mask);
-            libc::sigaction(libc::SIGINT, &sa, std::ptr::null_mut());
-            libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut());
-        }
-    }
-
-    pub fn asked() -> bool {
-        ASKED.load(Ordering::Acquire)
-    }
-}
-
 fn wake_ui() {
     if !WAKE_PENDING.swap(true, std::sync::atomic::Ordering::AcqRel) {
         if let Ok(p) = PROXY.lock() {
@@ -1840,23 +2110,109 @@ fn wake_ui() {
     }
 }
 
-/// Windows: a GUI program gets a console only through handles its parent passes it (`cargo run`, a pipe, the plugin
-/// scanner's parent). Without them, the terminal it was started from (if any) takes its output, so `--render` and the
-/// errors printed before the window opens still show there.
-#[cfg(windows)]
-fn attach_console() {
-    use windows_sys::Win32::System::Console::{AttachConsole, GetStdHandle, ATTACH_PARENT_PROCESS, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE};
-    unsafe {
-        if GetStdHandle(STD_OUTPUT_HANDLE).is_null() && GetStdHandle(STD_ERROR_HANDLE).is_null() {
-            AttachConsole(ATTACH_PARENT_PROCESS);
-        }
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct CursorStyle {
+    cursor: app::Cursor,
+    scale: u16,
+    pack: u8,
+    force_size: bool,
+    glow: crate::prefs::NeonLight,
+    color: Option<os_theme::Color>,
+}
+
+type CursorCache = Vec<(CursorStyle, winit::window::CustomCursor)>;
+
+fn cursor_size(appearance: os_theme::appearance::Appearance, pack: u8, interface: f64, display: f64) -> (u16, bool) {
+    let explicit = prefs::choice(&prefs::CURSORS_SCALING).strip_suffix('%').and_then(|v| v.parse::<f64>().ok());
+    let base = if pack == vintage_cursors::PACK && cfg!(target_os = "macos") { 1.0 }
+        else if pack == vintage_cursors::PACK { display }
+        else { interface };
+    let percent = explicit.unwrap_or_else(|| base * f64::from(appearance.cursor_size.unwrap_or(100.0)));
+    (percent.round().clamp(50.0, 400.0) as u16, explicit.is_some() || appearance.cursor_size.is_some())
+}
+
+#[test]
+fn cursor_size_uses_the_legacy_display_scale_or_user_override() {
+    let appearance = os_theme::appearance::Appearance::default();
+    let legacy = vintage_cursors::PACK;
+    let legacy_default = if cfg!(target_os = "macos") { 100 } else { 125 };
+    assert_eq!(cursor_size(appearance, legacy, 2.0, 1.25), (legacy_default, false));
+    assert_eq!(cursor_size(appearance, 0, 2.0, 1.25), (200, false));
+    prefs::set_choice(&prefs::CURSORS_SCALING, 2);
+    assert_eq!(cursor_size(appearance, legacy, 2.0, 1.25), (75, true));
+    assert_eq!(cursor_size(appearance, 0, 2.0, 1.25), (75, true));
+    assert!(playlist_tools::window_cursor_source(app::Cursor::Default, 0.75, 0, true).is_some());
+}
+
+fn cursor_style(app: &app::App, window: &Window, cursor: app::Cursor) -> CursorStyle {
+    let appearance = app.state.featured_palette().unwrap_or(&app.theme.colors).appearance;
+    let pack = playlist_tools::resolved_cursor_pack(appearance, cursor);
+    let (scale, force_size) = cursor_size(appearance, pack, ui_scale(window), window.scale_factor());
+    CursorStyle {
+        cursor, scale, pack, force_size,
+        glow: crate::prefs::NeonLight::for_theme(app.state.neon_3036),
+        color: appearance.cursor_color,
     }
 }
 
+fn apply_window_cursor(window: &Window, el: &ActiveEventLoop, style: CursorStyle, cache: &mut CursorCache) {
+    let CursorStyle { cursor: c, scale, pack, force_size, .. } = style;
+    if let Some((_, cursor)) = cache.iter().find(|(key, _)| *key == style) {
+        window.set_cursor(cursor.clone());
+        return;
+    }
+    let size = f32::from(scale) / 100.0;
+    let source = match c {
+        app::Cursor::Playlist(tool, phase) => playlist_tools::packed_cursor_source(tool, phase, size, pack),
+        _ => playlist_tools::window_cursor_source(c, size, pack, force_size),
+    };
+    if let Some(source) = source {
+        let cursor = el.create_custom_cursor(source);
+        if cache.len() >= 96 { cache.remove(0); }
+        cache.push((style, cursor.clone()));
+        window.set_cursor(cursor);
+        return;
+    }
+            window.set_cursor(match c {
+                app::Cursor::Playlist(_,playlist_tools::RESIZE) => CursorIcon::EwResize,
+                app::Cursor::Playlist(_,playlist_tools::GAIN) => CursorIcon::Pointer,
+                app::Cursor::Playlist(_,playlist_tools::GRAB) => CursorIcon::Grab,
+                app::Cursor::Playlist(_,playlist_tools::GRABBING | playlist_tools::COPYING) => CursorIcon::Grabbing,
+                app::Cursor::Playlist(..) => CursorIcon::Default,
+                app::Cursor::Default => CursorIcon::Default,
+                app::Cursor::Text => CursorIcon::Text,
+                app::Cursor::EwResize => CursorIcon::EwResize,
+                app::Cursor::NsResize => CursorIcon::NsResize,
+                app::Cursor::NwseResize => CursorIcon::NwseResize,
+                app::Cursor::NeswResize => CursorIcon::NeswResize,
+            });
+}
+
 fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str)==Some("--build-flavour") {
+        #[cfg(feature="master-assistant")]
+        println!("{}", master_assistant::build_flavour());
+        #[cfg(not(feature="master-assistant"))]
+        println!("public");
+        return;
+    }
+    if args.first().map(String::as_str)==Some("--reset-preview-layout") {
+        match layout::reset_preview_layout() {Ok(message)=>println!("{message}"),Err(e)=>{eprintln!("{e}");std::process::exit(1);}}
+        return;
+    }
+    if args.first().map(String::as_str)==Some("--ai-mcp"){std::process::exit(ai_control::bridge(&args[1..]));}
     #[cfg(windows)]
-    attach_console();
-    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("--relaunch-update") {
+        std::process::exit(updates::relaunch(&args[1..]));
+    }
+    if args.first().map(String::as_str) == Some("--apply-update") {
+        std::process::exit(updates::helper(&args[1..]));
+    }
+    if args.first().is_some_and(|s|matches!(s.as_str(), "--update-version" | "--update-status" | "--check-update-feed" | "--verify-update" | "--cleanup-updates")) {
+        std::process::exit(updates::diagnostic(&args));
+    }
+    if args.first().map(String::as_str)==Some("--capture-plugin-preview"){plugin_previews::child_main(&args[1..]);}
     // A plugin scanner process (spec: ui/plugin-manager.md §4): loads one file, prints its plugins, ends.
     if args.first().map(String::as_str) == Some(plugin_scan::ARG) {
         plugin_scan::child_main(&args[1..]);
@@ -1876,8 +2232,36 @@ fn main() {
         std::process::exit(plugins::window_check::run(&args[1..]));
     }
     app::move_old_settings();
-    // The mixing threads every engine renders on, from here on (spec: audio/multicore.md).
-    mix_threads::start();
+    if let Err(error) = templates::install_factory_template() {
+        eprintln!("Could not install factory template: {error}");
+    }
+    let startup_folder_evidence = os_paths::user_dir().map(|dir| {
+        let settings = dir.join("settings.txt");
+        format!("directory={:?}\ncanonical={:?}\nentries={:?}\nsettings_metadata={:?}\nsettings_prefix={:?}\n",
+            dir, std::fs::canonicalize(&dir),
+            std::fs::read_dir(&dir).map(|r| r.filter_map(Result::ok).map(|e| e.file_name()).collect::<Vec<_>>()),
+            std::fs::metadata(&settings),
+            std::fs::read_to_string(&settings).map(|s| s.chars().take(400).collect::<String>()))
+    });
+    // Diagnose the installed app's startup without opening windows or audio devices.
+    if args.first().map(String::as_str) == Some("--startup-report") {
+        let output = args.get(1).expect("--startup-report needs an output path");
+        let _event_loop = EventLoop::<()>::with_user_event().build().expect("event loop");
+        let _ = splash::wanted();
+        let mut app = App::new(None);
+        app.startup_project();
+        app.startup_form();
+        layout::restore(&mut app.state);
+        workspace_layout::restore_session(&mut app);
+        let report = format!(
+            "user_dir={:?}\nstartup={}\ntemplate={:?}\ntitle={}\ntempo={}\nmixer_tracks={}\nplaylist_tracks={}\nmessage={:?}\nmix_reference_profiles={}\n",
+            os_paths::user_dir(), prefs::choice(&prefs::STARTUP_PROJECT), templates::file(),
+            app.title(), app.state.tempo, app.state.project.mixer.len(), playlist::track_count(&app.state), app.state.message,
+            mix_assistant::startup_profile_count(),
+        );
+        std::fs::write(output, report).expect("write startup report");
+        return;
+    }
     // A render without a window (FILE > Export audio from the command line, `render`).
     if args.first().map(String::as_str) == Some("--render") {
         std::process::exit(render::cli(&args[1..]));
@@ -1886,15 +2270,8 @@ fn main() {
         screenshot(&args);
         return;
     }
-    // The control plane's socket (spec: roadmap/control-plane.md): beside the window, or without one.
-    let control = control::server::Flags::take(&mut args).unwrap_or_else(|e| {
-        eprintln!("Lemon Studio: {e}");
-        std::process::exit(2);
-    });
-    let level = control.level.unwrap_or(control::Level::Edit);
-    if let Some(at) = &control.serve {
-        control::server::serve_headless(at, level, control.token.clone(), args.first().map(std::path::PathBuf::from));
-    }
+    #[cfg(windows)]
+    if updates::use_branded_executable(&args) { return; }
     // Run from source: Lemon Studio's own plugins are rebuilt and installed before the plugin scan looks for them.
     plugin_rebuild::run();
     let path = args.first().map(std::path::PathBuf::from);
@@ -1916,8 +2293,6 @@ fn main() {
         *p = Some(event_loop.create_proxy());
     }
     os_clap::set_waker(wake_ui);
-    // CLAP plugins asking which thread they are on (`thread-check`): this one is the main thread.
-    os_clap::set_main_thread();
     // Lemon plugins' editors run on threads of their own off Windows and wake the app when they send something.
     #[cfg(not(windows))]
     os_hostlink::set_host_waker(wake_ui);
@@ -1925,6 +2300,8 @@ fn main() {
     // crashed, or ended with a plugin) are given back (`device::heal_sound_server`).
     #[cfg(target_os = "linux")]
     std::thread::spawn(device::heal_sound_server);
+    #[cfg(target_os = "linux")]
+    std::thread::spawn(linux_launcher::refresh);
     let start = path.is_none();
     splash::step(&splash, splash::SETTINGS, if start { "Reading settings" } else { "Opening project" });
     let mut app = App::new(path);
@@ -1933,25 +2310,25 @@ fn main() {
     if start {
         splash::step(&splash, splash::PROJECT, "Opening project");
         app.startup_project();
+        visualizer_video::reclaim_on_startup();
         // Ask for data folder "On startup": the New project form over it (spec: ui/data-folder.md §7).
         app.startup_form();
     }
-    if let Some(at) = &control.control {
-        app.state.message = Some(match control::server::start(at, level, wake_ui) {
-            Ok(mut server) => {
-                if control.token.is_some() {
-                    server.token = control.token.clone();
-                }
-                let m = format!("Control plane: {}", server.describe());
-                eprintln!("Lemon Studio: {m}");
-                app.listen(server);
-                m
-            }
-            Err(e) => format!("Control plane: could not listen at {at}: {e}"),
-        });
-    }
     // The windows where the last run left them.
     layout::restore(&mut app.state);
+    if start { workspace_layout::restore_session(&mut app); }
+    // Keep the real launch result available when an installed app differs from a startup check.
+    if let Some(report) = os_paths::user_file("startup-report.txt") {
+        let _ = std::fs::write(&report, format!(
+            "executable={:?}\narguments={args:?}\nuser_dir={:?}\nstartup={}\ntemplate={:?}\ntitle={}\ntempo={}\nmixer_tracks={}\nmessage={:?}\nselected_template={:?}\nsettings_read={:?}\ntemplate_root={:?}\n",
+            std::env::current_exe(), os_paths::user_dir(), prefs::choice(&prefs::STARTUP_PROJECT),
+            templates::file(), app.title(), app.state.tempo, app.state.project.mixer.len(), app.state.message,
+            prefs::text("default_template"),
+            os_paths::user_file("settings.txt").map(|p| std::fs::read_to_string(p).map(|text| text.lines().filter(|line| line.starts_with("default_template=") || line.starts_with("startup_project=")).collect::<Vec<_>>().join("; "))),
+            templates::root().map(|p| std::fs::read_dir(p).map(|entries| entries.filter_map(Result::ok).map(|e| e.file_name()).collect::<Vec<_>>())),
+        ));
+        let _ = std::fs::write(report.with_file_name("startup-folder-evidence.txt"), format!("{startup_folder_evidence:?}"));
+    }
     // MIDI devices (spec: ui/midi-settings.md §2): the enabled inputs play the selected channel; master sync goes out.
     splash::step(&splash, splash::MIDI, "Opening MIDI devices");
     app.midi = midi_in::MidiIn::open(wake_ui);
@@ -1975,10 +2352,12 @@ fn main() {
         last_click: Instant::now() - Duration::from_secs(10),
         lock: None,
         pointer_locked: false,
-        lock_on: None,
-        cursor: app::Cursor::Default,
+        cursor: None,
+        tool_cursors: Vec::new(),
         inset: (0, 0, 0, 0),
         edge: None,
+        dropped_files: Vec::new(),
+        stem_anchor:None,
         grab: None,
         unmax: None,
         pending: false,
@@ -1986,22 +2365,39 @@ fn main() {
         frame_start: Instant::now(),
         frame: FRAME,
         frame_monitor: None,
+        detached: Default::default(),
+        main_mouse: (-1.,-1.), display_layout: Vec::new(),
         splash,
         shown: false,
         frames: FrameLog::open(),
         watchdog,
         ctrl_click: false,
         main_win: layout::main_win(),
-        detached: Vec::new(),
-        key_on: None,
     };
-    #[cfg(unix)]
-    stop_signal::install();
+    let result = updates::take_result();
+    let failure = result.as_deref().filter(|result| {
+        result.starts_with("Automatic update was not completed:")
+            || result.starts_with("Automatic update deferred:")
+            || result.starts_with("The update installed, but ML Studio could not reopen")
+    });
+    if let Some(result) = result.as_deref() {
+        if failure.is_some() {
+            shell.app.tell(dialog::Kind::Error, "ML Studio update", dialog::spans(&[result]));
+        } else {
+            shell.app.state.message = Some(result.into());
+        }
+    }
+    updates::start(failure);
     event_loop.run_app(&mut shell).expect("run");
     // After a contained plugin crash the process ends here, before plugin files are unloaded (a stopped plugin's code
     // must not run again).
     if os_host::guard::tripped() {
         os_host::guard::exit(0);
+    }
+    if !shell.app.restart_update && let Err(e) = updates::on_exit(false, None) {
+        updates::report_error(&format!("Automatic update deferred: {e}"));
+        updates::report_result(&format!("Automatic update deferred: {e}"));
+        eprintln!("Automatic update deferred: {e}");
     }
     // The app's plugin instances are destroyed here, on this (UI) thread, as far as the engine has let go of them.
     drop(shell);
@@ -2011,6 +2407,43 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn minimize_and_restore_preserve_snapped_workspace() {
+        use app::Win;
+        use winit::dpi::PhysicalSize;
+
+        let mut app = App::new(None);
+        let state = &mut app.state;
+        state.show_browser = true;
+        state.browser_auto_hidden = true;
+        state.screen = (2048.0, 1104.0);
+        state.startup_layout_pending = true;
+        layout::apply_startup_layout(state);
+        state.hide(Win::ChannelRack);
+        let panes = |state: &app::State| {
+            [Win::Mixer, Win::Playlist].map(|win| state.wins[win.slot().unwrap()].rect)
+        };
+        let original = panes(state);
+        let mut redraw = |size, minimized| {
+            if let Some((width, height)) = main_surface_size(size, minimized) {
+                state.screen = (width.get() as f32 / 1.25, height.get() as f32 / 1.25);
+                crate::win_clamp::reflow_workspace(state);
+            }
+            panes(state)
+        };
+
+        // A nonempty minimized client used to narrow both panes to the Mixer's minimum.
+        assert_eq!(redraw(PhysicalSize::new(160, 30), Some(true)), original);
+        assert_eq!(redraw(PhysicalSize::new(0, 0), None), original);
+        assert_eq!(redraw(PhysicalSize::new(2560, 1380), Some(false)), original);
+        let resized = redraw(PhysicalSize::new(1800, 1000), Some(false));
+        assert!(resized.iter().all(|pane| pane.right() == 1440.0));
+        for (pane, before) in redraw(PhysicalSize::new(2560, 1380), Some(false)).into_iter().zip(original) {
+            assert!((pane.w - before.w).abs() < 0.001);
+            assert_eq!((pane.x, pane.y, pane.h), (before.x, before.y, before.h));
+        }
+    }
 
     /// Frames come a little under one refresh apart: never further apart than `FRAME`, never closer than `IDLE`.
     #[test]
@@ -2058,3 +2491,6 @@ mod tests {
         assert_eq!(gui_scale(1.25), 1.25);
     }
 }
+
+mod channel_bounce;
+mod bounce_route;

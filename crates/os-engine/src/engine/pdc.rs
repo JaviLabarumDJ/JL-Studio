@@ -147,7 +147,8 @@ struct Mark {
     /// The tick's first frame in the stream, and its length.
     at: u64,
     len: u64,
-    tick: u64,
+    tick: f64,
+    tick_frames: u64,
     frame: u64,
     held: bool,
 }
@@ -158,13 +159,14 @@ pub(super) struct Pdc {
     /// Per channel: the delay its instrument last reported, and the pad between it and its mixer track.
     pub chan_delay: Vec<u32>,
     pub chan_pad: Vec<Pad>,
+    pub aux_pad: Vec<Vec<Pad>>,
     /// What the pads were last worked out with, for the automation waits: per track `leaving`, per slot `arriving`
-    /// plus the delays of the slots above it that ran; and per track whether a slot was on (the master always counts).
+    /// plus the delays of the slots above it that ran; and the running slot mask of each track.
     leaving: Vec<i64>,
-    slot_late: Vec<[i64; 10]>,
-    any_on: Vec<bool>,
+    slot_late: Vec<[i64; 64]>,
+    active_slots: Vec<u64>,
     /// Slots that were off when the project was loaded: values for them never wait.
-    off_at_load: Vec<[bool; 10]>,
+    off_at_load: Vec<[bool; 64]>,
     /// The longest a sound takes through the pads, and the frames a live engine still plays after its last sound.
     reach: u64,
     pub drain: u64,
@@ -175,7 +177,7 @@ pub(super) struct Pdc {
     pub first: bool,
     /// ... and a new head of the stream is skipped (not when an engine takes over playback).
     pub fresh: bool,
-    /// A slot was switched: an insert whose slots all went off, or one came on, works the pads out again.
+    /// A slot or chain was switched: compare the running slots before the next audio block.
     pub switched: bool,
     /// The first tick's slot values have reached the slots already.
     pub delivered: bool,
@@ -187,24 +189,22 @@ pub(super) struct Pdc {
     /// Frames of the stream rendered in this pass, and where the ticks still to be heard were in the song.
     stream: u64,
     marks: VecDeque<Mark>,
-    /// Automation values waiting for late audio: the tick they take effect on, the target, the value.
-    pub waiting: Vec<(u64, Target, i64)>,
+    /// Automation values waiting for late audio: the tick they take effect on, target, value, and whether the clip starts.
+    pub waiting: Vec<(u64, Target, i64, bool)>,
     /// Split mixer tracks: per track, frames of its output still to skip; frames handed out, and handed over with
     /// the tracks' output.
     pub cap_skip: Vec<u64>,
     pub handed: u64,
     pub taken: u64,
-    /// Plugin delay compensation ▸ Automatic is unticked (`Project::pdc_off`): the plugins' delays count as none, the
-    /// tracks' latency settings still apply (spec: "Automatic").
-    pub manual: bool,
 }
 
 impl Pdc {
     /// For an engine with `channels` channels whose tracks have `slot_on` switches as loaded.
-    pub fn new(channels: usize, slot_on: impl Iterator<Item = [bool; 10]>) -> Pdc {
+    pub fn new(channels: usize, slot_on: impl Iterator<Item = [bool; 64]>) -> Pdc {
         Pdc {
             chan_delay: vec![0; channels],
             chan_pad: vec![Pad::default(); channels],
+            aux_pad: vec![Vec::new();channels],
             off_at_load: slot_on.map(|s| s.map(|on| !on)).collect(),
             first: true,
             fresh: true,
@@ -217,7 +217,7 @@ impl Pdc {
     /// never waits, nor does anything for a negative lateness.
     pub fn wait(&self, target: Target, tick: i64) -> u64 {
         let late = match target {
-            Target::MixerVolume(t) | Target::MixerPan(t) | Target::MixerSeparation(t) | Target::MixerEq(t, ..) | Target::MixerSend(t, _) => {
+            Target::MixerVolume(t) | Target::MixerPan(t) | Target::MixerSeparation(t) | Target::MixerEq(t, ..) | Target::MixerStrip(t, _) | Target::MixerSend(t, _) => {
                 self.leaving.get(usize::from(t)).copied().unwrap_or(0)
             }
             Target::SlotOn(t, s) | Target::SlotMix(t, s) | Target::SlotParam(t, s, _) => {
@@ -238,6 +238,7 @@ impl Pdc {
         for p in &mut self.chan_pad {
             p.clear();
         }
+        for p in self.aux_pad.iter_mut().flatten() {p.clear();}
         self.waiting.clear();
         self.marks.clear();
         (self.first, self.fresh, self.due) = (true, true, false);
@@ -251,6 +252,7 @@ impl Pdc {
         for (new, o) in self.chan_pad.iter_mut().zip(&mut old.chan_pad) {
             *new = std::mem::take(o);
         }
+        for (new,old) in self.aux_pad.iter_mut().zip(&mut old.aux_pad) {*new=std::mem::take(old);}
         for (new, &o) in self.chan_delay.iter_mut().zip(&old.chan_delay) {
             *new = o;
         }
@@ -278,16 +280,21 @@ impl Engine {
         self.tracks[t].slots_enabled && if t == 0 { self.master_fx } else { self.insert_fx }
     }
 
-    /// At least one of track `t`'s slots is on (the master always counts as having one).
-    fn slots_on(&self, t: usize) -> bool {
-        t == 0 || self.tracks[t].effects.iter().any(|f| f.on)
+    /// Exactly the effects that the mixer runs, including its separate EQ and strip.
+    /// A chain bypass leaves individual slot switches unchanged, and those switches
+    /// alone therefore cannot tell us whether the track's latency changed.
+    fn active_slots(&self, t: usize) -> u64 {
+        let m = &self.tracks[t];
+        let run = self.slots_run(t);
+        m.effects.iter()
+            .filter(|f| f.on && (f.slot == 10 || Some(f.slot) == m.strip_slot || run))
+            .fold(0, |mask, f| mask | (1u64 << f.slot))
     }
 
-    /// At the start of a tick, before its values arrive: when a delay changed during the last tick, or an insert's
-    /// slots all went off (or one came on again), the pads are worked out again now (spec: "When the delays change
-    /// during a song").
+    /// Before audio renders: replan after a reported delay or any running-slot change.
+    /// Repeated automation values leave the pads and their buffered audio intact.
     pub(super) fn check_delays(&mut self) {
-        if std::mem::take(&mut self.pdc.switched) && (0..self.tracks.len()).any(|t| self.pdc.any_on.get(t).is_some_and(|&on| on != self.slots_on(t))) {
+        if std::mem::take(&mut self.pdc.switched) && (0..self.tracks.len()).any(|t| self.pdc.active_slots.get(t).is_some_and(|&slots| slots != self.active_slots(t))) {
             self.pdc.due = true;
         }
         if self.pdc.due && !self.pdc.first {
@@ -311,8 +318,10 @@ impl Engine {
         let (until, wait, export) = (&mut self.busy_until, self.busy_wait, self.exporting);
         for (c, ch) in self.channels.iter().enumerate() {
             let Some(inst) = ch.instrument.0.as_ref().filter(|i| !i.is_poisoned()) else { continue };
-            if let (Some(i), Some(d)) = (lock_busy(inst, until, wait, export), self.pdc.chan_delay.get_mut(c)) {
+            if let (Some(mut i), Some(d)) = (lock_busy(inst, until, wait, export), self.pdc.chan_delay.get_mut(c)) {
+                i.set_split_outputs(ch.split_outputs);
                 *d = i.reported_delay();
+                self.pdc.aux_pad[c].resize_with(i.extra_outputs().min(15),Pad::default);
             }
         }
         for fx in self.tracks.iter_mut().flat_map(|t| t.effects.iter_mut()) {
@@ -333,24 +342,32 @@ impl Engine {
         let mut ins: Vec<TrackIn> = (0..n)
             .map(|t| {
                 let m = &self.tracks[t];
-                let slots = if self.slots_run(t) && !self.pdc.manual { m.effects.iter().filter(|f| f.on).map(|f| u64::from(f.delay)).sum() } else { 0 };
-                TrackIn { out: m.latency.0, inp: m.latency.1, sends: m.routes.iter().map(|r| r.dest).collect(), chan: 0, slots }
+                let slots = m.effects.iter().filter(|f| f.on && (f.slot == 10 || Some(f.slot)==m.strip_slot || self.slots_run(t))).map(|f| u64::from(f.delay)).sum::<u64>();
+                TrackIn { out: m.latency.0, inp: m.latency.1, sends: m.routes.iter().map(|r| r.dest).collect(), chan: 0, slots: slots + if m.custom_strip && !m.strip_bypassed {m.tune.as_ref().map_or(0,|t|u64::from(t.latency()))}else{0} }
             })
             .collect();
         // Engine voices report none; a plugin channel counts also while it is switched off.
         for (c, ch) in self.channels.iter().enumerate() {
-            if ch.instrument.0.is_some() && !self.pdc.manual {
+            if ch.instrument.0.is_some() {
                 let d = self.pdc.chan_delay.get(c).copied().unwrap_or(0);
                 ins[ch.insert].chan = ins[ch.insert].chan.max(d);
+                for port in 0..self.pdc.aux_pad[c].len() {let t=ch.insert+port+1;if t<n {ins[t].chan=ins[t].chan.max(d);}}
+            }
+        }
+        let compensate = self.compensate_playback || self.exporting;
+        if !compensate {
+            for track in &mut ins {
+                (track.out, track.inp, track.chan, track.slots) = (0., 0., 0, 0);
             }
         }
         let l = lateness(&ins, &self.order, self.rate);
-        let runs: Vec<bool> = (0..n).map(|t| self.slots_run(t) && !self.pdc.manual).collect();
-        let on: Vec<bool> = (0..n).map(|t| self.slots_on(t)).collect();
-        self.pdc.slot_late = vec![[0; 10]; n];
+        let runs: Vec<bool> = (0..n).map(|t| self.slots_run(t)).collect();
+        let active_slots = (0..n).map(|t| self.active_slots(t)).collect();
+        self.pdc.slot_late = vec![[0; 64]; n];
         for (t, m) in self.tracks.iter_mut().enumerate() {
             // What the engine plays into the track itself (sampler voices, the metronome) reports no delay.
             m.pad.set_len(l.channel_pad(t, 0));
+            m.input_pad.set_len(l.channel_pad(t, 0));
             for r in &mut m.routes {
                 r.pad.set_len(l.send_pad(t, r.dest));
             }
@@ -358,10 +375,12 @@ impl Engine {
             for fx in &mut m.effects {
                 fx.dry_pad.set_len(fx.delay as usize);
             }
-            let mut late = l.arriving[t];
-            for k in 0..10 {
+            let mut late = l.arriving[t] + if m.custom_strip && !m.strip_bypassed {m.tune.as_ref().map_or(0,|t|i64::from(t.latency()))}else{0};
+            let mut order:Vec<usize>=(0..64).collect();
+            order.sort_by_key(|&k| if m.strip_slot==Some(k){0}else if k==10 {if m.parametric_pre {1}else{66}} else {k+2});
+            for k in order {
                 self.pdc.slot_late[t][k] = late;
-                if runs[t] {
+                if k == 10 || Some(k)==m.strip_slot || runs[t] {
                     late += m.effects.iter().filter(|f| f.slot == k && f.on).map(|f| i64::from(f.delay)).sum::<i64>();
                 }
             }
@@ -382,7 +401,7 @@ impl Engine {
                 };
                 let (src, main) = (pick(fx.key_input()), pick(if hosted { fx.ports[0] } else { 0 }));
                 let late = |s: Option<usize>| s.map_or(0, |s| (self.pdc.slot_late[t][fx.slot] - l.leaving[s]).max(0) as usize);
-                let (len, main_len) = (late(src), late(main));
+                let (len, main_len) = if compensate { (late(src), late(main)) } else { (0, 0) };
                 let fx = &mut self.tracks[t].effects[i];
                 fx.key = src;
                 fx.key_pad.set_len(len);
@@ -400,11 +419,11 @@ impl Engine {
             }
         }
         for (c, ch) in self.channels.iter().enumerate() {
-            let delay = if self.pdc.manual { 0 } else { self.pdc.chan_delay.get(c).copied().unwrap_or(0) };
-            let len = if ch.instrument.0.is_some() { l.channel_pad(ch.insert, delay) } else { 0 };
+            let len = if compensate && ch.instrument.0.is_some() { l.channel_pad(ch.insert, self.pdc.chan_delay.get(c).copied().unwrap_or(0)) } else { 0 };
             if let Some(p) = self.pdc.chan_pad.get_mut(c) {
                 p.set_len(len);
             }
+            for (port,p) in self.pdc.aux_pad[c].iter_mut().enumerate() {let t=ch.insert+port+1;p.set_len(if compensate && t<n {l.channel_pad(t,self.pdc.chan_delay[c])}else{0});}
         }
         self.pdc.reach = (0..n).map(|t| l.leaving[t].max(l.arriving[t]) + l.extra[t]).max().unwrap_or(0).max(0) as u64;
         if self.pdc.fresh {
@@ -412,9 +431,14 @@ impl Engine {
             // for Split mixer tracks skips its own lateness, so it lines up with the song (a Lemon Studio choice).
             (self.pdc.lag, self.pdc.head) = (l.start, l.start);
             self.pdc.cap_skip = l.leaving.iter().map(|&v| (v.max(0) as u64).min(l.start)).collect();
+            if self.capture_master_input {
+                if let (Some(skip), Some(&input)) = (self.pdc.cap_skip.first_mut(), l.arriving.first()) {
+                    *skip = (input.max(0) as u64).min(l.start);
+                }
+            }
         }
         self.pdc.leaving = l.leaving;
-        self.pdc.any_on = on;
+        self.pdc.active_slots = active_slots;
         (self.pdc.due, self.pdc.first, self.pdc.fresh) = (false, false, false);
     }
 
@@ -422,22 +446,30 @@ impl Engine {
     /// what is left of the skipped frames follows (`flushing`), and the position handed out with it is where the song
     /// was when what is heard first was made: `lag` frames earlier in the stream (spec: "Lemon Studio").
     pub(super) fn hand_out(&mut self, tick: u64, frame: u64, held: bool, flushing: bool) {
-        let w = self.width();
-        let n = (self.out.len() / w) as u64;
+        self.hand_out_part(tick as f64, frame, held, flushing, (self.out.len() / 2) as u64);
+    }
+
+    pub(super) fn hand_out_part(&mut self, tick: f64, frame: u64, held: bool, flushing: bool, tick_frames: u64) {
+        let n = (self.out.len() / 2) as u64;
         let at = self.pdc.stream;
         self.pdc.stream += n;
         let skip = self.pdc.head.min(n);
         self.pdc.head -= skip;
         if skip > 0 {
-            self.out.drain(..w * skip as usize);
+            self.out.drain(..2 * skip as usize);
         }
         // Once they are out, an engine kept going (live notes still held) plays on as it renders.
         if let (true, Some(f)) = (flushing, self.pdc.flush.as_mut().filter(|f| **f > 0)) {
             let keep = (*f).min(n - skip);
-            self.out.truncate(w * keep as usize);
+            self.out.truncate(2 * keep as usize);
             *f -= keep;
         }
-        self.pdc.handed += (self.out.len() / w) as u64;
+        if !self.exporting {
+            let start = 2 * skip as usize;
+            self.device_outputs.render(&self.bus, start..start + self.out.len(),
+                self.pdc.lag, &self.pdc.leaving, &self.varispeed, self.speed_ratio);
+        }
+        self.pdc.handed += (self.out.len() / 2) as u64;
         // A live engine plays on while a sound is still on its way through the pads.
         if !self.voices.is_empty() || self.inst_tail > 0 || self.tap_clicks.sounding() {
             self.pdc.drain = self.pdc.reach;
@@ -446,21 +478,29 @@ impl Engine {
         }
         self.out_pos = 0;
         if self.pdc.lag == 0 {
-            (self.out_tick, self.out_frame, self.out_held, self.out_len) = (tick as f64, frame, held, n);
+            (self.out_tick, self.out_frame, self.out_held, self.out_len) = (tick, frame, held, tick_frames);
+            self.apply_varispeed();
             return;
         }
         let marks = &mut self.pdc.marks;
-        marks.push_back(Mark { at, len: n, tick, frame, held });
+        marks.push_back(Mark { at, len: n, tick, tick_frames, frame, held });
         let heard = (at + skip).saturating_sub(self.pdc.lag);
         while marks.len() > 1 && marks[1].at <= heard {
             marks.pop_front();
         }
         let m = marks[0];
         let into = heard.saturating_sub(m.at).min(m.len);
-        self.out_len = m.len.max(1);
+        self.out_len = m.tick_frames.max(1);
         (self.out_tick, self.out_frame, self.out_held) =
-            if m.held { (m.tick as f64, m.frame, true) } else { (m.tick as f64 + into as f64 / self.out_len as f64, m.frame + into, false) };
+            if m.held { (m.tick, m.frame, true) } else { (m.tick + into as f64 / self.out_len as f64, m.frame + into, false) };
+        self.apply_varispeed();
     }
+    fn apply_varispeed(&mut self) {
+        let before=self.out.len();
+        self.varispeed.process(&mut self.out, self.speed_ratio);
+        if before>0 {self.out_len=((self.out_len as f64*self.out.len() as f64/before as f64).round() as u64).max(1);}
+    }
+
 }
 
 #[cfg(test)]
@@ -625,6 +665,9 @@ mod tests {
     }
 
     impl crate::HostedEffect for Late {
+        fn reset_fx(&mut self) {
+            self.line.iter_mut().for_each(|frame| *frame = [0.; 2]);
+        }
         fn process_fx(&mut self, _rate: u32, l: &mut [f32], r: &mut [f32]) {
             for i in 0..l.len() {
                 self.line.push_back([l[i], r[i]]);
@@ -638,7 +681,6 @@ mod tests {
 
     fn gate_channel(index: u16, insert: u16) -> Channel {
         Channel {
-            id: os_model::Id::NONE,
             index,
             kind: ChannelKind::Plugin,
             name: None,
@@ -697,6 +739,78 @@ mod tests {
     }
 
     #[test]
+    fn bounded_mixer_blocks_preserve_audio_and_compensated_position() {
+        let mut p = project(&[1], 2);
+        p.ppq = 24;
+        p.tempo = Some(120.);
+        for delay in [0, 173, 1409] {
+            let render = |limit| {
+                let mut e = engine(&p, vec![(1, 0, Late::new(delay))], false);
+                let mut output = Vec::new();
+                while output.len() < 12_000 {
+                    let (audio, _, tick, frame, held, tick_frames) = e.next_device_block(0, limit).unwrap();
+                    assert!(!held);
+                    assert_eq!(frame, (output.len() / 2) as u64);
+                    assert_eq!(tick_frames, 1000);
+                    assert!((tick * 1000. - frame as f64).abs() < 0.00001);
+                    output.extend_from_slice(audio);
+                }
+                output.truncate(12_000);
+                output
+            };
+            assert_eq!(render(64), render(usize::MAX), "delay {delay}");
+        }
+    }
+
+    #[test]
+    fn count_in_keeps_its_last_beat_with_plugin_latency() {
+        let mut p = project(&[], 3);
+        p.tempo = Some(100.0);
+        let rate = 48_000;
+        let beat_frames = rate * 60 / 100;
+        let count_frames = 4 * beat_frames;
+
+        for (start, click_track, effect_track) in [(0, 0, 0), (96, 1, 2)] {
+            let render = |delay| {
+                let mut e = engine(&p, vec![(effect_track, 0, Late::new(delay))], false);
+                e.set_looping(true);
+                if start > 0 {
+                    e.seek_tick(start);
+                }
+                let click = Arc::new(crate::metronome::Switch::default());
+                click.set_on(true);
+                click.set_track(click_track);
+                e.set_metronome(click);
+                e.set_count_in(1);
+
+                let mut out = Vec::new();
+                let mut first_playing = None;
+                while out.len() < (count_frames + beat_frames / 2) * 2 {
+                    let (audio, tick, _, held, _) = e.next_tick().unwrap();
+                    if !held && first_playing.is_none() {
+                        first_playing = Some((out.len() / 2, tick));
+                    }
+                    out.extend_from_slice(audio);
+                }
+                let (frame, tick) = first_playing.unwrap();
+                // Delay can make a returned block straddle the transition by part of a tick.
+                assert!((count_frames..count_frames + beat_frames / 96).contains(&frame));
+                assert!((start as f64..start as f64 + 1.0).contains(&tick));
+                for beat in 0..=4 {
+                    let offset = beat * beat_frames * 2;
+                    assert!(out[offset..offset + 480].iter().any(|&sample| sample.abs() > 1e-6),
+                        "expected beat {beat} with a delay of {delay} frames");
+                }
+                out.truncate((count_frames + beat_frames / 2) * 2);
+                out
+            };
+            let direct = render(0);
+            let compensated = render(5_760);
+            assert!(direct == compensated, "count-in and playback use one delay timeline");
+        }
+    }
+
+    #[test]
     fn an_export_shows_no_delay_where_one_insert_is_late() {
         // Channels on inserts 1 and 2, both into the master; insert 1 holds an effect 100 frames late.
         let p = project(&[1, 2], 3);
@@ -712,25 +826,6 @@ mod tests {
         off.mixer[1].slot_on[0] = false;
         let late = export(&off, vec![(1, 0, Late::new(100))]);
         assert!(late == export(&off, vec![(1, 0, Late::new(0))]));
-    }
-
-    /// spec: "Automatic": with Plugin delay compensation ▸ Automatic unticked a late slot is heard late (its track is
-    /// not waited for and the export starts at 0), while a track's own latency setting still counts.
-    #[test]
-    fn automatic_off_leaves_the_plugins_delays_alone() {
-        let mut p = project(&[1, 2], 3);
-        p.pdc_off = true;
-        let reference = export(&p, vec![(1, 0, Late::new(0))]);
-        let late = export(&p, vec![(1, 0, Late::new(100))]);
-        assert_eq!(late.len(), reference.len());
-        assert!(late != reference, "insert 1 is heard late");
-        let mut e = engine(&p, vec![(1, 0, Late::new(100))], false);
-        e.next_tick();
-        assert_eq!((e.pdc.lag, e.tracks[2].routes[0].pad.len()), (0, 0), "nothing waits for it");
-        p.mixer[1].latency_out = 5.0;
-        let mut e = engine(&p, vec![(1, 0, Late::new(100))], false);
-        e.next_tick();
-        assert_eq!((e.pdc.lag, e.tracks[2].routes[0].pad.len()), (240, 240), "the latency setting still counts");
     }
 
     #[test]
@@ -786,9 +881,9 @@ mod tests {
         use os_model::target;
         // A volume ramp on insert 1, whose effect is two ticks late: the export equals the one without the delay.
         let mut p = project(&[1], 2);
-        p.channels.push(Channel { kind: ChannelKind::Automation, pan: -1.0, volume: 1.0, ..gate_channel(1, 0) });
+        p.channels.push(Channel { kind: ChannelKind::Automation, ..gate_channel(1, 0) });
         let points = vec![AutoPoint::new(0.0, 0.8), AutoPoint::new(4.0, 0.1)];
-        p.automations.push(Automation { channel: 1, targets: vec![target::mixer(1, target::MIXER_VOLUME)], points, header: vec![0; 21], tail: vec![], lfo: Default::default() });
+        p.automations.push(Automation { channel: 1, targets: vec![target::mixer(1, target::MIXER_VOLUME)], points, header: vec![0; 21], tail: vec![] });
         p.arrangements = vec![os_model::Arrangement {
             clips: vec![Clip::new(0, 384, 0, ClipSource::Pattern(1)), Clip::new(0, 384, 1, ClipSource::Channel(1))],
             tracks: (1..=2).map(os_model::PlaylistTrack::new).collect(),
@@ -842,6 +937,119 @@ mod tests {
         e.seek_tick(96);
         let (n, tick) = e.next_tick().map(|(s, t, ..)| (s.len() / 2, t)).unwrap();
         assert_eq!((n, tick), (TICK - 100, 96.0));
+    }
+
+    #[test]
+    fn disabling_live_delay_compensation_keeps_export_aligned() {
+        let p = project(&[1, 2], 3);
+        let mut live = engine(&p, vec![(1, 0, Late::new(100))], false);
+        live.set_playback_delay_compensation(false);
+        let block = live.next_tick().unwrap().0;
+        assert_eq!(block.len(), 2 * TICK, "live playback skips no compensated frames");
+        assert_eq!(onset(block), 0, "the undelayed route plays immediately");
+
+        let mut offline = engine(&p, vec![(1, 0, Late::new(100))], false);
+        offline.set_playback_delay_compensation(false);
+        assert!(offline.render_all(0) == export(&p, vec![(1, 0, Late::new(0))]));
+    }
+
+    #[test]
+    fn live_chain_bypass_realigns_parallel_audio_without_a_transport_restart() {
+        for parallel in [false, true] {
+          for effect_track in [1, 3] {
+            // Identical signals take two paths through the mixer, with opposite polarity.
+            // Any stale compensation produces audible output instead of a null.
+            let mut p = project(&[1, 2], 4);
+            p.mixer[1].routes = vec![3];
+            p.mixer[2].polarity = true;
+            let mut e = engine(&p, vec![(effect_track, 0, Late::new(60)), (effect_track, 3, Late::new(40))], true);
+            e.set_processing_threads(false, parallel);
+            e.set_worker_limit(if parallel { 4 } else { 1 });
+            for enabled in [true, false, true, false] {
+                p.mixer[effect_track].slots_enabled = enabled;
+                e.set_mixer_controls(effect_track, &p.mixer[effect_track]);
+                for block in 0..4 {
+                    e.parallel.cost.fill(std::time::Duration::from_micros(500));
+                    let audio = e.next_tick().unwrap().0.to_vec();
+                    assert_eq!(e.tracks[2].routes[0].pad.len(), if enabled { 100 } else { 0 },
+                        "bypass must update the other path before rendering its first block");
+                    if block > 0 || !enabled {
+                        assert!(audio.iter().all(|s| s.abs() < 1e-6),
+                            "parallel={parallel}, enabled={enabled}: the paths must cancel");
+                    }
+                }
+            }
+          }
+        }
+    }
+
+    #[test]
+    fn automated_slot_bypass_realigns_in_the_block_that_changes_the_switch() {
+        use os_model::target;
+        let mut p = project(&[1, 2], 3);
+        p.mixer[2].polarity = true;
+        p.channels.push(Channel { kind: ChannelKind::Automation, ..gate_channel(2, 0) });
+        p.automations.push(Automation {
+            channel: 2,
+            targets: vec![target::slot(1, 0, target::SLOT_ON)],
+            points: vec![AutoPoint::new(0., 0.), AutoPoint::new(4., 0.)],
+            header: vec![0; 21], tail: vec![],
+        });
+        p.arrangements = vec![os_model::Arrangement {
+            clips: vec![Clip::new(0, 384, 0, ClipSource::Pattern(1)),
+                Clip::new(4, 384, 1, ClipSource::Channel(2))],
+            tracks: (1..=2).map(os_model::PlaylistTrack::new).collect(),
+            ..Default::default()
+        }];
+        let mut e = engine(&p, vec![(1, 0, Late::new(60)), (1, 3, Late::new(40))], true);
+        let mut changed = false;
+        for _ in 0..12 {
+            let audio = e.next_tick().unwrap().0.to_vec();
+            let on = e.tracks[1].slot_on[0];
+            assert_eq!(e.tracks[2].routes[0].pad.len(), if on { 100 } else { 40 });
+            if !on {
+                // The other delay line needs 40 frames to fill, but no whole extra block.
+                assert!(audio[80..].iter().all(|s| s.abs() < 1e-6));
+                changed = true;
+            }
+        }
+        assert!(changed, "the automation clip must actually bypass the slot");
+    }
+
+    #[test]
+    fn live_slot_bypass_tracks_each_running_effect_including_master_and_eq() {
+        let mut p = project(&[1, 2], 3);
+        let mut e = engine(&p, vec![(1, 0, Late::new(60)), (1, 3, Late::new(40)),
+            (1, 10, Late::new(20)), (0, 0, Late::new(30))], true);
+        e.next_tick();
+        assert_eq!(e.tracks[2].routes[0].pad.len(), 120);
+        // One slot off must update PDC even while other slots are still running.
+        p.mixer[1].slot_on[0] = false;
+        e.set_mixer_controls(1, &p.mixer[1]);
+        e.next_tick();
+        assert_eq!(e.tracks[2].routes[0].pad.len(), 60);
+        // Whole-chain bypass leaves the separate mixer EQ running.
+        p.mixer[1].slots_enabled = false;
+        e.set_mixer_controls(1, &p.mixer[1]);
+        e.next_tick();
+        assert_eq!(e.tracks[2].routes[0].pad.len(), 20);
+        p.mixer[0].slots_enabled = false;
+        e.set_mixer_controls(0, &p.mixer[0]);
+        e.next_tick();
+        assert_eq!(e.pdc.wait(Target::MixerVolume(0), 1), 20);
+        p.mixer[0].slots_enabled = true;
+        e.set_mixer_controls(0, &p.mixer[0]);
+        e.next_tick();
+        assert_eq!(e.pdc.wait(Target::MixerVolume(0), 1), 50);
+        p.mixer[0].slot_on[0] = false;
+        e.set_mixer_controls(0, &p.mixer[0]);
+        e.next_tick();
+        assert_eq!(e.pdc.wait(Target::MixerVolume(0), 1), 20);
+        // A repeated switch value should not rebuild or empty the delay lines.
+        e.pdc.switched = true;
+        e.check_delays();
+        assert!(!e.pdc.due);
+        assert_eq!(e.tracks[2].routes[0].pad.len(), 20);
     }
 
     #[test]

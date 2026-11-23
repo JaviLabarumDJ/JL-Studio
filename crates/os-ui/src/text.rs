@@ -36,6 +36,8 @@ pub enum Face {
     Ui,
     /// The system's light UI face (Segoe UI Light on Windows): the song position display.
     Light,
+    /// Windows-era lettering from the vintage skin configuration (Arial on Windows).
+    Vintage,
 }
 
 impl Face {
@@ -44,6 +46,7 @@ impl Face {
         match self {
             Face::Ui => "Cuprum",
             Face::Light => "Segoe UI",
+            Face::Vintage => "Arial",
         }
     }
 }
@@ -66,6 +69,9 @@ impl Font {
     /// Cuprum at `size` px with natural ClearType advances.
     pub const fn new(size: u16) -> Font {
         Font { face: Face::Ui, size, width: 0, bold: false, italic: false, natural: true }
+    }
+    pub const fn vintage(size: u16) -> Font {
+        Font { face: Face::Vintage, size, width: 0, bold: false, italic: false, natural: false }
     }
     /// Horizontally condensed: `width` is the average character width in px.
     pub const fn condensed(size: u16, width: u16) -> Font {
@@ -94,6 +100,11 @@ impl Font {
 pub type ClipPx = (i32, i32, i32, i32);
 
 pub struct TextEngine {
+    theme_font: Option<portable::Fd>,
+    theme_bold: Option<portable::Fd>,
+    mute_theme: bool,
+    theme_font_id: u8,
+    theme_font_data: Option<std::sync::Arc<[u8]>>,
     /// GDI (Windows), unless the portable engine was asked for.
     #[cfg(windows)]
     gdi: Option<gdi::Gdi>,
@@ -111,6 +122,11 @@ impl TextEngine {
             _ => Some(gdi::Gdi::new()?),
         };
         Ok(TextEngine {
+            theme_font: None,
+            theme_bold: None,
+            mute_theme: false,
+            theme_font_id: 0,
+            theme_font_data: None,
             #[cfg(windows)]
             gdi,
             portable: portable::Fd::new()?,
@@ -122,8 +138,54 @@ impl TextEngine {
         })
     }
 
+    #[cfg(windows)]
+    pub(crate) fn set_grayscale(&mut self, enabled: bool) {
+        if let Some(gdi) = &mut self.gdi {
+            gdi.set_grayscale(enabled);
+        }
+    }
+
+    pub fn mute_theme_font(&mut self, muted: bool) { self.mute_theme = muted; }
+
+    pub fn valid_theme_font(bytes: &[u8]) -> bool { portable::Fd::from_bytes(bytes).is_ok() }
+
+    pub fn set_theme_font(&mut self, id: u8, data: Option<std::sync::Arc<[u8]>>) {
+        let same_data = match (&self.theme_font_data, &data) {
+            (None, None) => true,
+            (Some(a), Some(b)) => std::sync::Arc::ptr_eq(a,b),
+            _ => false,
+        };
+        if id == self.theme_font_id && same_data { return; }
+        self.theme_font_id = id;
+        self.theme_font_data = data;
+        let bytes: Option<&[u8]> = match id {
+            1 => Some(CUPRUM),
+            2 => Some(include_bytes!("../fonts/Barlow/BarlowSemiCondensed-Regular.ttf")),
+            3 => Some(include_bytes!("../fonts/Barlow/BarlowCondensed-Medium.ttf")),
+            4 => self.theme_font_data.as_deref(),
+            _ => None,
+        };
+        self.theme_font = bytes.and_then(|bytes| portable::Fd::from_bytes(bytes).ok());
+        // Studio's bundled family has a real semibold face. Pixel dilation closes
+        // the counters of small labels and adds an artificial pixel to every advance.
+        self.theme_bold = if id == 2 {
+            portable::Fd::from_bytes(include_bytes!("../fonts/Barlow/BarlowSemiCondensed-SemiBold.ttf")).ok()
+        } else { None };
+    }
+
+    fn theme_face(&mut self, f: Font) -> Option<(&mut portable::Fd, Font)> {
+        if self.mute_theme || f.face != Face::Ui { return None; }
+        if f.bold && let Some(font) = &mut self.theme_bold {
+            return Some((font, Font { bold: false, ..f }));
+        }
+        self.theme_font.as_mut().map(|font| (font, f))
+    }
+
     /// (width, cell height) of `s` in device pixels.
     pub fn extent(&mut self, f: Font, scale: f32, s: &str) -> (i32, i32) {
+        if let Some((font, f)) = self.theme_face(f) { return font.extent(f, scale, s); }
+        #[cfg(windows)]
+        if self.portable.needs_fallback(s) { return self.portable.extent(f, scale, s); }
         #[cfg(windows)]
         if let Some(g) = &mut self.gdi {
             return g.extent(f, scale, s);
@@ -137,6 +199,7 @@ impl TextEngine {
 
     /// Cell height and ascent (device pixels).
     pub fn metrics(&mut self, f: Font, scale: f32) -> (i32, i32) {
+        if let Some((font, f)) = self.theme_face(f) { return font.metrics(f, scale); }
         #[cfg(windows)]
         if let Some(g) = &mut self.gdi {
             return g.metrics(f, scale);
@@ -155,6 +218,11 @@ impl TextEngine {
         if s.is_empty() || c.a == 0 {
             return;
         }
+        if let Some((font, f)) = self.theme_face(f) {
+            return font.draw(pix, clip, f, scale, x, y, c, s, vertical);
+        }
+        #[cfg(windows)]
+        if self.portable.needs_fallback(s) { return self.portable.draw(pix, clip, f, scale, x, y, c, s, vertical); }
         #[cfg(windows)]
         if let Some(g) = &mut self.gdi {
             return g.draw(pix, clip, f, scale, x, y, c, s, vertical);
@@ -214,7 +282,8 @@ mod gdi {
         bits: *mut u8,
         cap: (i32, i32),
         fonts: HashMap<(Font, u32, bool), HFONT>,
-        names: [Vec<u16>; 2],
+        grayscale: bool,
+        names: [Vec<u16>; 3],
         metrics: HashMap<(Font, u32), (i32, i32)>,
         /// Text extents by (font, scale, string) hash: views measure the same labels every frame.
         extents: HashMap<u64, (i32, i32), BuildHasherDefault<Id>>,
@@ -244,7 +313,8 @@ mod gdi {
                 bits: std::ptr::null_mut(),
                 cap: (0, 0),
                 fonts: HashMap::new(),
-                names: [Face::Ui, Face::Light].map(|f| f.gdi_name().encode_utf16().chain(Some(0)).collect()),
+                grayscale: false,
+                names: [Face::Ui, Face::Light, Face::Vintage].map(|f| f.gdi_name().encode_utf16().chain(Some(0)).collect()),
                 metrics: HashMap::new(),
                 extents: HashMap::default(),
                 drawn: Lru::new(32 << 20),
@@ -291,6 +361,13 @@ mod gdi {
             Ok(())
         }
 
+        pub(super) fn set_grayscale(&mut self, enabled: bool) {
+            if self.grayscale != enabled {
+                self.grayscale = enabled;
+                self.drawn.clear();
+            }
+        }
+
         fn font(&mut self, f: Font, scale: f32, vertical: bool) -> HFONT {
             let key = (f, scale.to_bits(), vertical);
             if let Some(h) = self.fonts.get(&key) {
@@ -298,7 +375,7 @@ mod gdi {
             }
             let px = |v: u16| (f32::from(v) * scale).round() as i32;
             let esc = if vertical { 900 } else { 0 };
-            let quality = if f.natural { CLEARTYPE_NATURAL_QUALITY } else { u32::from(CLEARTYPE_QUALITY) };
+            let quality = if f.face == Face::Vintage { u32::from(ANTIALIASED_QUALITY) } else if f.natural { CLEARTYPE_NATURAL_QUALITY } else { u32::from(CLEARTYPE_QUALITY) };
             // SAFETY: the face name is NUL-terminated UTF-16.
             let h = unsafe {
                 CreateFontW(
@@ -309,7 +386,7 @@ mod gdi {
                     match (f.face, f.bold) {
                         (_, true) => 700,
                         (Face::Light, false) => 300,
-                        (Face::Ui, false) => 400,
+                        (Face::Ui | Face::Vintage, false) => 400,
                     },
                     u32::from(f.italic),
                     0,
@@ -430,6 +507,10 @@ mod gdi {
             for row in 0..h as usize {
                 let src = &data[(y0 as usize + row) * pstride + x0 as usize * 4..][..w as usize * 4];
                 let dst = &mut dib[row * stride..][..w as usize * 4];
+                if self.grayscale {
+                    dst.fill(0);
+                    continue;
+                }
                 for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
                     d[0] = s[2];
                     d[1] = s[1];
@@ -442,7 +523,8 @@ mod gdi {
             // SAFETY: valid dc/font; the string buffer outlives the call.
             unsafe {
                 SelectObject(self.dc, font);
-                SetTextColor(self.dc, u32::from(c.r) | (u32::from(c.g) << 8) | (u32::from(c.b) << 16));
+                let ink = if self.grayscale { 0xffffff } else { u32::from(c.r) | (u32::from(c.g) << 8) | (u32::from(c.b) << 16) };
+                SetTextColor(self.dc, ink);
                 ExtTextOutW(self.dc, x - x0, y - y0, 0, std::ptr::null(), ws.as_ptr(), ws.len() as u32, std::ptr::null());
                 GdiFlush();
             }
@@ -451,7 +533,15 @@ mod gdi {
                 let dst = &mut data[(y0 as usize + row) * pstride + x0 as usize * 4..][..w as usize * 4];
                 let src = &dib[row * stride..][..w as usize * 4];
                 for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
-                    if a == 255 {
+                    if self.grayscale {
+                        // Collapse the hinted white-on-black glyph to one coverage value.
+                        // GDI's grayscale font quality can drop antialiasing at small sizes.
+                        let coverage = (u32::from(s[2]) + 2 * u32::from(s[1]) + u32::from(s[0]) + 2) / 4;
+                        let opacity = (coverage * a + 127) / 255;
+                        for (dst, ink) in d[..3].iter_mut().zip([c.r, c.g, c.b]) {
+                            *dst = ((u32::from(ink) * opacity + u32::from(*dst) * (255 - opacity) + 127) / 255) as u8;
+                        }
+                    } else if a == 255 {
                         d[0] = s[2];
                         d[1] = s[1];
                         d[2] = s[0];
@@ -507,6 +597,16 @@ mod portable {
     use os_theme::Color;
     use tiny_skia::Pixmap;
 
+    // Shared once, rather than reparsed for every theme/font instance. SIL OFL 1.1;
+    // the unmodified fonts and attribution are in fonts/NotoSymbols.
+    fn symbols() -> &'static [fontdue::Font; 2] {
+        static FONTS: std::sync::OnceLock<[fontdue::Font; 2]> = std::sync::OnceLock::new();
+        FONTS.get_or_init(|| [
+            fontdue::Font::from_bytes(include_bytes!("../fonts/NotoSymbols/NotoSansSymbols.ttf") as &[u8], fontdue::FontSettings::default()).expect("bundled symbol font"),
+            fontdue::Font::from_bytes(include_bytes!("../fonts/NotoSymbols/NotoSansSymbols2-Regular.ttf") as &[u8], fontdue::FontSettings::default()).expect("bundled symbol font"),
+        ])
+    }
+
     /// Vertical metrics in em: (ascent, descent) as GDI takes them (the OS/2 table's win ascent / descent).
     type Vm = (f32, f32);
 
@@ -557,9 +657,21 @@ mod portable {
     }
 
     impl Fd {
+        #[cfg(any(windows, test))]
+        pub fn needs_fallback(&self, text: &str) -> bool {
+            text.chars().any(|c| !c.is_ascii() && self.font.lookup_glyph_index(c) == 0
+                && symbols().iter().any(|f| f.lookup_glyph_index(c) != 0))
+        }
         pub fn new() -> Result<Fd, String> {
-            let font = fontdue::Font::from_bytes(CUPRUM, fontdue::FontSettings::default()).map_err(|e| e.to_string())?;
-            let (asc, desc, avg) = os2(CUPRUM).ok_or("the UI font has no OS/2 metrics")?;
+            Self::from_bytes(CUPRUM)
+        }
+
+        pub fn from_bytes(bytes: &[u8]) -> Result<Fd, String> {
+            let font = fontdue::Font::from_bytes(bytes, fontdue::FontSettings::default()).map_err(|e| e.to_string())?;
+            let (asc, desc, avg) = os2(bytes).ok_or("The font has no OS/2 metrics")?;
+            if ![asc, desc, avg].into_iter().all(|v| v.is_finite() && (0.0..=3.0).contains(&v)) {
+                return Err("The font has unusable UI metrics".into());
+            }
             super::FONTS.fetch_add(1, super::Ordering::Relaxed);
             Ok(Fd { font, ui: (asc, desc), avg, cache: HashMap::new() })
         }
@@ -572,7 +684,7 @@ mod portable {
         fn vm(&self, f: Font) -> Vm {
             match f.face {
                 Face::Ui => self.ui,
-                Face::Light => SEGOE_UI,
+                Face::Light | Face::Vintage => SEGOE_UI,
             }
         }
 
@@ -593,7 +705,8 @@ mod portable {
         fn glyph(&mut self, c: char, f: Font, scale: f32) -> &Glyph {
             let (px, k) = (Self::px(f, scale), self.squeeze(f, scale));
             let key = (c, px.to_bits(), k.to_bits(), f.bold, f.italic);
-            let font = &self.font;
+            let font = if self.font.lookup_glyph_index(c) != 0 || c.is_ascii() { &self.font }
+                else { symbols().iter().find(|font| font.lookup_glyph_index(c) != 0).unwrap_or(&self.font) };
             self.cache.entry(key).or_insert_with(|| {
                 let (m, cov) = font.rasterize(c, px);
                 // Condense.
@@ -695,6 +808,30 @@ mod portable {
         use super::*;
 
         #[test]
+        fn studio_bold_uses_the_bundled_face_for_metrics_and_pixels() {
+            let mut engine = super::super::TextEngine::new().unwrap();
+            engine.set_theme_font(2, None);
+            let mut real = Fd::from_bytes(include_bytes!("../fonts/Barlow/BarlowSemiCondensed-SemiBold.ttf")).unwrap();
+            let mut synthetic = Fd::from_bytes(include_bytes!("../fonts/Barlow/BarlowSemiCondensed-Regular.ttf")).unwrap();
+            for scale in [1.0, 1.25, 1.5, 2.0] {
+                let font = Font::new(13);
+                let text = "SONG WAV FLAC MP3";
+                assert_eq!(engine.extent(font.bold(), scale, text), real.extent(font, scale, text));
+                assert_eq!(engine.metrics(font.bold(), scale), real.metrics(font, scale));
+                let mut actual = Pixmap::new(320, 48).unwrap();
+                let mut expected = actual.clone();
+                let mut dilated = actual.clone();
+                engine.draw(&mut actual, (0,0,320,48), font.bold(), scale, 2, 2, Color::rgb(0xffffff), text, false);
+                real.draw(&mut expected, (0,0,320,48), font, scale, 2, 2, Color::rgb(0xffffff), text, false);
+                synthetic.draw(&mut dilated, (0,0,320,48), font.bold(), scale, 2, 2, Color::rgb(0xffffff), text, false);
+                assert_eq!(actual.data(), expected.data());
+                assert_ne!(actual.data(), dilated.data());
+            }
+            engine.set_theme_font(3, None);
+            assert!(engine.theme_bold.is_none(), "switching families drops the old face");
+        }
+
+        #[test]
         fn cell_and_baseline_follow_the_win_metrics() {
             let mut fd = Fd::new().unwrap();
             // Cuprum: win ascent 910, descent 210 of 1000 units.
@@ -702,6 +839,19 @@ mod portable {
             assert_eq!(fd.metrics(Font::new(20), 1.5), (33, 27));
             // The light face sits on Segoe UI's baseline.
             assert_eq!(fd.metrics(Font::light(32, 13), 1.0).1, 35);
+        }
+
+        #[test]
+        fn missing_ui_symbols_have_cached_fallback_glyphs() {
+            let mut fd=Fd::from_bytes(include_bytes!("../fonts/Barlow/BarlowSemiCondensed-Regular.ttf")).unwrap();
+            for ch in "↑↓←→★☆✓✕♭♯⚙▶▸".chars() {
+                assert!(fd.font.lookup_glyph_index(ch)!=0 || symbols().iter().any(|f|f.lookup_glyph_index(ch)!=0),"{ch} must not render .notdef");
+                for scale in [1.,1.25,1.5,2.] {
+                    let g=fd.glyph(ch,Font::new(14),scale);
+                    assert!(g.w>0 && g.h>0 && g.cov.iter().any(|&v|v>0));
+                }
+            }
+            assert!(!fd.needs_fallback("File?"));
         }
 
         #[test]

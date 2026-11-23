@@ -18,9 +18,7 @@ use os_ui::{tabler, Canvas, Color, Font, Rect};
 use crate::doc::Doc;
 use crate::peaks::Peaks;
 use crate::state::{self, Rec};
-use crate::env::EnvDlg;
-use crate::spectral::{self, Blur, Clean, Curve, Equalize};
-use crate::tools::{Amp, DrumStretch, Law, Reverb, Stretch};
+use crate::tools::{Amp, Law};
 
 /// The default editor size (Edison's) and the smallest it may be resized to, in logical pixels.
 pub const W: u32 = 744;
@@ -136,7 +134,8 @@ pub const MENUS: [(MenuId, &str); 9] = [
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Bt {
     Undo,
-    /// Edit modes: 0 waveform, 1 pan, 2 volume, 3 stereo separation, 4 all-purpose envelope.
+    /// Edit modes: 0 waveform, 1 pan, 2 volume, 3 stereo separation, 4 all-purpose envelope (only the waveform in
+    /// Tesla 1).
     Mode(u8),
     Follow,
     Spectrum,
@@ -157,46 +156,6 @@ pub enum AmpCtl {
     Volume,
     Right,
     Sep,
-    /// Time stretch / pitch shift's knobs.
-    Pitch,
-    Time,
-    Formant,
-    Preserve,
-    /// Drum(loop) stretch's controls besides Time: the tail envelope's slope, Insert tails, Auto-slice, Filling.
-    Slope,
-    Tails,
-    AutoSlice,
-    Filling,
-    /// Convolution reverb's controls.
-    Dry,
-    Wet,
-    Decay,
-    Tail,
-    ClipImpulse,
-    /// The spectral panels: the curve box, then Equalize's, Blur's and Clean up's controls.
-    Curve,
-    Mix,
-    Smooth,
-    Amount,
-    Offset,
-    Threshold,
-    Reduction,
-    NoiseOnly,
-    Declip,
-    ClipLevel,
-    /// Clean up's second row: the declipper's mode and Safe mode, the declicker and its sensitivity.
-    Mode,
-    Safe,
-    Declick,
-    Sensitivity,
-    /// An envelope tool's two knobs.
-    EnvA,
-    EnvB,
-    /// Vocal denoise / isolator's MIX knob; Deverb's MIX knob and SOURCE button.
-    VoiceMix,
-    DeverbMix,
-    Source,
-    Acquire,
     Reset,
     Preview,
     Accept,
@@ -227,6 +186,9 @@ pub enum Target {
     Amp(AmpCtl),
     /// The panel behind the Amp controls (eats clicks).
     AmpPanel,
+    Stretch(u8),
+    Cleanup(u8),
+    ReturnTrack,
 }
 
 #[derive(Clone, Debug)]
@@ -250,18 +212,18 @@ pub const TOOLS: [ToolDef; 18] = [
     ToolDef { glyph: Glyph::Normalize, hint: "Normalize / normalize regions", left: true, right: true },
     ToolDef { glyph: Glyph::FadeIn, hint: "Fade in / declick in", left: true, right: true },
     ToolDef { glyph: Glyph::Amp, hint: "Amp... / center", left: true, right: true },
-    ToolDef { glyph: Glyph::Reverb, hint: "Convolution reverb...", left: true, right: false },
-    ToolDef { glyph: Glyph::Eq, hint: "Equalize...", left: true, right: false },
+    ToolDef { glyph: Glyph::Reverb, hint: "Reverb... (later version)", left: false, right: false },
+    ToolDef { glyph: Glyph::Eq, hint: "Equalize... (later version)", left: false, right: false },
     ToolDef { glyph: Glyph::Flag, hint: "Add marker or region / remove marker or region", left: true, right: true },
     ToolDef { glyph: Glyph::Loop, hint: "Set loop / remove loop", left: true, right: true },
     ToolDef { glyph: Glyph::Drag, hint: "Drag / copy sample or selection", left: true, right: true },
     ToolDef { glyph: Glyph::Reverse, hint: "Reverse / swap channels", left: true, right: true },
-    ToolDef { glyph: Glyph::Gate, hint: "Trim side noise / gate noise", left: true, right: true },
+    ToolDef { glyph: Glyph::Gate, hint: "Trim side noise / gate noise (later version)", left: false, right: false },
     ToolDef { glyph: Glyph::FadeOut, hint: "Fade out / declick out", left: true, right: true },
-    ToolDef { glyph: Glyph::Stretch, hint: "Time stretch / pitch shift... / drum(loop) stretch...", left: true, right: true },
-    ToolDef { glyph: Glyph::Blur, hint: "Blur...", left: true, right: false },
-    ToolDef { glyph: Glyph::Clean, hint: "Clean up (denoise)... / acquire noise profile", left: true, right: true },
-    ToolDef { glyph: Glyph::Slice, hint: "Medium auto-slicing / auto-slicing", left: true, right: true },
+    ToolDef { glyph: Glyph::Stretch, hint: "Time stretch / pitch shift...", left: true, right: true },
+    ToolDef { glyph: Glyph::Blur, hint: "Blur... (later version)", left: false, right: false },
+    ToolDef { glyph: Glyph::Clean, hint: "Clean up audio (denoise)...", left: true, right: true },
+    ToolDef { glyph: Glyph::Slice, hint: "Auto-slicing (later version)", left: false, right: false },
     ToolDef { glyph: Glyph::Save, hint: "Save as... / save as 24Bit .wav...", left: true, right: true },
     ToolDef { glyph: Glyph::Send, hint: "Send to playlist as audio clip / to selected channel", left: true, right: true },
 ];
@@ -312,42 +274,15 @@ pub struct ViewState {
     pub mouse: Option<(f32, f32)>,
     pub pressed: Option<Target>,
     pub amp: Option<AmpUi>,
-    /// What the spectral panels draw behind their curve: heights 0 to 1 over the box's columns (Equalize: the range's
-    /// spectrum; Clean up: the noise profile).
-    pub backdrop: Vec<f32>,
-    /// A noise profile has been acquired (Clean up's Preview and Accept need one, or the declipper).
-    pub profile: bool,
-    /// Noise gating's threshold (linear), once acquired, and whether its mark is drawn over the waveform.
-    pub gate: Option<f32>,
-    pub mark: bool,
+    pub stretch: Option<crate::stretch::Panel>,
+    pub cleanup: Option<crate::cleanup::Panel>,
+    pub return_to_track: bool,
 }
 
-/// The open tool panel: Amp, Time stretch / pitch shift when `stretch` is set, Drum(loop) stretch when `drum` is,
-/// Convolution reverb when `reverb` is,
-/// Equalize, Blur or Clean up (denoise) when `eq`, `blur` or `clean` is (`curve`: Equalize's and Blur's curve),
-/// Vocal denoise / isolator or Deverb when `voice` or `deverb` is.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct AmpUi {
     pub amp: Amp,
-    pub stretch: Option<Stretch>,
-    pub drum: Option<DrumStretch>,
-    pub env: Option<EnvDlg>,
-    pub reverb: Option<Reverb>,
-    pub eq: Option<Equalize>,
-    pub blur: Option<Blur>,
-    pub clean: Option<Clean>,
-    pub voice: Option<crate::restore::Isolate>,
-    pub deverb: Option<crate::restore::Deverb>,
-    pub curve: Curve,
     pub previewing: bool,
-}
-
-impl AmpUi {
-    /// Whether Preview and Accept would do anything (Clean up needs a noise profile, or the declipper or the
-    /// declicker on).
-    pub fn ready(&self, profile: bool) -> bool {
-        self.clean.is_none_or(|c| profile || c.declip || c.declick)
-    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -503,19 +438,6 @@ pub fn frame_x(lane: Rect, start: f64, per_px: f64, f: f64) -> f32 {
     lane.x + ((f - start) / per_px) as f32
 }
 
-/// The y of envelope height `v` (0 bottom, 1 top) in the lane, and back.
-pub fn env_y(lane: Rect, v: f32) -> f32 {
-    lane.bottom() - v.clamp(0.0, 1.0) * lane.h
-}
-
-pub fn env_v(lane: Rect, y: f32) -> f32 {
-    ((lane.bottom() - y) / lane.h.max(1.0)).clamp(0.0, 1.0)
-}
-
-/// The envelope points' handle radius, and how near the pointer must be to grab a point or the line.
-pub const POINT_R: f32 = 3.5;
-pub const GRAB: f32 = 5.0;
-
 pub fn paint(c: &mut Canvas, l: &Look, w: u32, h: u32) -> Vec<Hit> {
     let lay = Layout::new(w, h);
     c.clear(plug::BG);
@@ -528,6 +450,8 @@ pub fn paint(c: &mut Canvas, l: &Look, w: u32, h: u32) -> Vec<Hit> {
     if let Some(a) = &l.st.amp {
         amp_panel(&mut ui, a, &lay);
     }
+    if let Some(panel)=&l.st.cleanup {cleanup_panel(&mut ui,panel,&lay);}
+    if let Some(panel)=&l.st.stretch {stretch_panel(&mut ui,panel,&lay);}
     ui.hits
 }
 
@@ -627,6 +551,8 @@ fn toolbar(ui: &mut Ui, l: &Look, lay: &Layout) {
 
     // The tool grid.
     for (i, t) in TOOLS.iter().enumerate() {
+        if i==12 && !crate::stretch::visible(){continue;}
+        if i==14 && !crate::cleanup::visible(){continue;}
         let r = Rect::new((lay.grid_x + (i % 9) as f32 * 39.25).round(), 27.0 + (i / 9) as f32 * 31.0, 38.0, 30.0);
         let col = ui.button(r, Target::Tool(i), false, t.left || t.right);
         glyph(ui.c, t.glyph, Rect::new(r.cx() - 9.0, r.cy() - 9.0, 18.0, 18.0), col);
@@ -636,12 +562,12 @@ fn toolbar(ui: &mut Ui, l: &Look, lay: &Layout) {
     let mr = Rect::new(lay.w - 40.0, 2.0, 20.0, 20.0);
     let col = ui.flat(mr, Target::Mute, l.rec.mute, true);
     ui.c.icon_stroke(if l.rec.mute { &tabler::VOLUME_OFF } else { &tabler::VOLUME }, mr.inset(2.5), col, 1.8);
-    let name_w = lemon::spaced_width(ui.c, MARK, "TESLA", 3.0);
+    let name_w = lemon::spaced_width(ui.c, MARK, "ML TESLA", 3.0);
     let nx = lay.w - 45.0 - name_w;
     let wr = Rect::new(nx - 16.0, 3.0, name_w + 18.0, 19.0);
     ui.hit(wr, Target::Wordmark);
     lemon::lemon_mark(ui.c, nx - 9.0, 12.5, 4.5, brand::MAIN);
-    lemon::spaced(ui.c, MARK, nx, 3.0, plug::WORDMARK, "TESLA", 3.0);
+    lemon::spaced(ui.c, MARK, nx, 3.0, plug::WORDMARK, "ML TESLA", 3.0);
     let lv = lay.meter;
     lemon::plug_well(ui.c, lv, 3.0);
     // −60 dB at the bottom (where On input and Input start) to 0 dB at the top.
@@ -768,28 +694,16 @@ fn wave(ui: &mut Ui, l: &Look, lay: &Layout) {
     }
     let fmt = doc.view.time;
     let step = grid_step(fmt, l.shown.rate, doc.sample.tempo, per_px, 90.0);
-    // Bars run through the first downbeat and count from it.
-    let db = if fmt == state::TIME_BBT { doc.sample.downbeat as f64 } else { 0.0 };
-    let mut g = ((start - db) / step).floor() * step + db;
+    let mut g = (start / step).floor() * step;
     let end = start + per_px * lane.w as f64;
     while g <= end {
         let x = fx(g).round();
         if x >= lane.x {
             ui.c.fill_rect(Rect::new(x, lane.y, 1.0, lane.h), plug::GRID);
-            if g >= db - 0.5 {
-                let t = time_text(fmt, (g - db).max(0.0), l.shown.rate, doc.sample.tempo, per_px);
-                ui.c.text(SMALL, x + 3.0, lane.bottom() - 13.0, plug::OFF, &t);
-            }
+            let t = time_text(fmt, g, l.shown.rate, doc.sample.tempo, per_px);
+            ui.c.text(SMALL, x + 3.0, lane.bottom() - 13.0, plug::OFF, &t);
         }
         g += step;
-    }
-    // The first downbeat, when it is set.
-    if doc.sample.downbeat > 0 {
-        let x = fx(doc.sample.downbeat as f64).round();
-        if x >= lane.x && x <= lane.right() {
-            ui.c.fill_rect(Rect::new(x, lane.y, 1.0, lane.h), LOOP.with_alpha(150));
-            ui.c.text(SMALL, x + 3.0, lane.bottom() - 26.0, LOOP, "Downbeat");
-        }
     }
     // The waveform (the spectrogram is drawn under the selection and the grid).
     if l.spectrum.is_none() {
@@ -797,8 +711,6 @@ fn wave(ui: &mut Ui, l: &Look, lay: &Layout) {
         let y_of = |v: f32| mid - v.clamp(-1.0, 1.0) * amp;
         let chans = l.shown.channels;
         let colors = [LEFT_WAVE, RIGHT_WAVE];
-        // An envelope mode dims the waveform under its line.
-        let dim = if doc.env_shown().is_some() { 0.4 } else { 1.0 };
         // The right channel first, the left over it.
         for c in (0..chans).rev() {
             let col = if chans == 1 { LEFT_WAVE } else { colors[c] };
@@ -810,7 +722,7 @@ fn wave(ui: &mut Ui, l: &Look, lay: &Layout) {
                     if b > 0.0 && (a as usize) < n {
                         if let Some((lo, hi)) = l.shown.minmax(c, a.max(0.0) as usize, (b.ceil() as usize).max(a as usize + 1)) {
                             let (y0, y1) = (y_of(hi), y_of(lo));
-                            ui.c.fill_rect(Rect::new(x, y0, 1.0, (y1 - y0).max(1.0)), col.with_alpha(((if c == 1 { 200.0 } else { 230.0 }) * dim) as u8));
+                            ui.c.fill_rect(Rect::new(x, y0, 1.0, (y1 - y0).max(1.0)), col.with_alpha(if c == 1 { 200 } else { 230 }));
                         }
                     }
                     x += 1.0;
@@ -820,7 +732,6 @@ fn wave(ui: &mut Ui, l: &Look, lay: &Layout) {
                 let i0 = start.floor().max(0.0) as usize;
                 let i1 = (end.ceil() as usize + 1).min(n);
                 let pts: Vec<(f32, f32)> = (i0..i1).map(|i| (fx(i as f64), y_of(l.shown.at(c, i)))).collect();
-                let col = col.with_alpha((255.0 * dim) as u8);
                 ui.c.polyline(&pts, 1.2, col);
                 if per_px < 0.2 {
                     for &(x, y) in &pts {
@@ -828,13 +739,6 @@ fn wave(ui: &mut Ui, l: &Look, lay: &Layout) {
                     }
                 }
             }
-        }
-    }
-    // The noise threshold mark: a line at the threshold over and under the middle.
-    if ui.st.mark && l.spectrum.is_none() {
-        let thr = ui.st.gate.unwrap_or(crate::tools::GATE_DEFAULT).min(1.0);
-        for y in [mid - thr * lane.h / 2.0, mid + thr * lane.h / 2.0] {
-            ui.c.fill_rect(Rect::new(lane.x, y.round(), lane.w, 1.0), brand::MAIN.with_alpha(170));
         }
     }
     // Markers and regions along the top, the loop along the bottom.
@@ -872,35 +776,6 @@ fn wave(ui: &mut Ui, l: &Look, lay: &Layout) {
                 ui.c.fill_rect(fr, LOOP);
                 ui.c.text(SMALL, x0 + 4.0, y - 2.0, Color::rgb(0xffffff), "Loop");
                 ui.hit(fr, Target::LoopFlag);
-            }
-        }
-    }
-    // The envelope of the edit mode: an orange line with its points.
-    if let Some(k) = doc.env_shown() {
-        let n = doc.frames();
-        if n > 0 {
-            let p = doc.env.points(k, n);
-            // A smooth point's line is drawn in 16 pieces.
-            let mut pts: Vec<(f32, f32)> = Vec::with_capacity(p.len() * 2);
-            for (i, q) in p.iter().enumerate() {
-                pts.push((fx(q.pos), env_y(lane, q.v)));
-                if let (true, Some(b)) = (q.smooth, p.get(i + 1)) {
-                    for s in 1..16 {
-                        let pos = q.pos + (b.pos - q.pos) * s as f64 / 16.0;
-                        pts.push((fx(pos), env_y(lane, crate::env::value(&p, pos))));
-                    }
-                }
-            }
-            ui.c.polyline(&pts, 1.6, FLAG);
-            for q in &p {
-                let (x, y) = (fx(q.pos), env_y(lane, q.v));
-                if x >= lane.x - POINT_R && x <= lane.right() + POINT_R {
-                    ui.c.fill_circle(x, y, POINT_R, plug::BG);
-                    ui.c.stroke_circle(x, y, POINT_R, 1.4, FLAG);
-                    if q.smooth {
-                        ui.c.fill_circle(x, y, POINT_R - 1.8, FLAG);
-                    }
-                }
             }
         }
     }
@@ -985,13 +860,15 @@ fn bottom(ui: &mut Ui, l: &Look, lay: &Layout) {
     btn(ui, 8.0, 14.0, Target::Menu(MenuId::Options), Glyph::Down, false, true);
     btn(ui, 30.5, 22.0, Target::Bottom(Bt::Undo), Glyph::Undo, false, l.can_undo);
     for (i, g) in [Glyph::Wave, Glyph::Pan, Glyph::Ramp, Glyph::BowTie, Glyph::Chain].into_iter().enumerate() {
-        btn(ui, 59.0 + i as f32 * 23.5, 22.0, Target::Bottom(Bt::Mode(i as u8)), g, l.doc.view.mode == i as u8, true);
+        // Envelope modes come in a later version.
+        btn(ui, 59.0 + i as f32 * 23.5, 22.0, Target::Bottom(Bt::Mode(i as u8)), g, i == 0, i == 0);
     }
+    if l.st.return_to_track && crate::cleanup::visible(){let r=Rect::new(190.,y,132.,lay.bottom.h-2.);let enabled=!l.armed;let col=ui.button(r,Target::ReturnTrack,false,enabled);if enabled{ui.c.fill_rrect(r,3.,brand::MAIN);ui.c.text_center(VALUE,r,Color::rgb(0),"Apply to track");}else{ui.c.text_center(VALUE,r,col,"Apply to track");}}
     let v = &l.doc.view;
     let right = [
         (Bt::Follow, Glyph::Arrow, v.follow, true),
         (Bt::Spectrum, Glyph::Bars, v.spectrum, true),
-        (Bt::Threshold, Glyph::Threshold, l.st.mark, true),
+        (Bt::Threshold, Glyph::Threshold, false, false),
         (Bt::Regions, Glyph::Flag, v.regions, true),
         (Bt::Freeze, Glyph::Snowflake, v.freeze, true),
         (Bt::ClickFree, Glyph::SCurve, v.clickfree, true),
@@ -1038,409 +915,8 @@ pub fn fader_travel(slot: Rect) -> (f32, f32) {
     (slot.y + 7.0, slot.bottom() - 7.0)
 }
 
-/// The Time stretch / pitch shift panel: the Pitch and Time knobs, then formant preservation's switch and knob, over
-/// the buttons, centred over the wave area.
-pub fn stretch_parts(lay: &Layout) -> (Rect, [(AmpCtl, Rect); 4]) {
-    let (w, h) = (208.0, 268.0f32.min(lay.h - 8.0));
-    let p = Rect::new((lay.wave.cx() - w / 2.0).round(), ((lay.h - h) / 2.0).round(), w, h);
-    let knob = |cx: f32, cy: f32| Rect::new(p.x + cx - 22.0, p.y + cy - 22.0, 44.0, 44.0);
-    (p, [
-        (AmpCtl::Pitch, knob(58.0, 72.0)),
-        (AmpCtl::Time, knob(150.0, 72.0)),
-        (AmpCtl::Preserve, Rect::new(p.x + 18.0, p.y + 128.0, 172.0, 18.0)),
-        (AmpCtl::Formant, knob(104.0, 184.0)),
-    ])
-}
-
-fn stretch_panel(ui: &mut Ui, a: &AmpUi, st: &Stretch, lay: &Layout) {
-    let (p, parts) = stretch_parts(lay);
-    ui.hit(p, Target::AmpPanel);
-    lemon::outlined(ui.c, p.outset(1.0), 11.0, Color::rgb(0x111111), plug::PANEL_LINE);
-    lemon::plug_panel(ui.c, p);
-    ui.c.text(TITLE, p.x + 12.0, p.y + 7.0, brand::TEXT, "Time stretch / pitch shift");
-    lemon::plug_well(ui.c, Rect::new(p.x + 8.0, p.y + 30.0, p.w - 16.0, p.h - 74.0), 7.0);
-    for (ctl, r) in parts {
-        let t = Target::Amp(ctl);
-        ui.hit(r, t);
-        let s = ui.state(r, t, false);
-        if ctl == AmpCtl::Preserve {
-            lemon::toggle(ui.c, r.x + 7.0, r.cy(), st.preserve, s);
-            ui.c.text(CAPTION, r.x + 18.0, r.y + 3.5, if s.hover { brand::TEXT } else { plug::DIM }, "FORMANT PRESERVATION");
-            continue;
-        }
-        let (v, cap, val) = match ctl {
-            AmpCtl::Pitch => (st.pitch, "PITCH", format!("{:+.2} st", st.semitones())),
-            AmpCtl::Time => (st.time, "TIME", format!("x{:.3}", st.ratio())),
-            _ => (st.formant, "FORMANT", if st.preserve { format!("{:+.2} st", st.formant_semitones()) } else { "with pitch".into() }),
-        };
-        lemon::dial(ui.c, r.cx(), r.cy(), r.w / 2.0, 4.0, (v + 1.0) / 2.0, true, brand::MAIN, s);
-        ui.c.text_center(CAPTION, Rect::new(r.x - 20.0, r.y - 15.0, r.w + 40.0, 12.0), plug::DIM, cap);
-        ui.c.text_center(CAPTION, Rect::new(r.x - 20.0, r.bottom() + 4.0, r.w + 40.0, 12.0), brand::TEXT, &val);
-    }
-    panel_buttons(ui, a, p);
-}
-
-/// The Drum(loop) stretch panel's geometry: the Time and Tail knobs, the Filling selector, then the Insert tails and
-/// Auto-slice switches.
-pub fn drum_parts(lay: &Layout) -> (Rect, [(AmpCtl, Rect); 5]) {
-    let (w, h) = (208.0, 268.0f32.min(lay.h - 8.0));
-    let p = Rect::new((lay.wave.cx() - w / 2.0).round(), ((lay.h - h) / 2.0).round(), w, h);
-    let knob = |cx: f32, cy: f32| Rect::new(p.x + cx - 22.0, p.y + cy - 22.0, 44.0, 44.0);
-    (p, [
-        (AmpCtl::Time, knob(58.0, 72.0)),
-        (AmpCtl::Slope, knob(150.0, 72.0)),
-        (AmpCtl::Filling, Rect::new(p.x + 18.0, p.y + 126.0, 172.0, 21.0)),
-        (AmpCtl::Tails, Rect::new(p.x + 18.0, p.y + 156.0, 172.0, 18.0)),
-        (AmpCtl::AutoSlice, Rect::new(p.x + 18.0, p.y + 180.0, 172.0, 18.0)),
-    ])
-}
-
-fn drum_panel(ui: &mut Ui, a: &AmpUi, ds: &DrumStretch, lay: &Layout) {
-    let (p, parts) = drum_parts(lay);
-    ui.hit(p, Target::AmpPanel);
-    lemon::outlined(ui.c, p.outset(1.0), 11.0, Color::rgb(0x111111), plug::PANEL_LINE);
-    lemon::plug_panel(ui.c, p);
-    ui.c.text(TITLE, p.x + 12.0, p.y + 7.0, brand::TEXT, "Drum(loop) stretch");
-    lemon::plug_well(ui.c, Rect::new(p.x + 8.0, p.y + 30.0, p.w - 16.0, p.h - 74.0), 7.0);
-    for (ctl, r) in parts {
-        let t = Target::Amp(ctl);
-        ui.hit(r, t);
-        let s = ui.state(r, t, false);
-        match ctl {
-            AmpCtl::Tails | AmpCtl::AutoSlice => {
-                let (on, cap) = if ctl == AmpCtl::Tails { (ds.tails, "INSERT TAILS") } else { (ds.auto, "AUTO-SLICE") };
-                lemon::toggle(ui.c, r.x + 7.0, r.cy(), on, s);
-                ui.c.text(CAPTION, r.x + 18.0, r.y + 3.5, if s.hover { brand::TEXT } else { plug::DIM }, cap);
-            }
-            AmpCtl::Filling => {
-                let col = ui.button(r, t, false, ds.tails);
-                ui.c.text_center(CAPTION, r, col, &format!("FILL: {}", ds.fill.name().to_uppercase()));
-            }
-            _ => {
-                let (v, cap, val) = if ctl == AmpCtl::Time {
-                    (ds.time, "TIME", format!("x{:.3}", ds.ratio()))
-                } else {
-                    let p = (ds.tail * 100.0).round() as i32;
-                    (ds.tail, "TAIL", if p == 0 { "smooth".into() } else { format!("{p:+}%") })
-                };
-                lemon::dial(ui.c, r.cx(), r.cy(), r.w / 2.0, 4.0, (v + 1.0) / 2.0, true, brand::MAIN, s);
-                ui.c.text_center(CAPTION, Rect::new(r.x - 20.0, r.y - 15.0, r.w + 40.0, 12.0), plug::DIM, cap);
-                ui.c.text_center(CAPTION, Rect::new(r.x - 20.0, r.bottom() + 4.0, r.w + 40.0, 12.0), brand::TEXT, &val);
-            }
-        }
-    }
-    panel_buttons(ui, a, p);
-}
-
-/// An envelope tool's panel geometry: one or two knobs.
-pub fn env_parts(lay: &Layout, e: &EnvDlg) -> (Rect, Vec<(AmpCtl, Rect)>) {
-    let (w, h) = (208.0, 190.0f32.min(lay.h - 8.0));
-    let p = Rect::new((lay.wave.cx() - w / 2.0).round(), ((lay.h - h) / 2.0).round(), w, h);
-    let knob = |cx: f32| Rect::new(p.x + cx - 22.0, p.y + 50.0, 44.0, 44.0);
-    let parts = if e.tool.captions().1.is_some() { vec![(AmpCtl::EnvA, knob(58.0)), (AmpCtl::EnvB, knob(150.0))] } else { vec![(AmpCtl::EnvA, knob(104.0))] };
-    (p, parts)
-}
-
-fn env_panel(ui: &mut Ui, a: &AmpUi, e: &EnvDlg, lay: &Layout) {
-    let (p, parts) = env_parts(lay, e);
-    ui.hit(p, Target::AmpPanel);
-    lemon::outlined(ui.c, p.outset(1.0), 11.0, Color::rgb(0x111111), plug::PANEL_LINE);
-    lemon::plug_panel(ui.c, p);
-    ui.c.text(TITLE, p.x + 12.0, p.y + 7.0, brand::TEXT, e.tool.name());
-    lemon::plug_well(ui.c, Rect::new(p.x + 8.0, p.y + 30.0, p.w - 16.0, p.h - 74.0), 7.0);
-    let (ca, cb) = e.tool.captions();
-    let (ta, tb) = e.texts();
-    for (ctl, r) in parts {
-        let t = Target::Amp(ctl);
-        ui.hit(r, t);
-        let s = ui.state(r, t, false);
-        let (v, cap, val) = if ctl == AmpCtl::EnvA { (e.a, ca, &ta) } else { (e.b, cb.unwrap_or(""), &tb) };
-        let centred = e.tool == crate::env::EnvTool::Scale;
-        lemon::dial(ui.c, r.cx(), r.cy(), r.w / 2.0, 4.0, (v + 1.0) / 2.0, centred, brand::MAIN, s);
-        ui.c.text_center(CAPTION, Rect::new(r.x - 20.0, r.y - 15.0, r.w + 40.0, 12.0), plug::DIM, cap);
-        ui.c.text_center(CAPTION, Rect::new(r.x - 20.0, r.bottom() + 4.0, r.w + 40.0, 12.0), brand::TEXT, val);
-    }
-    panel_buttons(ui, a, p);
-}
-
-/// The Convolution reverb panel's geometry: Dry, Wet and Decay knobs, then the Add tail and Clipboard switches.
-pub fn reverb_parts(lay: &Layout) -> (Rect, [(AmpCtl, Rect); 5]) {
-    let (w, h) = (208.0, 290.0f32.min(lay.h - 8.0));
-    let p = Rect::new((lay.wave.cx() - w / 2.0).round(), ((lay.h - h) / 2.0).round(), w, h);
-    let knob = |cx: f32, cy: f32| Rect::new(p.x + cx - 22.0, p.y + cy - 22.0, 44.0, 44.0);
-    (p, [
-        (AmpCtl::Dry, knob(58.0, 72.0)),
-        (AmpCtl::Wet, knob(150.0, 72.0)),
-        (AmpCtl::Decay, knob(104.0, 160.0)),
-        (AmpCtl::Tail, Rect::new(p.x + 18.0, p.y + 204.0, 80.0, 18.0)),
-        (AmpCtl::ClipImpulse, Rect::new(p.x + 104.0, p.y + 204.0, 92.0, 18.0)),
-    ])
-}
-
-fn reverb_panel(ui: &mut Ui, a: &AmpUi, r: &Reverb, lay: &Layout) {
-    let (p, parts) = reverb_parts(lay);
-    ui.hit(p, Target::AmpPanel);
-    lemon::outlined(ui.c, p.outset(1.0), 11.0, Color::rgb(0x111111), plug::PANEL_LINE);
-    lemon::plug_panel(ui.c, p);
-    ui.c.text(TITLE, p.x + 12.0, p.y + 7.0, brand::TEXT, "Convolution reverb");
-    lemon::plug_well(ui.c, Rect::new(p.x + 8.0, p.y + 30.0, p.w - 16.0, p.h - 74.0), 7.0);
-    for (ctl, rr) in parts {
-        let t = Target::Amp(ctl);
-        ui.hit(rr, t);
-        let s = ui.state(rr, t, false);
-        if matches!(ctl, AmpCtl::Tail | AmpCtl::ClipImpulse) {
-            let (on, cap) = if ctl == AmpCtl::Tail { (r.tail, "ADD TAIL") } else { (r.clip, "CLIPBOARD") };
-            lemon::toggle(ui.c, rr.x + 7.0, rr.cy(), on, s);
-            ui.c.text(CAPTION, rr.x + 18.0, rr.y + 3.5, if s.hover { brand::TEXT } else { plug::DIM }, cap);
-            continue;
-        }
-        let (v, cap, val) = match ctl {
-            AmpCtl::Dry => (r.dry, "DRY", format!("x{:.2}", Reverb::gain(r.dry))),
-            AmpCtl::Wet => (r.wet, "WET", format!("x{:.2}", Reverb::gain(r.wet))),
-            _ => (r.decay, "DECAY", if r.clip { "clipboard".into() } else { format!("{:.2} s", r.seconds()) }),
-        };
-        lemon::dial(ui.c, rr.cx(), rr.cy(), rr.w / 2.0, 4.0, (v + 1.0) / 2.0, false, brand::MAIN, s);
-        ui.c.text_center(CAPTION, Rect::new(rr.x - 20.0, rr.y - 15.0, rr.w + 40.0, 12.0), plug::DIM, cap);
-        ui.c.text_center(CAPTION, Rect::new(rr.x - 20.0, rr.bottom() + 4.0, rr.w + 40.0, 12.0), brand::TEXT, &val);
-    }
-    panel_buttons(ui, a, p);
-}
-
-/// Vocal denoise / isolator's and Deverb's panel geometry: the MIX knob, and Deverb's SOURCE button.
-pub fn restore_parts(lay: &Layout, a: &AmpUi) -> (Rect, Vec<(AmpCtl, Rect)>) {
-    let (w, h) = (240.0, 190.0f32.min(lay.h - 8.0));
-    let p = Rect::new((lay.wave.cx() - w / 2.0).round(), ((lay.h - h) / 2.0).round(), w, h);
-    let knob = |cx: f32| Rect::new(p.x + cx - 22.0, p.y + 50.0, 44.0, 44.0);
-    let parts = if a.deverb.is_some() {
-        vec![(AmpCtl::DeverbMix, knob(66.0)), (AmpCtl::Source, Rect::new(p.x + 122.0, p.y + 61.0, 102.0, 22.0))]
-    } else {
-        vec![(AmpCtl::VoiceMix, knob(120.0))]
-    };
-    (p, parts)
-}
-
-fn restore_panel(ui: &mut Ui, a: &AmpUi, lay: &Layout) {
-    let (p, parts) = restore_parts(lay, a);
-    ui.hit(p, Target::AmpPanel);
-    lemon::outlined(ui.c, p.outset(1.0), 11.0, Color::rgb(0x111111), plug::PANEL_LINE);
-    lemon::plug_panel(ui.c, p);
-    let title = if a.deverb.is_some() { "Deverb" } else { "Vocal denoise / isolator" };
-    ui.c.text(TITLE, p.x + 12.0, p.y + 7.0, brand::TEXT, title);
-    lemon::plug_well(ui.c, Rect::new(p.x + 8.0, p.y + 30.0, p.w - 16.0, p.h - 74.0), 7.0);
-    let dv = a.deverb.unwrap_or_default();
-    for (ctl, r) in parts {
-        let t = Target::Amp(ctl);
-        ui.hit(r, t);
-        let s = ui.state(r, t, false);
-        if ctl == AmpCtl::Source {
-            let col = ui.button(r, t, false, true);
-            ui.c.text_center(CAPTION, r, col, &format!("SOURCE: {}", dv.source().to_uppercase()));
-            continue;
-        }
-        let (v, centred, val) = match a.voice {
-            Some(iso) => {
-                let pc = (iso.mix * 100.0).round() as i32;
-                let val = match pc {
-                    0 => "original".to_string(),
-                    p if p > 0 => format!("{p}% vocal"),
-                    p => format!("{}% noise", -p),
-                };
-                (iso.mix, true, val)
-            }
-            None => (dv.mix * 2.0 - 1.0, false, format!("{:.0}%", dv.mix * 100.0)),
-        };
-        lemon::dial(ui.c, r.cx(), r.cy(), r.w / 2.0, 4.0, (v + 1.0) / 2.0, centred, brand::MAIN, s);
-        ui.c.text_center(CAPTION, Rect::new(r.x - 20.0, r.y - 15.0, r.w + 40.0, 12.0), plug::DIM, "MIX");
-        ui.c.text_center(CAPTION, Rect::new(r.x - 30.0, r.bottom() + 4.0, r.w + 60.0, 12.0), brand::TEXT, &val);
-    }
-    panel_buttons(ui, a, p);
-}
-
-/// The spectral panels' geometry (Equalize, Blur, Clean up): the panel, its curve box, and the controls under the box.
-pub fn spectral_parts(lay: &Layout, a: &AmpUi) -> (Rect, Rect, Vec<(AmpCtl, Rect)>) {
-    // Clean up has a second row of controls.
-    let extra = if a.clean.is_some() { 74.0 } else { 0.0 };
-    let (w, h) = (432.0, (330.0f32 + extra).min(lay.h - 8.0));
-    let p = Rect::new((lay.wave.cx() - w / 2.0).round(), ((lay.h - h) / 2.0).round(), w, h);
-    let bx = Rect::new(p.x + 18.0, p.y + 40.0, p.w - 36.0, (p.h - 174.0 - extra).max(60.0));
-    let cy = bx.bottom() + 51.0;
-    let cy2 = cy + 74.0;
-    let knob = |cx: f32| Rect::new(p.x + cx - 18.0, cy - 18.0, 36.0, 36.0);
-    let switch = |x: f32, dy: f32| Rect::new(p.x + x, cy + dy - 9.0, 96.0, 18.0);
-    let mut c = vec![(AmpCtl::Curve, bx)];
-    if a.eq.is_some() {
-        c.extend([(AmpCtl::Mix, knob(60.0)), (AmpCtl::Smooth, switch(104.0, 0.0))]);
-    } else if a.blur.is_some() {
-        c.extend([(AmpCtl::Amount, knob(60.0)), (AmpCtl::Offset, knob(130.0)), (AmpCtl::Mix, knob(200.0))]);
-    } else {
-        c.extend([
-            (AmpCtl::Threshold, knob(60.0)),
-            (AmpCtl::Reduction, knob(130.0)),
-            (AmpCtl::NoiseOnly, switch(172.0, -11.0)),
-            (AmpCtl::Declip, switch(172.0, 11.0)),
-            (AmpCtl::ClipLevel, knob(300.0)),
-            (AmpCtl::Acquire, Rect::new(p.right() - 94.0, cy - 12.0, 76.0, 24.0)),
-            (AmpCtl::Sensitivity, Rect::new(p.x + 42.0, cy2 - 18.0, 36.0, 36.0)),
-            (AmpCtl::Declick, Rect::new(p.x + 90.0, cy2 - 9.0, 78.0, 18.0)),
-            (AmpCtl::Mode, Rect::new(p.x + 172.0, cy2 - 11.0, 100.0, 22.0)),
-            (AmpCtl::Safe, Rect::new(p.x + 282.0, cy2 - 9.0, 96.0, 18.0)),
-        ]);
-    }
-    (p, bx, c)
-}
-
-/// A spectral panel's knob reading (0 to 1 or −1 to 1 settings), its caption and value text.
-fn spectral_knob(a: &AmpUi, ctl: AmpCtl) -> (f32, bool, &'static str, String) {
-    let (eq, bl, cl) = (a.eq.unwrap_or_default(), a.blur.unwrap_or_default(), a.clean.unwrap_or_default());
-    match ctl {
-        AmpCtl::Mix if a.eq.is_some() => (eq.mix, false, "MIX", format!("{:.0}%", eq.mix * 100.0)),
-        AmpCtl::Mix => (bl.mix, false, "MIX", format!("{:.0}%", bl.mix * 100.0)),
-        AmpCtl::Amount => (bl.amount, false, "AMOUNT", format!("{:.0} ms", bl.seconds() * 1000.0)),
-        AmpCtl::Offset => ((bl.offset + 1.0) / 2.0, true, "OFFSET", format!("{:+.0}%", bl.offset * 100.0)),
-        AmpCtl::Threshold => (cl.denoise.threshold, false, "THRESHOLD", format!("+{:.1} dB", cl.denoise.threshold_db())),
-        AmpCtl::Reduction => (cl.denoise.amount, false, "AMOUNT", format!("-{:.0} dB", cl.denoise.reduction_db())),
-        AmpCtl::Sensitivity => (cl.sensitivity, false, "SENSITIVITY", format!("{:.0}%", cl.sensitivity * 100.0)),
-        _ => (cl.level, false, "CLIP LEVEL", format!("{:.0}%", cl.clip_ratio() * 100.0)),
-    }
-}
-
-fn spectral_panel(ui: &mut Ui, a: &AmpUi, lay: &Layout) {
-    let (p, bx, parts) = spectral_parts(lay, a);
-    ui.hit(p, Target::AmpPanel);
-    lemon::outlined(ui.c, p.outset(1.0), 11.0, Color::rgb(0x111111), plug::PANEL_LINE);
-    lemon::plug_panel(ui.c, p);
-    let title = if a.eq.is_some() {
-        "Equalize"
-    } else if a.blur.is_some() {
-        "Blur"
-    } else {
-        "Clean up (denoise)"
-    };
-    ui.c.text(TITLE, p.x + 12.0, p.y + 7.0, brand::TEXT, title);
-    lemon::plug_well(ui.c, Rect::new(p.x + 8.0, p.y + 30.0, p.w - 16.0, p.h - 74.0), 7.0);
-    // The curve box: a dark field with its grid, what lies behind the curve, then the curve.
-    lemon::outlined(ui.c, bx.outset(1.0), 0.0, plug::PANEL_LINE, plug::BG);
-    let bx_x = |x: f64| bx.x + x as f32 * bx.w;
-    let bx_y = |v: f32| bx.bottom() - v.clamp(0.0, 1.0) * bx.h;
-    if a.blur.is_none() {
-        for hz in [50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0] {
-            let x = bx_x(spectral::eq_x(hz)).round();
-            ui.c.fill_rect(Rect::new(x, bx.y, 1.0, bx.h), plug::TICK.with_alpha(60));
-            let label = if hz >= 1000.0 { format!("{}k", hz / 1000.0) } else { format!("{hz}") };
-            ui.c.text_center(CAPTION, Rect::new(x - 20.0, bx.bottom() + 3.0, 40.0, 11.0), plug::DIM, &label);
-        }
-    } else {
-        for (x, label) in [(0.0, "BEFORE"), (0.5, "CENTRE"), (1.0, "AFTER")] {
-            let px = bx_x(x).round();
-            ui.c.fill_rect(Rect::new(px.min(bx.right() - 1.0), bx.y, 1.0, bx.h), plug::TICK.with_alpha(60));
-            ui.c.text_center(CAPTION, Rect::new(px - 30.0, bx.bottom() + 3.0, 60.0, 11.0), plug::DIM, label);
-        }
-    }
-    ui.c.fill_rect(Rect::new(bx.x, (bx.y + bx.h / 2.0).round(), bx.w, 1.0), plug::TICK.with_alpha(90));
-    let back = &ui.st.backdrop;
-    if !back.is_empty() && a.blur.is_none() {
-        let cw = bx.w / back.len() as f32;
-        let mut pts = vec![(bx.x, bx.bottom())];
-        pts.extend(back.iter().enumerate().map(|(i, v)| (bx.x + (i as f32 + 0.5) * cw, bx_y(*v))));
-        pts.push((bx.right(), bx.bottom()));
-        ui.c.fill_polygon(&pts, LEFT_WAVE.with_alpha(50));
-        if let Some(cl) = a.clean {
-            // The threshold over the profile: what stays under it is taken away.
-            let up = cl.denoise.threshold_db() as f32 / 96.0;
-            let line: Vec<(f32, f32)> = back.iter().enumerate().map(|(i, v)| (bx.x + (i as f32 + 0.5) * cw, bx_y(v + up))).collect();
-            ui.c.polyline(&line, 1.4, FLAG);
-        }
-    }
-    let t = Target::Amp(AmpCtl::Curve);
-    ui.hit(bx, t);
-    if a.clean.is_some() {
-        if !ui.st.profile {
-            ui.c.text_center(LABEL, bx, plug::DIM, "Noise profile required: select noise only, then ACQUIRE (Alt+U)");
-        }
-    } else {
-        let smooth = a.eq.is_none_or(|e| e.smooth);
-        let pts: Vec<(f32, f32)> =
-            (0..=bx.w as usize).map(|i| (bx.x + i as f32, bx_y(spectral::curve_at(a.curve.points(), i as f64 / bx.w as f64, smooth)))).collect();
-        ui.c.polyline(&pts, 1.6, FLAG);
-        for q in a.curve.points() {
-            let (x, y) = (bx_x(q.pos), bx_y(q.v));
-            ui.c.fill_circle(x, y, POINT_R, plug::BG);
-            ui.c.stroke_circle(x, y, POINT_R, 1.4, FLAG);
-        }
-    }
-    for (ctl, r) in parts.into_iter().skip(1) {
-        let t = Target::Amp(ctl);
-        match ctl {
-            AmpCtl::Smooth | AmpCtl::NoiseOnly | AmpCtl::Declip | AmpCtl::Declick | AmpCtl::Safe => {
-                ui.hit(r, t);
-                let s = ui.state(r, t, false);
-                let (on, cap) = match ctl {
-                    AmpCtl::Smooth => (a.eq.is_some_and(|e| e.smooth), "SMOOTH"),
-                    AmpCtl::NoiseOnly => (a.clean.is_some_and(|c| c.denoise.noise_only), "NOISE ONLY"),
-                    AmpCtl::Declick => (a.clean.is_some_and(|c| c.declick), "DECLICKER"),
-                    AmpCtl::Safe => (a.clean.is_some_and(|c| c.safe), "SAFE MODE"),
-                    _ => (a.clean.is_some_and(|c| c.declip), "DECLIPPER"),
-                };
-                lemon::toggle(ui.c, r.x + 7.0, r.cy(), on, s);
-                ui.c.text(CAPTION, r.x + 18.0, r.y + 3.5, if s.hover { brand::TEXT } else { plug::DIM }, cap);
-            }
-            AmpCtl::Acquire => {
-                let col = ui.button(r, t, false, true);
-                ui.c.text_center(LABEL, r, col, "ACQUIRE");
-            }
-            AmpCtl::Mode => {
-                let cl = a.clean.unwrap_or_default();
-                let col = ui.button(r, t, false, cl.declip);
-                ui.c.text_center(CAPTION, r, col, &format!("MODE: {}", cl.mode.name().to_uppercase()));
-            }
-            _ => {
-                ui.hit(r, t);
-                let s = ui.state(r, t, false);
-                let (v, centred, cap, val) = spectral_knob(a, ctl);
-                lemon::dial(ui.c, r.cx(), r.cy(), r.w / 2.0, 4.0, v, centred, brand::MAIN, s);
-                ui.c.text_center(CAPTION, Rect::new(r.x - 20.0, r.y - 15.0, r.w + 40.0, 12.0), plug::DIM, cap);
-                ui.c.text_center(CAPTION, Rect::new(r.x - 20.0, r.bottom() + 4.0, r.w + 40.0, 12.0), brand::TEXT, &val);
-            }
-        }
-    }
-    panel_buttons(ui, a, p);
-}
-
-/// Reset, Preview and Accept along a tool panel's bottom, and its close box.
-fn panel_buttons(ui: &mut Ui, a: &AmpUi, p: Rect) {
-    let by = p.bottom() - 37.0;
-    let ready = a.ready(ui.st.profile);
-    let buttons = [(AmpCtl::Reset, "RESET", 8.0, 58.0), (AmpCtl::Preview, "PREVIEW", 72.0, 64.0), (AmpCtl::Accept, "ACCEPT", 140.0, 60.0)];
-    for (ctl, label, x, w) in buttons {
-        let r = Rect::new(p.x + x, by, w, 29.0);
-        let col = ui.button(r, Target::Amp(ctl), ctl == AmpCtl::Preview && a.previewing, ctl == AmpCtl::Reset || ready);
-        ui.c.text_center(LABEL, r, col, label);
-    }
-    let cr = Rect::new(p.right() - 26.0, p.y + 5.0, 20.0, 20.0);
-    let col = ui.flat(cr, Target::Amp(AmpCtl::Close), false, true);
-    ui.c.icon_stroke(&tabler::X, cr.inset(4.0), col, 2.0);
-}
-
 fn amp_panel(ui: &mut Ui, a: &AmpUi, lay: &Layout) {
     ui.c.fill_rect(Rect::new(0.0, 0.0, lay.w, lay.h), plug::BG.with_alpha(140));
-    if let Some(st) = &a.stretch {
-        return stretch_panel(ui, a, st, lay);
-    }
-    if let Some(ds) = &a.drum {
-        return drum_panel(ui, a, ds, lay);
-    }
-    if let Some(e) = &a.env {
-        return env_panel(ui, a, e, lay);
-    }
-    if let Some(r) = &a.reverb {
-        return reverb_panel(ui, a, r, lay);
-    }
-    if a.voice.is_some() || a.deverb.is_some() {
-        return restore_panel(ui, a, lay);
-    }
-    if a.eq.is_some() || a.blur.is_some() || a.clean.is_some() {
-        return spectral_panel(ui, a, lay);
-    }
     let (p, parts) = amp_parts(lay);
     ui.hit(p, Target::AmpPanel);
     lemon::outlined(ui.c, p.outset(1.0), 11.0, Color::rgb(0x111111), plug::PANEL_LINE);
@@ -1505,7 +981,16 @@ fn amp_panel(ui: &mut Ui, a: &AmpUi, lay: &Layout) {
             _ => {}
         }
     }
-    panel_buttons(ui, a, p);
+    let by = p.bottom() - 37.0;
+    let buttons = [(AmpCtl::Reset, "RESET", 8.0, 58.0), (AmpCtl::Preview, "PREVIEW", 72.0, 64.0), (AmpCtl::Accept, "ACCEPT", 140.0, 60.0)];
+    for (ctl, label, x, w) in buttons {
+        let r = Rect::new(p.x + x, by, w, 29.0);
+        let col = ui.button(r, Target::Amp(ctl), ctl == AmpCtl::Preview && a.previewing, true);
+        ui.c.text_center(LABEL, r, col, label);
+    }
+    let cr = Rect::new(p.right() - 26.0, p.y + 5.0, 20.0, 20.0);
+    let col = ui.flat(cr, Target::Amp(AmpCtl::Close), false, true);
+    ui.c.icon_stroke(&tabler::X, cr.inset(4.0), col, 2.0);
 }
 
 /// Draws a glyph into `r`.
@@ -1672,7 +1157,7 @@ pub fn hint(t: &Target, l: &HintCtx) -> String {
         Target::Menu(MenuId::Options) => "Options".into(),
         Target::Menu(m) => MENUS.iter().find(|(id, _)| id == m).map_or("", |(_, n)| n).to_string(),
         Target::Tool(i) => TOOLS[*i].hint.to_string(),
-        Target::Wordmark => "Tesla: Lemon Studio's audio editor and recorder".into(),
+        Target::Wordmark => "Tesla: ML Studio's audio editor and recorder".into(),
         Target::Mute => "Mute input".into(),
         Target::Format => "Channels / press to convert".into(),
         Target::Wave => String::new(),
@@ -1683,13 +1168,13 @@ pub fn hint(t: &Target, l: &HintCtx) -> String {
         Target::ScrollStep(true) => "Scroll right".into(),
         Target::Bottom(Bt::Undo) => "Undo / undo history".into(),
         Target::Bottom(Bt::Mode(0)) => "Edit waveform".into(),
-        Target::Bottom(Bt::Mode(1)) => "Edit panning envelope".into(),
-        Target::Bottom(Bt::Mode(2)) => "Edit volume envelope".into(),
-        Target::Bottom(Bt::Mode(3)) => "Edit stereo separation envelope".into(),
-        Target::Bottom(Bt::Mode(_)) => "Edit all-purpose envelope".into(),
+        Target::Bottom(Bt::Mode(1)) => "Edit panning envelope (later version)".into(),
+        Target::Bottom(Bt::Mode(2)) => "Edit volume envelope (later version)".into(),
+        Target::Bottom(Bt::Mode(3)) => "Edit stereo separation envelope (later version)".into(),
+        Target::Bottom(Bt::Mode(_)) => "Edit all-purpose envelope (later version)".into(),
         Target::Bottom(Bt::Follow) => "Scroll to follow playback".into(),
         Target::Bottom(Bt::Spectrum) => "Display waveform / spectrum".into(),
-        Target::Bottom(Bt::Threshold) => "View noise threshold mark".into(),
+        Target::Bottom(Bt::Threshold) => "View noise threshold mark (later version)".into(),
         Target::Bottom(Bt::Regions) => "View regions / markers / loop".into(),
         Target::Bottom(Bt::Freeze) => "Freeze editing (markers and regions stay put)".into(),
         Target::Bottom(Bt::ClickFree) => "Click-free (smooth) editing".into(),
@@ -1702,42 +1187,14 @@ pub fn hint(t: &Target, l: &HintCtx) -> String {
         Target::Amp(AmpCtl::Volume) => "Volume".into(),
         Target::Amp(AmpCtl::Right) => "Right channel volume".into(),
         Target::Amp(AmpCtl::Sep) => "Stereo separation".into(),
-        Target::Amp(AmpCtl::Pitch) => "Pitch".into(),
-        Target::Amp(AmpCtl::Time) => "Time (length)".into(),
-        Target::Amp(AmpCtl::Formant) => "Formant".into(),
-        Target::Amp(AmpCtl::Preserve) => "Formant preservation".into(),
-        Target::Amp(AmpCtl::Slope) => "Tail envelope's slope (the filled tail's fade)".into(),
-        Target::Amp(AmpCtl::Tails) => "Insert tails (fill the gaps between slices)".into(),
-        Target::Amp(AmpCtl::AutoSlice) => "Auto-slice (at the detected transients, not the regions)".into(),
-        Target::Amp(AmpCtl::Filling) => "Filling method (click for the next)".into(),
-        Target::Amp(AmpCtl::Dry) => "Dry (the original)".into(),
-        Target::Amp(AmpCtl::Wet) => "Wet (the reverb)".into(),
-        Target::Amp(AmpCtl::Decay) => "Decay of the default impulse".into(),
-        Target::Amp(AmpCtl::Tail) => "Add tail (the range grows by the reverb's tail)".into(),
-        Target::Amp(AmpCtl::ClipImpulse) => "Use the clipboard as the impulse".into(),
-        Target::Amp(AmpCtl::Curve) => "Click to add a point, drag to move it, right-click to delete it".into(),
-        Target::Amp(AmpCtl::Mix) => "Mix (dry to processed)".into(),
-        Target::Amp(AmpCtl::Smooth) => "Smooth the curve between its points".into(),
-        Target::Amp(AmpCtl::Amount) => "Amount (the blur's length)".into(),
-        Target::Amp(AmpCtl::Offset) => "Offset (the blur before or after the sound)".into(),
-        Target::Amp(AmpCtl::Threshold) => "Threshold over the noise profile".into(),
-        Target::Amp(AmpCtl::Reduction) => "Amount of noise reduction".into(),
-        Target::Amp(AmpCtl::NoiseOnly) => "Output noise only (what the denoiser takes away)".into(),
-        Target::Amp(AmpCtl::Declip) => "Declipper (redraws flattened tops)".into(),
-        Target::Amp(AmpCtl::ClipLevel) => "Declipper threshold (of the range's peak)".into(),
-        Target::Amp(AmpCtl::Mode) => "Declipper mode (click for the next)".into(),
-        Target::Amp(AmpCtl::Safe) => "Safe mode (long runs left alone, tops kept near the clip level)".into(),
-        Target::Amp(AmpCtl::Declick) => "Declicker (redraws clicks and pops)".into(),
-        Target::Amp(AmpCtl::Sensitivity) => "Declicker sensitivity".into(),
-        Target::Amp(AmpCtl::EnvA) | Target::Amp(AmpCtl::EnvB) => "Drag to change, double-click to reset".into(),
-        Target::Amp(AmpCtl::VoiceMix) | Target::Amp(AmpCtl::DeverbMix) => "Mix: drag to change, double-click to reset".into(),
-        Target::Amp(AmpCtl::Source) => "Source: General (music, drums) or Vocal (a voice, spoken or sung)".into(),
-        Target::Amp(AmpCtl::Acquire) => "Acquire noise profile from the selection (Alt+U)".into(),
         Target::Amp(AmpCtl::Reset) => "Reset".into(),
         Target::Amp(AmpCtl::Preview) => "Preview".into(),
         Target::Amp(AmpCtl::Accept) => "Accept".into(),
         Target::Amp(AmpCtl::Close) => "Close (cancel)".into(),
         Target::AmpPanel => String::new(),
+        Target::ReturnTrack => "Apply edited audio to the original Playlist clip".into(),
+        Target::Cleanup(_) => "Clean up audio".into(),
+        Target::Stretch(_) => "Time stretch / pitch shift".into(),
     }
 }
 
@@ -1745,4 +1202,45 @@ pub fn hint(t: &Target, l: &HintCtx) -> String {
 pub struct HintCtx {
     pub when: u8,
     pub max: u8,
+}
+
+fn stretch_panel(ui:&mut Ui,a:&crate::stretch::Panel,lay:&Layout){
+    ui.c.fill_rect(Rect::new(0.,0.,lay.w,lay.h),plug::BG.with_alpha(180));
+    let p=Rect::new((lay.w-400.)/2.,(lay.h-226.)/2.,400.,226.);
+    ui.hit(p,Target::Stretch(255));lemon::plug_panel(ui.c,p);
+    ui.c.text(TITLE,p.x+16.,p.y+12.,brand::TEXT,"Time stretch / pitch shift");
+    ui.c.text(CAPTION,p.x+16.,p.y+38.,plug::DIM,"SIGNALSMITH • INDEPENDENT DURATION AND PITCH");
+    for (y,label,value,minus,edit,plus) in [(p.y+62.,"DURATION",format!("{:.1}%",a.percent),0,1,2),(p.y+106.,"PITCH",format!("{:+.2} semitones",a.semitones),3,4,5)]{
+        ui.c.text(CAPTION,p.x+16.,y+9.,plug::DIM,label);
+        for (x,w,id,text) in [(p.x+114.,30.,minus,"−"),(p.x+150.,174.,edit,value.as_str()),(p.x+330.,30.,plus,"+")]{
+            let r=Rect::new(x,y,w,30.);let col=ui.button(r,Target::Stretch(id),false,!a.busy);ui.c.text_center(LABEL,r,col,text);
+        }
+    }
+    ui.c.text_clip(CAPTION,p.x+16.,p.y+150.,p.w-32.,plug::DIM,&a.message);
+    for (x,w,id,label) in [(16.,72.,6,"Reset"),(196.,88.,7,if a.busy{"Processing…"}else{"Apply"}),(292.,92.,8,"Cancel")]{
+        let r=Rect::new(p.x+x,p.bottom()-42.,w,30.);
+        let col=ui.button(r,Target::Stretch(id),false,id==8||!a.busy);
+        if id==7&&!a.busy {ui.c.fill_rrect(r,4.,brand::MAIN);ui.c.text_center(LABEL,r,Color::rgb(0x000000),label);}else{ui.c.text_center(LABEL,r,col,label);}
+    }
+}
+
+fn cleanup_panel(ui:&mut Ui,a:&crate::cleanup::Panel,lay:&Layout){
+ ui.c.fill_rect(Rect::new(0.,0.,lay.w,lay.h),plug::BG.with_alpha(210));
+ let p=Rect::new((lay.w-620.)/2.,(lay.h-310.)/2.,620.,310.);ui.hit(p,Target::Cleanup(255));lemon::plug_panel(ui.c,p);
+ ui.c.text(Font::new(18).bold(),p.x+18.,p.y+14.,brand::MAIN,if a.mode.deverb() {"Deverb"} else {"Clean up audio"});
+ ui.c.text(SMALL,p.x+18.,p.y+42.,plug::DIM,if a.linked{"Apply to track replaces this clip only. Rendered tuning/timing stays baked."}else if a.mode.deverb(){"Reduce late room reflections. Compare the preview with the original."}else{"Reduce steady hiss, hum and background noise. Preview before applying."});
+ let enabled=!a.busy&&!a.awaiting;
+ let modes = if a.mode.deverb() {[(18.,140.,13,"General"),(166.,140.,14,"Vocal")]}
+    else {[(18.,200.,4,"Learn selected noise"),(226.,166.,11,"Automatic estimate")]};
+ for (x,w,id,text) in modes{let r=Rect::new(p.x+x,p.y+65.,w,28.);let col=ui.button(r,Target::Cleanup(id),(id==13&&a.mode==crate::cleanup::Mode::General)||(id==14&&a.mode==crate::cleanup::Mode::Vocal),enabled);ui.c.text_center(VALUE,r,col,text);}
+ for (y,label,value,minus,plus) in [(106.,if a.mode.deverb(){"AMOUNT"}else{"REDUCTION"},if a.mode.deverb(){format!("{:.0}%",a.reduction)}else{format!("{:.0} dB",a.reduction)},0,1),(148.,"SENSITIVITY",format!("{:.2}x",a.sensitivity),2,3)]{
+  if a.mode.deverb()&&minus==2 {continue;}
+  ui.c.text(VALUE,p.x+18.,p.y+y+8.,plug::DIM,label);
+  for (x,id,text) in [(164.,minus,"−"),(350.,plus,"+")]{let r=Rect::new(p.x+x,p.y+y,32.,28.);let col=ui.button(r,Target::Cleanup(id),false,enabled);ui.c.text_center(VALUE,r,col,text);}
+  ui.c.text_center(VALUE,Rect::new(p.x+202.,p.y+y,140.,28.),brand::TEXT,&value);
+ }
+ ui.c.text_clip(SMALL,p.x+18.,p.y+192.,p.w-36.,brand::TEXT,&a.message);
+ if a.busy{ui.c.fill_rrect(Rect::new(p.x+18.,p.y+214.,p.w-36.,4.),2.,plug::DIM);ui.c.fill_rrect(Rect::new(p.x+18.,p.y+214.,(p.w-36.)*a.progress as f32/100.,4.),2.,brand::MAIN);}
+ for (x,w,id,text) in [(18.,100.,6,"Original"),(126.,140.,7,if a.busy{"Processing…"}else{"Preview cleaned"}),(274.,64.,10,"Stop")]{let r=Rect::new(p.x+x,p.y+230.,w,28.);let col=ui.button(r,Target::Cleanup(id),false,enabled);ui.c.text_center(VALUE,r,col,text);}
+ for (x,w,id,text) in [(18.,130.,8,if a.mode.deverb(){"Apply Deverb"}else{"Apply cleanup"}),(156.,154.,12,"Apply to track"),(498.,104.,9,"Close")]{if id==12&&!a.linked{continue;}let r=Rect::new(p.x+x,p.y+270.,w,28.);let on=if id==9{!a.awaiting}else{enabled&&a.ready};let col=ui.button(r,Target::Cleanup(id),false,on);if id!=9&&on{ui.c.fill_rrect(r,4.,brand::MAIN);ui.c.text_center(VALUE,r,Color::rgb(0),text);}else{ui.c.text_center(VALUE,r,col,text);}}
 }

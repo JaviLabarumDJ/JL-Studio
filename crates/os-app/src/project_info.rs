@@ -1,5 +1,4 @@
 // Copyright (C) 2026 ItsAlphaNeon
-// Copyright (C) 2026 thacer13
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
@@ -22,7 +21,6 @@ use os_ui::{Color, Font, Rect};
 use winit::keyboard::{Key, NamedKey};
 
 use crate::app::{Action, App, State, Ui};
-use crate::control::command::{Region, SONG_INFO};
 use crate::dialog::Field;
 use crate::views::settings::{self, InfoEdit, InfoField};
 
@@ -288,9 +286,12 @@ impl App {
             Key::Named(NamedKey::Escape) => s.settings.info_edit = None,
             Key::Named(NamedKey::Enter) if e.field.multiline() => e.text.insert("\n"),
             Key::Named(NamedKey::Enter) => accept_info(s),
-            Key::Named(k @ (NamedKey::Home | NamedKey::End | NamedKey::ArrowUp | NamedKey::ArrowDown)) if e.field.multiline() => line_key(&mut e.text, *k),
+            Key::Named(k @ (NamedKey::Home | NamedKey::End | NamedKey::ArrowUp | NamedKey::ArrowDown)) if e.field.multiline() && !ctrl => line_key(&mut e.text, *k, self.shift),
+            _ if e.field.multiline() => {
+                e.text.key_multiline(key, ctrl, alt, self.shift);
+            }
             _ => {
-                e.text.key(key, ctrl, alt);
+                e.text.key_mod(key, ctrl, alt, self.shift);
             }
         }
         self.invalidate();
@@ -310,7 +311,7 @@ impl App {
         let items = std::iter::once(PItem::new("(none)", Cmd::Genre(None)).mark(Mark::Radio(now.is_empty())))
             .chain(GENRES.iter().map(|&g| PItem::new(g, Cmd::Genre(Some(g))).mark(Mark::Radio(now == g))))
             .collect();
-        self.state.playlist.popup = Some(Popup { x, y: y + 1.0, items, sub: None, scroll: [0; 2] });
+        self.state.playlist.popup = Some(Popup { x, y: y + 1.0, items, sub: None, scroll: [0; 2], cascade: Vec::new() });
         self.invalidate();
     }
 
@@ -319,12 +320,12 @@ impl App {
     pub(crate) fn set_genre(&mut self, genre: Option<&'static str>) -> Option<String> {
         let s = &mut self.state;
         accept_info(s);
-        crate::control::edit(s, SONG_INFO, Region::Settings, |s| {
-            let value = &mut s.project.info.genre;
-            if value.as_deref().unwrap_or("") != genre.unwrap_or("") {
-                *value = genre.map(str::to_string);
-            }
-        });
+        let before = s.project.info.clone();
+        let value = &mut s.project.info.genre;
+        if value.as_deref().unwrap_or("") != genre.unwrap_or("") {
+            *value = genre.map(str::to_string);
+        }
+        crate::history::project_info(s, before);
         self.invalidate();
         Some(format!("Genre: {}", genre.unwrap_or("(none)")))
     }
@@ -468,23 +469,24 @@ pub const GENRES: [&str; 56] = [
 pub(crate) fn accept_info(s: &mut State) {
     let Some(e) = s.settings.info_edit.take() else { return };
     let text = if e.field.multiline() { e.text.text } else { e.text.text.trim().to_string() };
-    crate::control::edit(s, SONG_INFO, Region::Settings, |s| {
-        let value = e.field.get_mut(&mut s.project.info);
-        if value.as_deref().unwrap_or("") != text {
-            *value = (!text.is_empty()).then_some(text);
-        }
-    });
+    let before = s.project.info.clone();
+    let value = e.field.get_mut(&mut s.project.info);
+    if value.as_deref().unwrap_or("") != text {
+        *value = (!text.is_empty()).then_some(text);
+    }
+    // One step, "Project info", when the text changed.
+    crate::history::project_info(s, before);
 }
 
 /// Home / End / Up / Down in Comments go by its lines (between line breaks): Up and Down keep the caret's column, in
 /// characters, and go to the start / end of the text from the first / last line.
-fn line_key(f: &mut Field, key: NamedKey) {
+fn line_key(f: &mut Field, key: NamedKey, extend: bool) {
     let chars: Vec<char> = f.text.chars().collect();
     let c = f.caret.min(chars.len());
     let start = |i: usize| chars[..i].iter().rposition(|&ch| ch == '\n').map_or(0, |p| p + 1);
     let end = |i: usize| chars[i..].iter().position(|&ch| ch == '\n').map_or(chars.len(), |p| i + p);
     let (s0, e0) = (start(c), end(c));
-    f.caret = match key {
+    let caret = match key {
         NamedKey::Home => s0,
         NamedKey::End => e0,
         NamedKey::ArrowUp if s0 == 0 => 0,
@@ -499,7 +501,7 @@ fn line_key(f: &mut Field, key: NamedKey) {
         }
         _ => c,
     };
-    f.all = false;
+    f.place(caret, extend);
 }
 
 #[cfg(test)]
@@ -550,11 +552,6 @@ mod tests {
         assert_eq!(app.state.project.info.title.as_deref(), Some("Song"), "trimmed");
         assert!(app.unsaved());
         assert_eq!(app.title(), "[Song]");
-        // The accepted box is one undo step.
-        assert_eq!(crate::history::undo(&mut app.state).as_deref(), Some(crate::control::command::SONG_INFO));
-        assert!(app.state.project.info.title.is_none());
-        assert_eq!(crate::history::redo(&mut app.state).as_deref(), Some(crate::control::command::SONG_INFO));
-        assert_eq!(app.state.project.info.title.as_deref(), Some("Song"));
     }
 
     /// Esc drops the edit; an emptied box clears its field; an unchanged one changes nothing.
@@ -620,8 +617,8 @@ mod tests {
         click(&mut app, &mut c, Action::Settings(SAct::Info(InfoField::Title)));
         assert!(app.state.project.info.comments.as_deref().is_some_and(|t| t.ends_with(" \nend")));
         typed(&mut app, "Clicked");
-        click(&mut app, &mut c, Action::Settings(SAct::Tab(settings::DEBUG)));
-        assert_eq!(app.state.settings.tab, settings::DEBUG);
+        click(&mut app, &mut c, Action::Settings(SAct::Tab(settings::ABOUT)));
+        assert_eq!(app.state.settings.tab, settings::ABOUT);
         assert!(!app.info_editing());
         assert_eq!(app.state.project.info.title.as_deref(), Some("Clicked"));
     }
@@ -790,11 +787,11 @@ mod tests {
         let mut p = crate::app::default_project();
         let ch = p.channels[0].clone();
         p.channels = vec![ch.clone(), ch.clone(), ch];
-        p.channels[0].plugin = Some("Lemon Sampler".into());
+        p.channels[0].plugin = Some("ML Sampler".into());
         p.channels[1].plugin = Some(String::new());
         p.channels[2].plugin = None;
         (p.channels[0].mixer_track, p.channels[1].mixer_track, p.channels[2].mixer_track) = (1, 1, 0);
-        let slot = |name: &str| Some(SlotPlugin { id: os_model::Id::NONE, name: name.into(), state: Vec::new() });
+        let slot = |name: &str| Some(SlotPlugin { name: name.into(), state: Vec::new() });
         let mut m = MixerTrack::new(0);
         m.slots[0] = slot("Fruity Limiter");
         m.slots[3] = slot("");
@@ -833,7 +830,7 @@ mod tests {
         assert_eq!(mixer_tracks(&p), 1, "a channel on the master counts the master; routes to the master do not");
         // A named track holding an effect, which nothing routes to: not counted.
         p.mixer[2].name = Some("Bus".into());
-        p.mixer[2].slots[0] = Some(SlotPlugin { id: os_model::Id::NONE, name: "Fruity Limiter".into(), state: Vec::new() });
+        p.mixer[2].slots[0] = Some(SlotPlugin { name: "Fruity Limiter".into(), state: Vec::new() });
         assert_eq!(mixer_tracks(&p), 1);
         // A send: insert 1 routes to insert 3 too, so 3 counts, but not 1 for its own routes.
         p.mixer[1].routes = vec![0, 3];

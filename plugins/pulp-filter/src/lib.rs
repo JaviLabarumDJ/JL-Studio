@@ -61,7 +61,7 @@ pub fn plugin_state_from_fl(fl: &[u8]) -> Vec<u8> {
 
 /// The Love Philter state inside a plugin state blob; `Some(empty)` for an instance on its starting state.
 pub fn fl_from_plugin_state(blob: &[u8]) -> Option<Vec<u8>> {
-    let (_, json) = os_hostlink::state::json(blob);
+    let json = if blob.len() > 8 && blob[0] != b'{' { &blob[8..] } else { blob };
     let v: serde_json::Value = serde_json::from_str(std::str::from_utf8(json).ok()?).ok()?;
     let field = v.get("fields")?.get(STATE_FIELD)?.as_str()?;
     serde_json::from_str::<StateBytes>(field).ok().map(|s| s.0)
@@ -194,8 +194,8 @@ impl PulpFilter {
 }
 
 impl Plugin for PulpFilter {
-    const NAME: &'static str = "Pulp Filter";
-    const VENDOR: &'static str = "Lemon Studio";
+    const NAME: &'static str = "ML Pulp Filter";
+    const VENDOR: &'static str = "ML Studio";
     const URL: &'static str = "";
     const EMAIL: &'static str = "";
     const VERSION: &'static str = env!("CARGO_PKG_VERSION");
@@ -223,6 +223,7 @@ impl Plugin for PulpFilter {
         self.params.state_version.fetch_add(1, Ordering::AcqRel);
         self.seen = 0;
         self.pick_up_state();
+        self.dsp.prepare_buffer(config.max_buffer_size as usize);
         true
     }
 
@@ -251,7 +252,7 @@ impl Plugin for PulpFilter {
 
 impl ClapPlugin for PulpFilter {
     const CLAP_ID: &'static str = "org.openstudio.pulp-filter";
-    const CLAP_DESCRIPTION: Option<&'static str> = Some("Lemon Studio's pattern-controlled multi-filter");
+    const CLAP_DESCRIPTION: Option<&'static str> = Some("ML Studio's pattern-controlled multi-filter");
     const CLAP_MANUAL_URL: Option<&'static str> = None;
     const CLAP_SUPPORT_URL: Option<&'static str> = None;
     const CLAP_FEATURES: &'static [ClapFeature] = &[ClapFeature::AudioEffect, ClapFeature::Filter, ClapFeature::Stereo];

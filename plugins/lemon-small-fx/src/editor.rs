@@ -24,6 +24,29 @@ use crate::params::{self, FxParams};
 use crate::view::{self, Target, ViewState};
 use crate::{Shared, Spec};
 
+/// Optional non-parameter instrument controls, called only on the editor thread.
+pub trait Extension: Send + Sync {
+    /// Animation polling is separate from immediate mouse/keyboard/parameter updates.
+    fn animation_interval(&self) -> std::time::Duration { std::time::Duration::from_millis(30) }
+    fn take_state_edits(&self) -> Vec<String> { Vec::new() }
+    /// (Route id, source label, automatable depth parameter id).
+    fn modulation_routes(&self, _id: &str) -> Vec<(usize, &'static str, &'static str)> { Vec::new() }
+    fn remove_modulation(&self, _id: &str, _route: usize, _context: Option<&Arc<dyn GuiContext>>) {}
+    fn editor_closed(&self) {}
+    fn accepts_files(&self)->bool { false }
+    fn file_dropped(&self,_path:&std::path::Path) {}
+    /// Optional complete instrument view. Existing effect editors retain their default view.
+    fn render(&self, _canvas: &mut os_ui::Canvas, _model: &dyn view::Model,
+        _state: &ViewState, _hint: &str) -> Option<Vec<view::Hit>> { None }
+    fn wheel(&self, _x:f32, _y:f32, _notches:f32) -> bool { false }
+    fn character(&self, _character:char) -> bool { false }
+    fn dragging(&self) -> bool { false }
+    fn moved(&self, _x:f32, _y:f32) -> bool { false }
+    fn release(&self, _context:Option<&Arc<dyn GuiContext>>) -> bool { false }
+    fn paint(&self, canvas: &mut os_ui::Canvas, model: &dyn view::Model);
+    fn click(&self, x: f32, y: f32, context: Option<&Arc<dyn GuiContext>>) -> bool;
+}
+
 pub struct FxEditor {
     pub spec: &'static Spec,
     pub params: Arc<FxParams>,
@@ -105,11 +128,6 @@ impl Editor for FxEditor {
     }
 }
 
-/// A text field's reader: its text and status from the saved state.
-type TextShow = fn(&[u8]) -> (String, String);
-/// A text field's writer: the saved state with a typed text.
-type TextEdit = fn(&[u8], &str) -> Vec<u8>;
-
 // ---------------------------------------------------------------------------------------------------------------
 // Laws (spec §4, as Lemon Delay's)
 
@@ -130,6 +148,7 @@ pub enum Cmd {
     PasteValue(String),
     TypeIn(String),
     Automate(String),
+    RemoveModulation(String, usize),
     About,
 }
 
@@ -178,6 +197,8 @@ struct Drag {
 }
 
 pub struct Logic {
+    context: Option<Arc<dyn GuiContext>>,
+    state_edits: Arc<crate::state_undo::Edits>,
     pub spec: &'static Spec,
     pub vals: Vals,
     pub params: Arc<FxParams>,
@@ -191,14 +212,24 @@ pub struct Logic {
     pub hosted: bool,
 }
 
+impl Drop for Logic {
+    fn drop(&mut self) {if let Some(extension)=&self.shared.extension {extension.editor_closed();}}
+}
 impl Logic {
     pub fn new(spec: &'static Spec, params: Arc<FxParams>, shared: Arc<Shared>, ctx: Option<Arc<dyn GuiContext>>) -> Self {
-        let vals = Vals::new(&*params, params.live.clone(), ctx);
-        Logic { spec, vals, params, shared, view: ViewState::default(), hits: Vec::new(), drag: None, hint: String::new(), copied: None, hosted: false }
+        let state_edits = Arc::new(crate::state_undo::Edits::default());
+        let ctx = ctx.map(|context| crate::state_undo::wrap(context, state_edits.clone()));
+        let vals = Vals::new(&*params, params.live.clone(), ctx.clone());
+        Logic { state_edits, context: ctx, spec, vals, params, shared, view: ViewState::default(), hits: Vec::new(), drag: None, hint: String::new(), copied: None, hosted: false }
     }
 
+    fn take_state_edits(&self) -> Vec<String> {
+        let mut edits = self.state_edits.take();
+        if let Some(extension) = &self.shared.extension { edits.extend(extension.take_state_edits()); }
+        edits
+    }
     pub fn dragging(&self) -> bool {
-        self.drag.is_some()
+        self.drag.is_some() || self.shared.extension.as_ref().is_some_and(|e|e.dragging())
     }
 
     fn hit(&self, x: f32, y: f32) -> Option<(Target, os_ui::Rect)> {
@@ -206,26 +237,7 @@ impl Logic {
     }
 
     fn hint_for(&self, t: Option<&Target>) -> String {
-        match t {
-            Some(Target::Text(id)) => match self.text_control(id) {
-                Some((show, _)) => {
-                    let mut name = id.clone();
-                    name[..1].make_ascii_uppercase();
-                    format!("{name}: {}", show(&self.params.raw_copy()).1)
-                }
-                None => String::new(),
-            },
-            Some(t) => view::hint(self.spec, t, &self.vals),
-            None => String::new(),
-        }
-    }
-
-    /// A text field's readers ([`crate::Control::Text`]).
-    fn text_control(&self, id: &str) -> Option<(TextShow, TextEdit)> {
-        self.spec.controls.iter().find_map(|c| match *c {
-            crate::Control::Text { id: i, show, edit, .. } if i == id => Some((show, edit)),
-            _ => None,
-        })
+        t.map(|t| view::hint(self.spec, t, &self.vals)).unwrap_or_default()
     }
 
     fn range(&self, id: &str) -> (i32, i32) {
@@ -261,15 +273,19 @@ impl Logic {
 
     pub fn down(&mut self, x: f32, y: f32, btn: Btn, m: Mods, _dbl: bool) -> Vec<Act> {
         self.view.mouse = Some((x, y));
+        if btn==Btn::Left && let Some(r)=view::mode_tab(self.spec).filter(|r|r.contains(x,y)) {
+            self.view.advanced=x>=r.cx();
+            return vec![Act::Repaint]
+        }
+        if btn == Btn::Left && self.shared.extension.as_ref().is_some_and(|e| e.click(x, y, self.context.as_ref())) {
+            return vec![Act::Repaint];
+        }
         let Some((t, _)) = self.hit(x, y) else { return vec![] };
         let id = t.id().to_string();
         let mut acts = vec![Act::Repaint];
         match (&t, btn) {
             (Target::Logo, Btn::Left | Btn::Right) => acts.push(Act::Menu(MenuReq::About, x, y)),
             (Target::Logo, _) => {}
-            // A text field types its text in (it has no value to reset or automate).
-            (Target::Text(_), Btn::Left | Btn::Right) => acts.push(Act::TypeIn(id, x, y)),
-            (Target::Text(_), _) => {}
             (_, Btn::Left) if m.alt => self.reset(&id),
             (_, Btn::Middle) => self.reset(&id),
             (_, Btn::Right) => acts.push(Act::Menu(MenuReq::Param(id), x, y)),
@@ -299,6 +315,7 @@ impl Logic {
     }
 
     pub fn up(&mut self, _btn: Btn) -> Vec<Act> {
+        if self.shared.extension.as_ref().is_some_and(|e|e.release(self.context.as_ref())) {return vec![Act::Repaint];}
         let Some(d) = self.drag.take() else { return vec![] };
         self.vals.end(&d.id);
         self.view.pressed = None;
@@ -307,6 +324,7 @@ impl Logic {
 
     pub fn moved(&mut self, x: f32, y: f32, _m: Mods) -> Vec<Act> {
         self.view.mouse = Some((x, y));
+        if self.shared.extension.as_ref().is_some_and(|e|e.moved(x,y)) {return vec![Act::Repaint];}
         if self.drag.is_none() {
             let t = self.hit(x, y).map(|h| h.0);
             self.hint = self.hint_for(t.as_ref());
@@ -322,7 +340,8 @@ impl Logic {
 
     /// Wheel: one step per notch (1/128 of the range for the settings with many steps).
     pub fn wheel(&mut self, x: f32, y: f32, notches: f32, m: Mods) -> Vec<Act> {
-        let Some((t, _)) = self.hit(x, y).filter(|(t, _)| !matches!(t, Target::Logo | Target::Text(_))) else { return vec![] };
+        if self.drag.is_none() && self.shared.extension.as_ref().is_some_and(|e|e.wheel(x,y,notches)) {return vec![Act::Repaint];}
+        let Some((t, _)) = self.hit(x, y).filter(|(t, _)| *t != Target::Logo) else { return vec![] };
         let id = t.id().to_string();
         let (lo, hi) = self.range(&id);
         let steps = (hi - lo) as f32;
@@ -346,10 +365,17 @@ impl Logic {
                 m.sep(Cmd::None);
                 m.add(MenuItem::item("Copy value"), Cmd::CopyValue(id.clone()));
                 m.add(MenuItem::item("Paste value").enabled(self.copied.is_some()), Cmd::PasteValue(id.clone()));
-                m.add(MenuItem::item("Enter value..."), Cmd::TypeIn(id.clone()));
+                m.add(MenuItem::item("Type in value..."), Cmd::TypeIn(id.clone()));
                 // Automation belongs to the host: offered when Lemon Studio hosts the editor (host link).
                 m.sep(Cmd::None);
                 m.add(MenuItem::item("Create automation clip").enabled(self.hosted), Cmd::Automate(id.clone()));
+                if let Some(extension) = &self.shared.extension {
+                    for (route, source, depth) in extension.modulation_routes(id) {
+                        m.sep(Cmd::None);
+                        m.add(MenuItem::item(&format!("Remove {source} modulation")), Cmd::RemoveModulation(id.clone(), route));
+                        m.add(MenuItem::item(&format!("Automate {source} depth")).enabled(self.hosted), Cmd::Automate(depth.into()));
+                    }
+                }
                 m.sep(Cmd::None);
                 m.add(MenuItem::item(&format!("About {}...", self.spec.name)), Cmd::About);
                 m
@@ -376,6 +402,11 @@ impl Logic {
             }
             Cmd::TypeIn(id) => return vec![Act::TypeIn(id, x, y)],
             Cmd::Automate(id) => return self.spec.index(&id).map(Act::Automate).into_iter().collect(),
+            Cmd::RemoveModulation(id, route) => {
+                if let Some(extension) = &self.shared.extension {
+                    extension.remove_modulation(&id, route, self.context.as_ref());
+                }
+            }
             Cmd::About => return vec![Act::Menu(MenuReq::About, x, y)],
         }
         vec![Act::Repaint]
@@ -383,21 +414,11 @@ impl Logic {
 
     /// The value text a type-in box starts with.
     pub fn value_text(&self, id: &str) -> String {
-        match self.text_control(id) {
-            Some((show, _)) => show(&self.params.raw_copy()).0,
-            None => self.vals.text(id),
-        }
+        self.vals.text(id)
     }
 
-    /// Applies a typed value (a text field's text goes into the saved state).
+    /// Applies a typed value.
     pub fn typed(&mut self, id: &str, text: &str) {
-        if let Some((_, edit)) = self.text_control(id) {
-            let raw = edit(&self.params.raw_copy(), text);
-            self.params.set_raw(raw);
-            let t = Target::Text(id.into());
-            self.hint = self.hint_for(Some(&t));
-            return;
-        }
         if let Some(n) = self.vals.parse(id, text) {
             self.edit(id, n);
         }
@@ -406,10 +427,21 @@ impl Logic {
     /// Paints the editor; `hint` is drawn when the host does not show it.
     pub fn paint(&mut self, c: &mut os_ui::Canvas, palette: &os_theme::Palette) {
         let hint = if self.hosted { String::new() } else { self.hint.clone() };
-        if self.spec.controls.iter().any(|c| matches!(c, crate::Control::Text { .. })) {
-            self.view.raw = self.params.raw_copy();
+        let mode = view::mode_tab(self.spec);
+        if let Some(r)=mode.filter(|_|!self.view.advanced) {
+            self.hits=view::normal(self.spec,c,palette,&self.vals,&self.view);
+            view::draw_mode(c,r,false);
+            return
+        }
+        if let Some(hits) = self.shared.extension.as_ref().and_then(|e| e.render(c, &self.vals, &self.view, &hint)) {
+            self.hits = hits;
+            return;
         }
         self.hits = view::paint(self.spec, c, palette, &self.vals, &self.view, &hint);
+        if let Some(extension) = &self.shared.extension {
+            extension.paint(c, &self.vals);
+        }
+        if let Some(r)=mode {view::draw_mode(c,r,true);}
     }
 }
 
@@ -453,6 +485,8 @@ mod win32 {
         lock: CursorLock,
         tracking: bool,
         slot: Arc<AtomicIsize>,
+        dirty: std::cell::Cell<bool>,
+        next_animation: std::time::Instant,
     }
 
     /// Owns the window; dropping it closes the editor.
@@ -509,6 +543,8 @@ mod win32 {
                 lock: CursorLock::default(),
                 tracking: false,
                 slot: slot.clone(),
+                dirty: std::cell::Cell::new(true),
+                next_animation: std::time::Instant::now(),
             });
             let title = pw::wide(spec.name);
             let hwnd = CreateWindowExW(
@@ -525,6 +561,9 @@ mod win32 {
                 GetModuleHandleW(std::ptr::null()),
                 Box::into_raw(win) as *const c_void,
             );
+            if shared.extension.as_ref().is_some_and(|e|e.accepts_files()){
+                windows_sys::Win32::UI::Shell::DragAcceptFiles(hwnd,1);
+            }
             slot.store(hwnd as isize, Ordering::Release);
             // About 33 checks a second (edits the host confirms, the hint).
             SetTimer(hwnd, TIMER, 30, None);
@@ -566,8 +605,28 @@ mod win32 {
                 }
                 WM_ERASEBKGND => 1,
                 WM_TIMER | WM_CHANGED => {
-                    w.poll();
+                    w.poll(msg == WM_CHANGED);
                     0
+                }
+                WM_DROPFILES => {
+                    use std::os::windows::ffi::OsStringExt;
+                    use windows_sys::Win32::UI::Shell::{DragFinish,DragQueryFileW};
+                    let handle=wp as *mut core::ffi::c_void;
+                    let length=DragQueryFileW(handle,0,std::ptr::null_mut(),0);
+                    let mut buffer=vec![0u16;length as usize+1];
+                    let read=DragQueryFileW(handle,0,buffer.as_mut_ptr(),buffer.len() as u32);
+                    DragFinish(handle);
+                    if read>0 {if let Some(extension)=&w.logic.shared.extension{
+                        let path=std::path::PathBuf::from(std::ffi::OsString::from_wide(&buffer[..read as usize]));
+                        extension.file_dropped(&path);
+                    }}
+                    w.run(vec![Act::Repaint]);0
+                }
+                WM_CHAR => {
+                    if char::from_u32(wp as u32).is_some_and(|ch|w.logic.shared.extension.as_ref().is_some_and(|e|e.character(ch))) {
+                        w.run(vec![Act::Repaint]); return 0;
+                    }
+                    DefWindowProcW(hwnd,msg,wp,lp)
                 }
                 WM_LBUTTONDOWN | WM_LBUTTONDBLCLK | WM_RBUTTONDOWN | WM_RBUTTONDBLCLK | WM_MBUTTONDOWN => {
                     SetFocus(hwnd);
@@ -658,13 +717,16 @@ mod win32 {
         }
 
         fn invalidate(&self) {
+            self.dirty.set(true);
             unsafe { InvalidateRect(self.hwnd, std::ptr::null(), 0) };
         }
 
         /// Timer / parameter change: expire confirmed overlay values and repaint.
-        fn poll(&mut self) {
-            self.logic.vals.expire();
-            self.invalidate();
+        fn poll(&mut self, changed: bool) {
+            if self.canvas.sync_stock_editor_theme() { self.invalidate(); }
+            self.send_edits();
+            let expired = self.logic.vals.expire();
+            if changed || expired || std::time::Instant::now() >= self.next_animation { self.invalidate(); }
             if self.logic.hint != self.last_hint {
                 self.last_hint = self.logic.hint.clone();
                 if self.logic.hosted {
@@ -673,6 +735,11 @@ mod win32 {
             }
         }
 
+        fn send_edits(&mut self) {
+            for edit in self.logic.take_state_edits() {
+                if self.logic.hosted { os_hostlink::send_state_edit(self.hwnd as isize, edit); }
+            }
+        }
         fn run(&mut self, acts: Vec<Act>) {
             let mut repaint = false;
             for a in acts {
@@ -701,6 +768,7 @@ mod win32 {
                     }
                 }
             }
+            self.send_edits();
             if repaint {
                 self.invalidate();
             }
@@ -727,15 +795,22 @@ mod win32 {
                     }
                     1
                 }
-                Cmd::Changed | Cmd::Note | Cmd::Automate | Cmd::Audio | Cmd::Resizable | Cmd::SetSize | Cmd::Notes => 0,
+                Cmd::StateEdit | Cmd::SampleFit | Cmd::BrowseSample | Cmd::Changed | Cmd::Note | Cmd::Automate | Cmd::Audio | Cmd::Resizable | Cmd::SetSize => 0,
             }
         }
 
         fn paint(&mut self) {
+            if self.canvas.sync_stock_editor_theme() { self.dirty.set(true); }
             let (hdc, ps) = pw::begin_paint(self.hwnd);
-            self.logic.paint(&mut self.canvas, &self.palette);
-            self.buf.resize((self.size.0 * self.size.1) as usize, 0);
-            self.canvas.copy_to_xrgb(&mut self.buf);
+            // Exposing/moving a window can reuse the last complete frame.
+            if self.dirty.replace(false) {
+                let started = std::time::Instant::now();
+                self.logic.paint(&mut self.canvas, &self.palette);
+                self.buf.resize((self.size.0 * self.size.1) as usize, 0);
+                self.canvas.copy_to_xrgb(&mut self.buf);
+                let interval = self.logic.shared.extension.as_ref().map_or(std::time::Duration::from_millis(30), |e| e.animation_interval());
+                self.next_animation = std::time::Instant::now() + interval.max(started.elapsed().saturating_mul(3));
+            }
             pw::blit(hdc, &self.buf, self.size.0, self.size.1);
             pw::end_paint(self.hwnd, &ps);
         }
@@ -879,6 +954,7 @@ mod gui {
 
         /// Timer / parameter change: expire confirmed overlay values and repaint.
         fn poll(&mut self) {
+            if self.canvas.sync_stock_editor_theme() { self.dirty = true; }
             self.logic.vals.expire();
             self.dirty = true;
             if self.logic.hint != self.last_hint {
@@ -919,9 +995,16 @@ mod gui {
                     }
                 }
             }
+            for edit in self.logic.take_state_edits() {
+                if self.link.hosted() {
+                    if let Some(token) = os_hostlink::post_state_edit(edit) { self.link.to_host(Cmd::StateEdit, token as isize); }
+                }
+            }
+
         }
 
         fn paint(&mut self) {
+            self.canvas.sync_stock_editor_theme();
             self.dirty = false;
             self.logic.paint(&mut self.canvas, &self.palette);
             self.buf.resize((self.size.0 * self.size.1) as usize, 0);
@@ -935,10 +1018,16 @@ mod gui {
 mod tests {
     use super::*;
     use crate::tests::SPECS;
-    use crate::{balance, chorus, fast_distortion, filter, flanger, formula_controller, peak_controller, phaser, soft_clipper, stereo_enhancer, stereo_shaper, transient_processor, Control};
+    use crate::{balance, chorus, fast_distortion, soft_clipper, stereo_enhancer, stereo_shaper, transient_processor, Control};
 
     fn logic(spec: &'static Spec) -> Logic {
         let mut l = Logic::new(spec, Arc::new(FxParams::new(spec)), Arc::new(Shared::default()), None);
+        assert!(!l.view.advanced);
+        if let Some(tab) = view::mode_tab(spec) {
+            paint(&mut l);
+            l.down(tab.cx()+10., tab.cy(), Btn::Left, Mods::default(), false);
+            assert!(l.view.advanced);
+        }
         paint(&mut l);
         l
     }
@@ -1097,8 +1186,8 @@ mod tests {
         let mut l = logic(soft_clipper::SPEC);
         let m = l.menu(&MenuReq::Param("post".into()));
         assert_eq!(m.find("Reset"), Some(Cmd::Reset("post".into())));
-        assert_eq!(m.find("Enter value..."), Some(Cmd::TypeIn("post".into())));
-        assert_eq!(m.find("About Lemon Soft Clipper..."), Some(Cmd::About));
+        assert_eq!(m.find("Type in value..."), Some(Cmd::TypeIn("post".into())));
+        assert_eq!(m.find("About ML Soft Clipper..."), Some(Cmd::About));
         l.vals.edit_plain("post", 10.0);
         l.pick(&MenuReq::Param("post".into()), Cmd::Reset("post".into()), 0.0, 0.0);
         assert_eq!(l.vals.plain("post"), 128.0);
@@ -1112,34 +1201,10 @@ mod tests {
         assert_eq!(l.pick(&MenuReq::Param("post".into()), Cmd::Automate("post".into()), 0.0, 0.0), vec![Act::Automate(1)]);
         let (x, y) = centre(&l, &Target::Logo);
         assert!(matches!(l.down(x, y, Btn::Left, Mods::default(), false).last(), Some(Act::Menu(MenuReq::About, _, _))));
-        assert_eq!(l.hint, "Lemon Soft Clipper");
+        assert_eq!(l.hint, "ML Soft Clipper");
         assert!(l.wheel(x, y, 1.0, Mods::default()).is_empty());
         let about = l.menu(&MenuReq::About);
-        assert_eq!(about.find("Lemon Studio's soft clipper"), Some(Cmd::None));
-    }
-
-    /// A text field (Lemon Formula Controller's formula): a click types its text in, the typed text goes into the
-    /// saved state, the hint and the field show whether it compiles; the wheel and middle clicks leave it.
-    #[test]
-    fn text_fields_type_into_the_saved_state() {
-        let mut l = logic(formula_controller::SPEC);
-        let t = Target::Text("formula".into());
-        let (x, y) = centre(&l, &t);
-        assert_eq!(l.down(x, y, Btn::Left, Mods::default(), false).last(), Some(&Act::TypeIn("formula".into(), x, y)));
-        assert_eq!(l.hint, "Formula: Syntax error: no formula");
-        assert_eq!(l.value_text("formula"), "");
-        l.typed("formula", "a*0.5+SongTime/48");
-        assert_eq!(l.value_text("formula"), "a*0.5+SongTime/48");
-        assert_eq!(l.hint, "Formula: Compiled ok");
-        let s = os_engine::effects::formula_ctrl::Settings::from_state(&l.params.raw_copy()).unwrap();
-        assert_eq!(s.formula, "a*0.5+SongTime/48");
-        assert!(l.wheel(x, y, 1.0, Mods::default()).is_empty());
-        l.down(x, y, Btn::Middle, Mods::default(), false);
-        assert_eq!(l.value_text("formula"), "a*0.5+SongTime/48");
-        paint(&mut l);
-        assert_eq!(l.view.raw, l.params.raw_copy());
-        l.typed("formula", "a*");
-        assert_eq!(l.hint, "Formula: Syntax error: function or operand has too few arguments");
+        assert_eq!(about.find("ML Studio's soft clipper"), Some(Cmd::None));
     }
 
     /// `SMALLFX_PNG=<dir> cargo test -p lemon-small-fx -- --ignored`: the editors at a few settings, as PNGs.
@@ -1159,7 +1224,7 @@ mod tests {
             }
             pm.save_png(std::path::Path::new(&dir).join(format!("{name}.png"))).unwrap();
         };
-        let settings: [(&Spec, &str, &[(&str, i32)]); 13] = [
+        let settings: [(&Spec, &str, &[(&str, i32)]); 7] = [
             (soft_clipper::SPEC, "soft_clipper", &[("threshold", 64), ("post", 150)]),
             (fast_distortion::SPEC, "fast_distortion", &[("pre", 192), ("threshold", 3), ("type", 1), ("mix", 100), ("post", 110)]),
             (balance::SPEC, "balance", &[("balance", -70), ("volume", 220)]),
@@ -1171,12 +1236,6 @@ mod tests {
             ),
             (chorus::SPEC, "chorus", &[("delay", 40), ("depth", 4375), ("stereo", 149), ("speed1", 3229), ("wave1", 587), ("wave3", 1024), ("cross", 65), ("cutoff", 4531), ("wet", 491)]),
             (stereo_shaper::SPEC, "stereo_shaper", &[("rl", 8076), ("left", 8076), ("right", -8076), ("lr", 8076), ("delay", 1408), ("phase", -2496), ("position", 0)]),
-            (filter::SPEC, "filter", &[("cutoff", 544), ("resonance", 900), ("low", 0), ("band", 1024), ("high", 464), ("x2", 1)]),
-            (flanger::SPEC, "flanger", &[("delay", 300), ("depth", 4200), ("rate", 900), ("shape", 512), ("feed", 70), ("invert_feed", 0), ("damp", 1500), ("cross", 0)]),
-            (phaser::SPEC, "phaser", &[("sweep", 4000), ("range", 1024), ("stages", 15), ("feedback", 850), ("dry_wet", 0), ("gain", 2500)]),
-            (peak_controller::SPEC, "peak_controller", &[("base", 13568), ("amount", -120), ("decay", 30), ("lfo_amount", 200), ("speed", 13000), ("shape", 3), ("ramp", 1)]),
-            (formula_controller::SPEC, "formula_controller", &[("a", 46592), ("b", 65536), ("c", 32768)]),
-            (crate::vocoder::SPEC, "vocoder", &[("car", 8000), ("noise", 6400), ("mod_input", 1), ("car_input", 0), ("rms", 1), ("order", 4), ("bands", 16), ("lr", 1)]),
         ];
         for (spec, name, values) in settings {
             let mut l = logic(spec);
@@ -1185,9 +1244,6 @@ mod tests {
             save(&mut l, &format!("{name}_default_x2"), 2.0);
             for (id, v) in values {
                 l.vals.edit_plain(id, *v as f32);
-            }
-            if spec.name == formula_controller::SPEC.name {
-                l.typed("formula", "a+Sin(SongTime*Pi/4)*b*0.5");
             }
             save(&mut l, &format!("{name}_set"), 1.0);
         }

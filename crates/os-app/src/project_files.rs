@@ -25,6 +25,7 @@ use crate::playlist::{Cmd, PItem};
 
 /// The category Save as template... writes to when no category folder was picked.
 pub const USER_CATEGORY: &str = "User";
+pub(crate) const STARTUP_PROMPT_VISIBILITY: &str = "visible_template_startup_prompt";
 /// The data folder's folders Delete unused files looks in: the copied samples, the recordings and the renders.
 pub const SCANNED: [&str; 3] = [crate::data_folder::SAMPLES_DIR, "Recorded", "Rendered"];
 /// The names the delete question lists before "and N more".
@@ -60,7 +61,7 @@ pub fn template_target(root: &Path, chosen: &Path) -> PathBuf {
         _ => None,
     };
     let cat = cat.map_or_else(|| USER_CATEGORY.to_string(), |c| c.to_string_lossy().into_owned());
-    crate::templates::file_in(root, &cat, &name)
+    crate::templates::file_in(root, &cat, &name).with_extension("lmn")
 }
 
 /// FILE ▸ New from template ▸: a row per category of the Templates folder with its templates (each starts a new
@@ -72,10 +73,12 @@ pub fn template_items(_: &State) -> Vec<PItem> {
         .into_iter()
         .map(|c| {
             let children = c.templates.iter().map(|t| PItem::new(t.clone(), Cmd::NewTemplate(format!("{}/{t}", c.name)))).collect();
-            PItem { children, ..PItem::new(c.name, Cmd::Nothing) }
+            PItem { children, ..PItem::new(c.label().to_owned(), Cmd::Nothing) }
         })
         .collect();
-    items.push(PItem::new(crate::templates::EMPTY, Cmd::NewTemplate(crate::templates::EMPTY.into())));
+    for name in [crate::templates::EMPTY, crate::templates::NO_TRACKS] {
+        items.push(PItem::new(name, Cmd::NewTemplate(name.into())));
+    }
     items
 }
 
@@ -102,35 +105,13 @@ fn files_under(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 /// The files of data folder `dir` the project does not use (`used`: the files it refers to): those in its Samples,
-/// What Save writes: Lemon Studio's own project file (spec: flp/lemon-format.md).
-pub const EXT: &str = "lemon";
-
-/// The project files Lemon Studio opens: its own, and the FLPs it migrates from (spec: flp/lemon-format.md).
-pub const PROJECT_EXTS: [&str; 2] = [EXT, "flp"];
-
-/// Whether `p` is a project file by its extension (`.lemon` or `.flp`).
-pub fn is_project(p: &Path) -> bool {
-    p.extension().is_some_and(|e| PROJECT_EXTS.iter().any(|x| e.eq_ignore_ascii_case(x)))
-}
-
-/// Whether `p` is an FLP: Save does not write over it but asks for a `.lemon` name (spec: flp/lemon-format.md
-/// "Opening and saving").
-pub fn is_flp(p: &Path) -> bool {
-    p.extension().is_some_and(|e| e.eq_ignore_ascii_case("flp"))
-}
-
-/// `p` with the `.lemon` extension.
-pub fn as_lemon(p: &Path) -> PathBuf {
-    p.with_extension(EXT)
-}
-
 /// Recorded and Rendered folders, project files never. Sorted by path.
 pub fn unused_files(dir: &Path, used: &[PathBuf]) -> Vec<PathBuf> {
     let mut found = Vec::new();
     for sub in SCANNED {
         files_under(&dir.join(sub), &mut found);
     }
-    found.retain(|f| !is_project(f) && !used.iter().any(|u| same_file(f, u)));
+    found.retain(|f| !f.extension().is_some_and(|e| (e.eq_ignore_ascii_case("lmn") || e.eq_ignore_ascii_case("flp"))) && !used.iter().any(|u| same_file(f, u)));
     found.sort();
     found
 }
@@ -139,7 +120,7 @@ pub fn unused_files(dir: &Path, used: &[PathBuf]) -> Vec<PathBuf> {
 /// unused files leaves it alone.
 pub fn shared_folder(dir: &Path, own: &Path) -> bool {
     std::fs::read_dir(dir).is_ok_and(|r| {
-        r.flatten().any(|e| is_project(&e.path()) && e.path().is_file() && !same_file(&e.path(), own))
+        r.flatten().any(|e| e.path().extension().is_some_and(|x| (x.eq_ignore_ascii_case("lmn") || x.eq_ignore_ascii_case("flp"))) && e.path().is_file() && !same_file(&e.path(), own))
     })
 }
 
@@ -155,7 +136,7 @@ impl App {
             Some(b) => self.ask_discard("reverting to the last backup", Next::Revert(b)),
             None => {
                 let file = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-                self.tell(Kind::Info, "Restore backup...", spans(&["There is no backup of ", &file, "."]));
+                self.tell(Kind::Info, "Revert to last backup", spans(&["There is no backup of ", &file, "."]));
             }
         }
     }
@@ -188,8 +169,8 @@ impl App {
         };
         let start = root.join(USER_CATEGORY);
         let _ = std::fs::create_dir_all(&start);
-        let name = format!("{}.{EXT}", crate::backup::project_name(self.state.path.as_deref()));
-        let dlg = FileDlg::new(Mode::Save, "Save as template", "template", Then::SaveTemplate).filter("Lemon Studio project", &[EXT]).start(Some(&start)).name(&name);
+        let name = format!("{}.lmn", crate::backup::project_name(self.state.path.as_deref()));
+        let dlg = FileDlg::new(Mode::Save, "Save as template", "template", Then::SaveTemplate).filter("ML Studio project", &["lmn"]).start(Some(&start)).name(&name);
         self.file_dialog(dlg);
     }
 
@@ -198,13 +179,43 @@ impl App {
     pub(crate) fn template_chosen(&mut self, chosen: PathBuf) {
         let Some(root) = crate::templates::root() else { return };
         let target = template_target(&root, &chosen);
+        // The file picker only confirms a replacement at the path it displays.
+        if target.exists() && !same_file(&target, &chosen) {
+            let name = target.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+            self.show_msg(Msg::new(Kind::Warning, "Replace template",
+                spans(&["A template named ", &name, " already exists. Replace it?"]),
+                &[Answer::Yes, Answer::No], Then::ReplaceTemplate(target)));
+            return;
+        }
+        self.write_template(target);
+    }
+
+    pub(crate) fn write_template(&mut self, target: PathBuf) {
+        if self.state.path.as_ref().is_some_and(|path| same_file(path, &target)) {
+            self.state.message = Some("Choose a different name to save a template copy of this project".into());
+            return;
+        }
         if let Some(Err(e)) = target.parent().map(std::fs::create_dir_all) {
             self.state.message = Some(format!("Save as template failed: {e}"));
             return;
         }
-        let name = target.file_stem().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+        let name = target.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+        let category = target.parent().and_then(Path::parent).and_then(Path::file_name)
+            .unwrap_or_default().to_string_lossy().into_owned();
         self.state.message = Some(match self.save_copy(target) {
-            Some(Ok(())) => format!("Saved the template {name}"),
+            Some(Ok(())) => {
+                let pick = format!("{category}/{name}");
+                if crate::workspace_visibility::shown(STARTUP_PROMPT_VISIBILITY)
+                    && !crate::templates::is_startup_template(&pick)
+                {
+                    let mut prompt = Msg::new(Kind::Question, "Use as startup template?",
+                        spans(&["Start ML Studio and new projects with ", &name, "?"]),
+                        &[Answer::Yes, Answer::No], Then::UseStartupTemplate(pick));
+                    prompt.focus = 1;
+                    self.show_msg(prompt);
+                }
+                format!("Saved the template {name}")
+            }
             Some(Err(e)) => format!("Save as template failed: {e}"),
             None => "Save as template: wait for the project to load or the export to end".into(),
         });
@@ -214,7 +225,8 @@ impl App {
     /// question as New asks it, a new untitled project from it.
     pub(crate) fn pick_new_template(&mut self, pick: &str) {
         let file = pick.split_once('/').and_then(|(cat, name)| Some(crate::templates::file_in(&crate::templates::root()?, cat, name)));
-        self.ask_discard("starting a new project", Next::Template(file));
+        let next = if pick == crate::templates::NO_TRACKS { Next::NoTracksTemplate } else { Next::Template(file) };
+        self.ask_discard("starting a new project", next);
     }
 
     /// The new project from template `file` (None: Empty, or a template that does not load: the built-in project); the
@@ -236,14 +248,14 @@ impl App {
         self.file_dialog(dlg);
     }
 
-    /// The place was picked (`root`): the project is saved as `<root>/<name>/<name>.lemon`, named after the project, that
+    /// The place was picked (`root`): the project is saved as `<root>/<name>/<name>.flp`, named after the project, that
     /// new folder its data folder (the used samples copied there while Copy used samples to the project folder is on). A
     /// project file already there is refused.
     pub(crate) fn new_folder_chosen(&mut self, root: PathBuf) {
         const TITLE: &str = "Save to new project folder";
         let name = crate::backup::project_name(self.state.path.as_deref());
         let dir = root.join(&name);
-        let file = dir.join(format!("{name}.{EXT}"));
+        let file = dir.join(format!("{name}.lmn"));
         if file.exists() {
             return self.tell(Kind::Warning, TITLE, spans(&["", &file.display().to_string(), " already exists. Nothing was saved."]));
         }
@@ -269,6 +281,8 @@ impl App {
             used.extend(self.plugins.sampler_path(row).filter(|p| !p.is_empty()).map(PathBuf::from));
             used.extend(ch.sample_path.as_deref().filter(|p| !p.is_empty()).map(|p| PathBuf::from(crate::plugins::resolve_sample(p))));
         }
+        used.extend(self.state.project.vocal_edits.iter().flat_map(|d|[&d.source,&d.rendered]).filter(|p|!p.is_empty()).map(|p|PathBuf::from(crate::plugins::resolve_sample(p))));
+        used.extend(self.state.project.audio_warps.iter().flat_map(|w| [&w.source,&w.rendered]).filter(|p|!p.is_empty()).map(|p|PathBuf::from(crate::plugins::resolve_sample(p))));
         used
     }
 
@@ -276,7 +290,7 @@ impl App {
     /// (`unused_files`) are listed in a Yes / No question; Yes deletes them, then saves. With none, it only saves. A
     /// data folder that holds other project files is not looked in.
     pub(crate) fn delete_unused_ask(&mut self) {
-        const TITLE: &str = "Clean up";
+        const TITLE: &str = "Delete unused files";
         let Some(path) = self.state.path.clone() else { return };
         let dir = crate::data_folder::folder(&self.state).filter(|d| d.is_dir());
         if let Some(d) = dir.as_ref().filter(|d| shared_folder(d, &path)) {
@@ -396,23 +410,23 @@ mod tests {
     #[test]
     fn template_listing() {
         let root = scratch("tpl");
-        assert_eq!(template_target(&root, &root.join("User").join("Mine.lemon")), root.join("User").join("Mine").join("Mine.lemon"));
-        assert_eq!(template_target(&root, &root.join("Beats").join("Trap.lemon")), root.join("Beats").join("Trap").join("Trap.lemon"));
-        assert_eq!(template_target(&root, &root.join("Beats").join("Trap").join("Trap.lemon")), root.join("Beats").join("Trap").join("Trap.lemon"));
-        assert_eq!(template_target(&root, &std::env::temp_dir().join("Elsewhere.lemon")), root.join("User").join("Elsewhere").join("Elsewhere.lemon"));
+        assert_eq!(template_target(&root, &root.join("User").join("Mine.lmn")), root.join("User").join("Mine").join("Mine.lmn"));
+        assert_eq!(template_target(&root, &root.join("Beats").join("Trap.lmn")), root.join("Beats").join("Trap").join("Trap.lmn"));
+        assert_eq!(template_target(&root, &root.join("Beats").join("Trap").join("Trap.lmn")), root.join("Beats").join("Trap").join("Trap.lmn"));
+        assert_eq!(template_target(&root, &std::env::temp_dir().join("Elsewhere.lmn")), root.join("User").join("Elsewhere").join("Elsewhere.lmn"));
         crate::templates::TEST_DIR.with(|d| *d.borrow_mut() = Some(root.clone()));
         let rows = template_items(&App::new(None).state);
-        assert_eq!(rows.iter().map(|r| r.label.to_string()).collect::<Vec<_>>(), ["Empty"], "no templates: Empty alone");
+        assert_eq!(rows.iter().map(|r| r.label.to_string()).collect::<Vec<_>>(), ["Empty", "Empty (no tracks)"], "built-in templates");
         let mut app = App::new(None);
         app.state.tempo = 97.0;
         let work = scratch("tpl_work");
-        let song = work.join("song.lemon");
+        let song = work.join("song.lmn");
         app.save_to(song.clone());
-        app.template_chosen(root.join("User").join("Slow.lemon"));
+        app.template_chosen(root.join("User").join("Slow.lmn"));
         assert_eq!(app.state.path.as_deref(), Some(song.as_path()), "the project keeps its file");
-        assert!(root.join("User").join("Slow").join("Slow.lemon").is_file(), "{:?}", app.state.message);
+        assert!(root.join("User").join("Slow").join("Slow.lmn").is_file(), "{:?}", app.state.message);
         let rows = template_items(&app.state);
-        assert_eq!(rows.iter().map(|r| r.label.to_string()).collect::<Vec<_>>(), ["User", "Empty"]);
+        assert_eq!(rows.iter().map(|r| r.label.to_string()).collect::<Vec<_>>(), ["User", "Empty", "Empty (no tracks)"]);
         assert_eq!(rows[0].children.len(), 1);
         assert_eq!((rows[0].children[0].label.as_ref(), &rows[0].children[0].cmd), ("Slow", &Cmd::NewTemplate("User/Slow".into())));
         app.state.tempo = 140.0;
@@ -420,14 +434,6 @@ mod tests {
         app.pick_new_template("User/Slow");
         assert_eq!((app.state.tempo, app.state.path.clone()), (97.0, None), "an untitled project from the template");
         assert!(!app.unsaved());
-        // A template saved by the original (an FLP) is listed and opens too.
-        let fl = root.join("User").join("Old");
-        std::fs::create_dir_all(&fl).unwrap();
-        app.state.tempo = 88.0;
-        app.save_to(fl.join("Old.flp"));
-        assert!(template_items(&app.state)[0].children.iter().any(|r| r.label.as_ref() == "Old"));
-        app.pick_new_template("User/Old");
-        assert_eq!((app.state.tempo, app.state.path.clone()), (88.0, None), "an untitled project from the FLP template");
         app.pick_new_template("Empty");
         assert_eq!((app.state.tempo, app.state.path.clone()), (130.0, None), "the built-in project");
         crate::templates::TEST_DIR.with(|d| *d.borrow_mut() = None);
@@ -435,7 +441,78 @@ mod tests {
         let _ = std::fs::remove_dir_all(&work);
     }
 
-    /// Save to new project folder: `<name>/<name>.lemon` in the folder picked, the data folder there; one already there
+    #[test]
+    fn save_custom_template_and_use_it_at_startup() {
+        use crate::{prefs, templates, views::menus};
+        crate::dialog::fake::live(true);
+        let root = scratch("startup_template");
+        templates::TEST_DIR.with(|d| *d.borrow_mut() = Some(root.clone()));
+        prefs::set_choice(&prefs::STARTUP_PROJECT, 2);
+        let save_row = (0..100).find(|&i| menus::item_at(0, i)
+            .is_some_and(|item| item.label == "Save as template...")).unwrap();
+        let mut app = App::new(None);
+        let project = root.join("Original.lmn");
+        app.save_to(project.clone());
+        app.state.tempo = 112.0;
+        app.state.project.mixer[1].volume = Some(0.5);
+        let chosen = root.join("User").join("My Mix.lmn");
+        let template = template_target(&root, &chosen);
+
+        app.menu_item(0, save_row);
+        assert!(app.modal_open());
+        app.answer(Reply::File(None));
+        assert!(!template.exists());
+
+        app.menu_item(0, save_row);
+        app.answer(Reply::File(Some(chosen.clone())));
+        assert!(app.modal_open() && template.is_file());
+        app.answer(Reply::Button(Answer::No));
+        assert_eq!(prefs::index(&prefs::STARTUP_PROJECT), 2);
+
+        // The name at the category level maps to an existing file in a subfolder.
+        let original_template = std::fs::read(&template).unwrap();
+        app.state.tempo = 114.0;
+        app.menu_item(0, save_row);
+        app.answer(Reply::File(Some(chosen.clone())));
+        assert!(app.modal_open());
+        app.answer(Reply::Button(Answer::No));
+        assert_eq!(std::fs::read(&template).unwrap(), original_template);
+
+        app.menu_item(0, save_row);
+        app.answer(Reply::File(Some(chosen)));
+        app.answer(Reply::Button(Answer::Yes)); // Replace the template.
+        assert!(app.modal_open());
+        app.answer(Reply::Button(Answer::Yes)); // Make it the startup template.
+        assert_eq!(templates::file(), Some(template.clone()));
+        assert_eq!(templates::last_project(), Some(project.clone()));
+        assert_eq!(app.state.path, Some(project));
+        assert!(app.unsaved());
+
+        let mut launched = App::new(None);
+        launched.startup_project();
+        assert_eq!(launched.state.tempo, 114.0);
+        assert_eq!(launched.state.project.mixer[1].volume, Some(0.5));
+        assert!(launched.state.path.is_none());
+        assert!(!launched.unsaved());
+        let mut new = App::new(None);
+        new.menu_item(0, menus::FILE_NEW);
+        assert_eq!(new.state.tempo, 114.0);
+        assert_eq!(new.state.project.mixer[1].volume, Some(0.5));
+        assert!(new.state.path.is_none());
+
+        crate::settings_file::write(STARTUP_PROMPT_VISIBILITY, "0");
+        app.menu_item(0, save_row);
+        let second = root.join("User").join("Another Mix.lmn");
+        app.answer(Reply::File(Some(second.clone())));
+        assert!(template_target(&root, &second).is_file(), "{:?}", app.state.message);
+        assert!(!app.modal_open());
+        assert_eq!(templates::file(), Some(template));
+
+        templates::TEST_DIR.with(|d| *d.borrow_mut() = None);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Save to new project folder: `<name>/<name>.lmn` in the folder picked, the data folder there; one already there
     /// is refused.
     #[test]
     fn new_project_folder() {
@@ -443,7 +520,7 @@ mod tests {
         let mut app = App::new(None);
         app.save_to(dir.join("Tune.flp"));
         app.new_folder_chosen(dir.clone());
-        let file = dir.join("Tune").join("Tune.lemon");
+        let file = dir.join("Tune").join("Tune.lmn");
         assert_eq!(app.state.path.as_deref(), Some(file.as_path()), "{:?}", app.state.message);
         assert!(file.is_file());
         assert_eq!(crate::data_folder::folder(&app.state), Some(dir.join("Tune")));
@@ -502,7 +579,7 @@ mod tests {
         use crate::views::menus::{active, item_at, DELETE_UNUSED_LABEL, TOOLS_MENU};
         let mut app = App::new(None);
         let row = |menu: usize, label: &str| (0..200).find_map(|i| item_at(menu, i).filter(|it| it.label == label)).unwrap();
-        let rows = [(0, "Restore backup..."), (0, "Save to new project folder..."), (0, DELETE_UNUSED_LABEL), (TOOLS_MENU, DELETE_UNUSED_LABEL)];
+        let rows = [(0, "Revert to last backup"), (0, "Save to new project folder..."), (0, DELETE_UNUSED_LABEL), (TOOLS_MENU, DELETE_UNUSED_LABEL)];
         for (m, l) in rows {
             assert!(!active(&app.state, m, row(m, l)), "{l}: never saved");
         }
@@ -512,4 +589,8 @@ mod tests {
             assert!(active(&app.state, m, row(m, l)), "{l}: saved");
         }
     }
+}
+
+#[cfg(test)]mod audit_tests {use super::*;
+ #[test]fn audit_cleanup_retains_warp_source_without_original_channel(){let mut a=App::new(None);let d=std::env::temp_dir().join(format!("audit-warp-cleanup-{}",std::process::id()));std::fs::create_dir_all(d.join("Samples")).unwrap();let p=d.join("Samples/source.wav");std::fs::write(&p,b"audio").unwrap();a.state.project.channels.clear();a.state.project.audio_warps.push(os_model::AudioWarp{source:p.to_string_lossy().into_owned(),rendered:String::new(),points:vec![]});assert!(!unused_files(&d,&a.used_files()).contains(&p));std::fs::remove_dir_all(d).unwrap();}
 }

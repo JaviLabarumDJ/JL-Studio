@@ -58,6 +58,34 @@ pub enum Cmd {
     RenderAsClip,
 }
 
+impl Cmd {
+    /// The command behind a PATTERNS menu label.
+    pub fn from_label(label: &str) -> Option<Cmd> {
+        Some(match label {
+            "Find first empty..." => Cmd::FindFirst,
+            "Find next empty..." => Cmd::FindNext,
+            "Find next empty (no naming)" => Cmd::FindNextNoName,
+            "Select in playlist" => Cmd::SelectInPlaylist,
+            "Rename and color..." => Cmd::Rename,
+            "Change color..." => Cmd::ChangeColor,
+            "Random color" => Cmd::RandomColor,
+            "Transpose..." => Cmd::Transpose,
+            "Insert one" => Cmd::InsertOne,
+            "Clone" => Cmd::Clone,
+            "Delete" => Cmd::Delete,
+            "Move up" => Cmd::MoveUp,
+            "Move down" => Cmd::MoveDown,
+            "Set time signature..." => Cmd::TimeSignature,
+            "Open in project browser" => Cmd::OpenInBrowser,
+            "Split by channel" => Cmd::SplitByChannel,
+            "Quick render as audio clip" => Cmd::QuickRender,
+            "Render as audio clip..." => Cmd::RenderAsClip,
+            "Render and replace..." => Cmd::RenderReplace,
+            _ => return None,
+        })
+    }
+}
+
 /// Clicks inside the name box, its popups and the confirm dialog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Hit {
@@ -67,16 +95,27 @@ pub enum Hit {
     /// Column, row of a suggestion (column 0 = recent names).
     Suggest(usize, usize),
     Color,
-    Swatch(usize), // This code is a part of L e m o n S t u d i o.
+    Swatch(usize),
+    CustomSwatch(usize),
+    EditSwatch(usize),
+    SwatchWheel,
+    SwatchBrightness,
+    SaveSwatch,
+    ClearSwatch,
+    CancelSwatch,
     ConfirmOk,
     ConfirmCancel,
     /// The confirmation's Remember my choice check.
     ConfirmRemember,
     Inside,
+    Text(usize),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BoxTarget {
+    AudioClip(usize),
+    MixerTrack(u16),
+    PlaylistTrack(u16),
     Name(u16),
     Transpose(u16),
     /// The channel rack's boxes (spec: ui/channel-rack.md §13, §17, §21).
@@ -89,10 +128,12 @@ pub struct NameBox {
     pub text: String,
     /// The text is selected: the first typed character replaces it.
     pub fresh: bool,
+    pub editor: crate::dialog::Field,
     /// Top-left on screen.
     pub at: (f32, f32),
     pub suggestions: bool,
     pub palette: bool,
+    pub custom: Option<(usize, [f32; 3])>,
     /// Opened for a new pattern (find empty, insert one): accepting it makes the pattern the playlist's clip
     /// source, listed in the picker even while empty, so it can be placed at once.
     pub created: bool,
@@ -179,7 +220,7 @@ pub fn pat_mut(s: &mut State, n: u16) -> &mut Pattern {
 
 /// Renumber patterns (`None` removes one): playlist clips follow (clips of removed patterns go). Numbers that
 /// end up without a pattern keep an empty entry so saving clears their blocks.
-pub(crate) fn renumber(s: &mut State, map: impl Fn(u16) -> Option<u16>) {
+fn renumber(s: &mut State, map: impl Fn(u16) -> Option<u16>) {
     let old: Vec<u16> = s.project.patterns.iter().map(|p| p.number).collect();
     let mut pats: Vec<Pattern> = std::mem::take(&mut s.project.patterns)
         .into_iter()
@@ -196,22 +237,30 @@ pub(crate) fn renumber(s: &mut State, map: impl Fn(u16) -> Option<u16>) {
     }
     pats.sort_by_key(|p| p.number);
     s.project.patterns = pats;
+    s.project.clip_picker_order.retain_mut(|source| match source {
+        ClipSource::Pattern(id) => map(*id).map(|new| *id = new).is_some(),
+        ClipSource::Channel(_) => true,
+    });
+    s.playlist.picker_ui.selected.clear();
+    s.playlist.picker_ui.stop_previews();
     if let Some(a) = s.project.arrangement_mut() {
-        a.clips.retain_mut(|c| match c.source {
-            ClipSource::Pattern(n) => match map(n) {
-                Some(m) => {
-                    c.source = ClipSource::Pattern(m);
-                    true
-                }
-                None => false,
-            },
-            _ => true,
-        });
+        remap_pattern_clips(a, &map);
     }
     s.playlist.sel.clear();
     s.playlist.hover_clip = None;
     s.piano.clear_selection();
     s.piano.dirty = true;
+}
+
+fn remap_pattern_clips(arrangement: &mut os_model::Arrangement, map: &impl Fn(u16) -> Option<u16>) {
+    for clips in std::iter::once(&mut arrangement.clips)
+        .chain(arrangement.tracks.iter_mut().filter_map(|track| track.frozen.as_mut()))
+    {
+        clips.retain_mut(|clip| match clip.source {
+            ClipSource::Pattern(n) => map(n).map(|new| clip.source = ClipSource::Pattern(new)).is_some(),
+            ClipSource::Channel(_) => true,
+        });
+    }
 }
 
 /// "<name> #k" with the lowest free k >= 2 (§3 Clone).
@@ -266,12 +315,21 @@ pub(crate) fn random_color(seed: u64) -> Rgb {
 
 /// Open the name box for pattern `n` at `at`.
 pub fn open_name_box(s: &mut State, target: BoxTarget, at: (f32, f32)) {
+    let at = if matches!(target, BoxTarget::AudioClip(_) | BoxTarget::MixerTrack(_) | BoxTarget::PlaylistTrack(_)) {
+        (at.0.clamp(0., (s.screen.0 - BOX_W).max(0.)),
+         at.1.clamp(0., (s.screen.1 - BOX_H).max(0.)))
+    } else {
+        at
+    };
     let text = match target {
         BoxTarget::Name(n) => name_of(s, n),
+        BoxTarget::MixerTrack(n) => crate::mixer::name(s, n),
+        BoxTarget::PlaylistTrack(n) => crate::playlist::track_name_for_edit(s, n),
+        BoxTarget::AudioClip(i) => crate::playlist::clips(s).get(i).map_or_else(String::new, |c| crate::playlist::clip_name(s, c).into_owned()),
         BoxTarget::Transpose(_) => String::new(),
         BoxTarget::Rack(b) => crate::rack::box_text(s, b),
     };
-    s.pat_ui.name_box = Some(NameBox { target, text, fresh: true, at, suggestions: false, palette: false, created: false });
+    s.pat_ui.name_box = Some(NameBox { target, editor: { let mut f = crate::dialog::Field::default(); f.set(&text); f.select_all(); f }, text, fresh: true, at, suggestions: false, palette: false, custom: None, created: false });
 }
 
 /// Where a box opened from a menu / key goes: the mouse over its colour tab (§4).
@@ -282,6 +340,7 @@ pub fn box_at_mouse(mouse: (f32, f32)) -> (f32, f32) {
 /// Pattern `n` picked in the pattern selector (its menu, a drag or the wheel): it becomes the current pattern and the
 /// playlist's clip source, so Draw and Paint place it, as FL does (issue #94).
 pub fn select(s: &mut State, n: u16) {
+    s.piano.dirty |= s.pattern != n;
     s.pattern = n;
     s.playlist.source = Some(ClipSource::Pattern(n));
 }
@@ -291,25 +350,6 @@ pub const PLUS_BOX_AT: (f32, f32) = (949.0, 46.0);
 
 /// Run a command; `at` is where a name box opens. Returns a status message.
 pub fn run(s: &mut State, cmd: Cmd, at: (f32, f32)) -> Option<String> {
-    // The commands that change the project are one undo step each (spec: roadmap/control-plane.md).
-    let step = match cmd {
-        Cmd::RandomColor => Some("Pattern color"),
-        Cmd::InsertOne => Some("Insert pattern"),
-        Cmd::Clone => Some("Clone pattern"),
-        Cmd::Delete if !crate::messages::on(&crate::messages::DELETE_PATTERN) => Some(DELETE),
-        Cmd::MoveUp | Cmd::MoveDown => Some("Move pattern"),
-        _ => None,
-    };
-    match step {
-        Some(name) => crate::control::edit(s, name, crate::control::command::Region::Project, |s| run_now(s, cmd, at)),
-        None => run_now(s, cmd, at),
-    }
-}
-
-/// The undo step of a pattern's deletion.
-const DELETE: &str = "Delete pattern";
-
-fn run_now(s: &mut State, cmd: Cmd, at: (f32, f32)) -> Option<String> {
     let cur = s.pattern.max(1);
     match cmd {
         Cmd::FindFirst => {
@@ -349,7 +389,13 @@ fn run_now(s: &mut State, cmd: Cmd, at: (f32, f32)) -> Option<String> {
         }
         Cmd::RandomColor => {
             let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64);
-            pat_mut(s, cur).color = Some(random_color(seed ^ u64::from(cur)));
+            let selected = &s.playlist.picker_ui.selected;
+            let targets: Vec<_> = if selected.contains(&ClipSource::Pattern(cur)) {
+                selected.iter().filter_map(|src| if let ClipSource::Pattern(n) = src { Some(*n) } else { None }).collect()
+            } else { vec![cur] };
+            let snaps=targets.iter().map(|&n|crate::history::Snap::source_color(s,ClipSource::Pattern(n))).collect();
+            crate::history::record(s,"Random pattern colors",crate::history::Snap::Several(snaps));
+            for n in targets { pat_mut(s, n).color = Some(random_color(seed ^ u64::from(n))); }
             s.piano.dirty = true;
         }
         Cmd::Transpose => open_name_box(s, BoxTarget::Transpose(cur), at),
@@ -409,9 +455,33 @@ fn confirming(s: &State) -> &'static crate::messages::Message {
 /// after it, right after the current one in channel order (later patterns move up with their clips, as Insert one),
 /// with the original's colour, markers and other settings but only that channel's notes. Every playlist clip of the
 /// original gets one clip per new pattern at the same place, under it. No notes: nothing happens. One undo step.
+pub const SPLIT_VISIBILITY: &str = "visible_split-by-channel";
+
 pub fn split_by_channel(s: &mut State) {
+    let _ = split(s, None);
+}
+
+pub fn confirm_split(app: &mut crate::app::App) -> Option<String> {
+    let s = &mut app.state;
     let cur = s.pattern.max(1);
-    let Some(orig) = s.project.pattern(cur).cloned() else { return };
+    if !crate::workspace_visibility::shown(SPLIT_VISIBILITY) { return None; }
+    let count = s.project.pattern(cur).map_or(0, |p| s.project.channels.iter()
+        .filter(|ch| p.notes.iter().any(|n| n.channel == ch.index)).take(2).count());
+    if count == 2 && s.project.arrangements.iter().any(|a| a.clips.iter().any(|c| c.source == ClipSource::Pattern(cur))) {
+        use crate::dialog::{Answer, Kind, Msg, Then};
+        app.show_msg(Msg::new(Kind::Question, "Split by channel", vec![
+            ("Create an instrument track for each pattern, or group the new tracks below the first pattern.".into(), false)
+        ], &[Answer::Yes, Answer::No, Answer::Cancel], Then::SplitPattern(cur))
+            .labelled(&["Instrument tracks", "Group below first", "Cancel"]));
+        None
+    } else {
+        split(s, None)
+    }
+}
+
+pub fn split(s: &mut State, group: Option<bool>) -> Option<String> {
+    let cur = s.pattern.max(1);
+    let orig = s.project.pattern(cur).cloned()?;
     let chans: Vec<(u16, String)> = s
         .project
         .channels
@@ -420,40 +490,151 @@ pub fn split_by_channel(s: &mut State) {
         .filter(|(_, c)| orig.notes.iter().any(|n| n.channel == c.index))
         .map(|(r, c)| (c.index, crate::rack::channel_name(s, r)))
         .collect();
-    let Some(((first, name), rest)) = chans.split_first() else { return };
+    let ((first, name), rest) = chans.split_first()?;
     let k = rest.len() as u16;
     // Room for the new numbers: no used pattern may move past the last one.
-    let last = s.project.patterns.iter().filter(|p| used(p)).map(|p| p.number).max().unwrap_or(cur).max(cur);
+    let placed = s.project.arrangements.iter().flat_map(|a| {
+        a.clips.iter().chain(a.tracks.iter().filter_map(|t| t.frozen.as_ref()).flatten())
+    }).filter_map(|clip| match clip.source {
+        ClipSource::Pattern(n) => Some(n),
+        _ => None,
+    });
+    let last = s.project.patterns.iter().filter(|p| used(p)).map(|p| p.number)
+        .chain(placed).chain(std::iter::once(cur)).max().unwrap_or(cur);
     if usize::from(last) + rest.len() > usize::from(MAX) {
-        return;
+        return Some("There are too many patterns to split this pattern.".into());
     }
-    let undo = crate::history::Snap::Patterns { patterns: s.project.patterns.clone(), current: cur };
-    crate::playlist::snapshot_with(s, "Split by instrument", undo);
+    let extra = crate::history::Snap::Patterns { patterns: s.project.patterns.clone(), current: cur };
+    let undo = if group.is_some() {
+        for arr in &s.project.arrangements {
+            let rows = split_rows(arr, cur);
+            if rows.is_empty() { continue; }
+            let last_clip = arr.clips.iter().map(|c| c.track as usize).max().unwrap_or(0);
+            let last_track = arr.tracks.iter().enumerate().rposition(|(i, t)| *t != os_model::PlaylistTrack::new(i as u32 + 1)).unwrap_or(0);
+            if last_clip.max(last_track) + rows.len() * rest.len() >= usize::from(crate::playlist::TRACKS) {
+                return Some("There are too few free Playlist rows to fit the split patterns.".into());
+            }
+            if rows.iter().any(|&row| arr.tracks.get(usize::from(row)).is_some_and(|t| t.locked || t.frozen.is_some() || t.folder || t.comp.is_some())) {
+                return Some("Unlock or unfreeze the source Playlist track before splitting.".into());
+            }
+        }
+        crate::history::Snap::Several(vec![extra, crate::history::Snap::PatternArrangements(s.project.arrangements.clone())])
+    } else { extra };
+    crate::playlist::snapshot_with(s, "Split by channel", undo);
     // Notes of a channel no longer in the rack stay with the original.
     let p = pat_mut(s, cur);
     p.notes.retain(|n| n.channel == *first || !chans.iter().any(|c| c.0 == n.channel));
     p.name = Some(name.clone());
     s.piano.dirty = true;
     if k == 0 {
-        return;
+        return None;
     }
-    renumber(s, |n| Some(if n > cur { n + k } else { n }));
+    let mapped = |n| if n > cur { n + k } else { n };
+    let active = s.project.arrangement().map(|arr| arr.number);
+    renumber(s, |n| Some(mapped(n)));
+    if group.is_some() {
+        for arrangement in s.project.arrangements.iter_mut().filter(|a| Some(a.number) != active) {
+            for clip in arrangement.clips.iter_mut()
+                .chain(arrangement.tracks.iter_mut().filter_map(|t| t.frozen.as_mut()).flatten()) {
+                if let ClipSource::Pattern(n) = &mut clip.source {
+                    *n = mapped(*n);
+                }
+            }
+        }
+    }
+    for lane in &mut s.project.instrument_lanes {
+        lane.3 = mapped(lane.3);
+    }
     for (j, (ch, name)) in (1..).zip(rest) {
         // Control points stay with the original (only notes are divided).
         let notes = orig.notes.iter().filter(|n| n.channel == *ch).copied().collect();
         *pat_mut(s, cur + j) = Pattern { number: cur + j, name: Some(name.clone()), notes, controls: Vec::new(), ..orig.clone() };
+    }
+    if let Some(grouped) = group {
+        let part_tracks = chans.iter().map(|(id, name)| {
+            let channel = s.project.channel(*id).unwrap();
+            (*id, name.clone(), channel.mixer_track, channel.color)
+        }).collect::<Vec<_>>();
+        for number in s.project.arrangements.iter().map(|arr| arr.number).collect::<Vec<_>>() {
+            let rows = split_rows(s.project.arrangements.iter().find(|a| a.number == number).unwrap(), cur);
+            for row in rows.into_iter().rev() {
+                if Some(number) == active {
+                    while crate::playlist::arr_mut(s).tracks.len() < usize::from(crate::playlist::TRACKS) {
+                        let a = crate::playlist::arr_mut(s);
+                        a.tracks.push(os_model::PlaylistTrack::new(a.tracks.len() as u32 + 1));
+                    }
+                    for _ in 0..k { crate::playlist::insert_track(s, row + 1); }
+                } else {
+                    let arr = s.project.arrangements.iter_mut().find(|a| a.number == number).unwrap();
+                    let shift = |track: u16| if track > row { track + k } else { track };
+                    for clip in &mut arr.clips { clip.track = shift(clip.track); }
+                    for t in &mut arr.tracks {
+                        if let Some(clips) = &mut t.frozen {
+                            for clip in clips { clip.track = shift(clip.track); }
+                        }
+                    }
+                    arr.attached_order.iter_mut().for_each(|r| *r = shift(*r));
+                    for link in &mut s.project.instrument_lanes {
+                        if link.1 == number { link.2 = shift(link.2); }
+                    }
+                    while arr.tracks.len() <= usize::from(row) {
+                        arr.tracks.push(os_model::PlaylistTrack::new(arr.tracks.len() as u32 + 1));
+                    }
+                    for _ in 0..k { arr.tracks.insert(usize::from(row + 1), os_model::PlaylistTrack::new(0)); }
+                    arr.tracks.truncate(usize::from(crate::playlist::TRACKS));
+                    for (i, track) in arr.tracks.iter_mut().enumerate().skip(usize::from(row + 1)) {
+                        track.number = i as u32 + 1;
+                    }
+                }
+                let arr = s.project.arrangements.iter_mut().find(|a| a.number == number).unwrap();
+                let original = arr.clips.iter().filter(|clip| clip.track == row && clip.source == ClipSource::Pattern(cur)).cloned().collect::<Vec<_>>();
+                for (i, (id, name, track, color)) in part_tracks.iter().enumerate() {
+                    let part = i as u16;
+                    let lane = row + part;
+                    let track_info = &mut arr.tracks[usize::from(lane)];
+                    if part != 0 || track_info.name.is_none() { track_info.name = Some(name.clone()); }
+                    if part != 0 || track_info.color.is_none() { track_info.color = *color; }
+                    if grouped {
+                        track_info.grouped = part != 0;
+                    } else {
+                        track_info.mode = os_model::PlaylistTrackMode::Instrument;
+                        track_info.attached_mixer = Some(*track);
+                        s.project.instrument_lanes.retain(|x| x.1 != number || x.2 != lane);
+                        s.project.instrument_lanes.push((*id, number, lane, cur + part));
+                    }
+                    if part == 0 { continue; }
+                    arr.clips.extend(original.iter().cloned().map(|mut c| {
+                        c.source = ClipSource::Pattern(cur + part);
+                        c.track = lane;
+                        c.name = None;
+                        c
+                    }));
+                }
+                arr.clips.sort_by_key(|c| c.position);
+            }
+        }
+        return None;
     }
     if let Some(a) = s.project.arrangement_mut() {
         // Clips are drawn in record order: the new ones go just before their original, which stays on top.
         let mut clips = Vec::with_capacity(a.clips.len());
         for c in std::mem::take(&mut a.clips) {
             if c.source == ClipSource::Pattern(cur) {
-                clips.extend((1..=k).map(|j| os_model::Clip { source: ClipSource::Pattern(cur + j), ..c }));
+                clips.extend((1..=k).map(|j| os_model::Clip { source: ClipSource::Pattern(cur + j), name: c.name.clone(), ..c }));
             }
             clips.push(c);
         }
         a.clips = clips;
     }
+    None
+}
+
+fn split_rows(arrangement: &os_model::Arrangement, pattern: u16) -> Vec<u16> {
+    let mut rows = arrangement.clips.iter().filter(|c| c.source == ClipSource::Pattern(pattern))
+        .map(|c| c.track).collect::<Vec<_>>();
+    rows.sort_unstable();
+    rows.dedup();
+    rows
 }
 
 /// Ok in the delete confirmation (channels waiting in the rack go to the app, which removes them). With Remember my
@@ -468,7 +649,7 @@ pub fn delete_current(s: &mut State) {
         s.rack.delete_now = Some(rows);
         return;
     }
-    crate::control::edit(s, DELETE, crate::control::command::Region::Project, delete_pattern);
+    delete_pattern(s);
 }
 
 /// Cancel in the delete confirmation: nothing is deleted and Remember my choice is not kept.
@@ -484,23 +665,32 @@ fn delete_pattern(s: &mut State) {
     renumber(s, |n| if n == cur { None } else if n > cur { Some(n - 1) } else { Some(n) });
 }
 
-/// Accept the name box.
-pub fn accept(s: &mut State) {
-    let Some(b) = s.pat_ui.name_box.as_ref() else { return };
-    let name = match b.target {
-        BoxTarget::Name(_) => "Pattern name",
-        BoxTarget::Transpose(_) | BoxTarget::Rack(crate::rack::RBox::Transpose) => "Transpose",
-        BoxTarget::Rack(crate::rack::RBox::Channel(_)) => "Channel name",
-        BoxTarget::Rack(crate::rack::RBox::SwingMix) => "Channel settings",
-        BoxTarget::Rack(crate::rack::RBox::ColorSel) => "Channel color",
-        BoxTarget::Rack(_) => "Channel group",
-    };
-    crate::control::edit(s, name, crate::control::command::Region::Project, accept_now);
+/// Delete selected picker patterns in one pass, including placements in other arrangements.
+pub(crate) fn delete_picker_patterns(s: &mut State, sorted: &[u16]) {
+    use crate::history::Snap;
+
+    let undo = Snap::Several(vec![
+        Snap::Patterns { patterns: s.project.patterns.clone(), current: s.pattern },
+        Snap::PatternArrangements(s.project.arrangements.clone()),
+        Snap::ClipPickerOrder(s.project.clip_picker_order.clone()),
+    ]);
+    crate::history::record(s, "Delete selected patterns", undo);
+    let map = |n| sorted.binary_search(&n).err().map(|before| n - before as u16);
+    let active = s.project.arrangement().map(|a| a.number);
+    renumber(s, map);
+    for arrangement in s.project.arrangements.iter_mut().filter(|a| Some(a.number) != active) {
+        remap_pattern_clips(arrangement, &map);
+    }
+    s.pattern = (s.pattern - sorted.partition_point(|&n| n < s.pattern) as u16).max(1);
 }
 
-fn accept_now(s: &mut State) {
+/// Accept the name box.
+pub fn accept(s: &mut State) {
     let Some(b) = s.pat_ui.name_box.take() else { return };
     match b.target {
+        BoxTarget::AudioClip(i) => crate::playlist::set_audio_clip_name(s, i, &b.text),
+        BoxTarget::MixerTrack(n) => crate::mixer::rename_track(s, n, &b.text),
+        BoxTarget::PlaylistTrack(n) => crate::playlist::rename_track(s, n, &b.text),
         BoxTarget::Name(n) => {
             let text = b.text.trim().to_string();
             let name = (!text.is_empty() && text != format!("Pattern {n}")).then_some(text.clone());
@@ -538,41 +728,93 @@ pub fn suggest(s: &mut State, col: usize, row: usize) {
     }
 }
 
-pub fn set_color(s: &mut State, i: usize) {
-    let name = match s.pat_ui.name_box.as_ref().map(|b| b.target) {
-        Some(BoxTarget::Rack(_)) => "Channel color",
-        _ => "Pattern color",
-    };
-    crate::control::edit(s, name, crate::control::command::Region::Project, |s| set_color_now(s, i));
+pub const CUSTOM_SWATCHES: usize = 6;
+
+pub fn custom_swatch(i: usize) -> Option<u32> {
+    crate::prefs::text(&format!("clip_custom_swatch_{i}")).and_then(|v| hex_color(&v))
 }
 
-fn set_color_now(s: &mut State, i: usize) {
+fn hex_color(text: &str) -> Option<u32> {
+    let text = text.strip_prefix('#').unwrap_or(text);
+    if text.len() == 6 && text.bytes().all(|b| b.is_ascii_hexdigit()) {
+        u32::from_str_radix(text, 16).ok()
+    } else {
+        None
+    }
+}
+
+pub fn set_color(s: &mut State, i: usize) {
+    if let Some(&color) = SWATCHES.get(i) {
+        apply_swatch(s, color);
+    }
+}
+
+fn apply_swatch(s: &mut State, c: u32) {
     let target = s.pat_ui.name_box.as_ref().map(|b| b.target);
-    if let Some(&c) = SWATCHES.get(i) {
-        let col = Some(Rgb::new((c >> 16) as u8, (c >> 8) as u8, c as u8));
+    let color = Some(Rgb::new((c >> 16) as u8, (c >> 8) as u8, c as u8));
+    if matches!(target, Some(BoxTarget::AudioClip(_) | BoxTarget::MixerTrack(_) | BoxTarget::PlaylistTrack(_))) {
         match target {
-            Some(BoxTarget::Name(n)) => pat_mut(s, n).color = col,
+            Some(BoxTarget::AudioClip(i)) => crate::playlist::set_audio_clip_color(s, i, color),
+            Some(BoxTarget::MixerTrack(n)) => crate::mixer::set_track_color(s, n, color),
+            Some(BoxTarget::PlaylistTrack(n)) => crate::playlist::set_track_color(s, n, color),
+            _ => unreachable!(),
+        }
+        if let Some(b) = &mut s.pat_ui.name_box {
+            b.palette = false;
+            b.custom = None;
+        }
+        return;
+    }
+    let source = match target {
+        Some(BoxTarget::Name(n)) => os_model::ClipSource::Pattern(n),
+        Some(BoxTarget::Rack(crate::rack::RBox::Channel(r))) => {
+            let Some(ch) = s.project.channels.get(r) else { return };
+            os_model::ClipSource::Channel(ch.index)
+        }
+        _ => return,
+    };
+    let before = crate::history::Snap::source_color(s, source);
+    if crate::playlist::source_color(s, source) != color {
+        crate::history::record(s, "Change clip source color", before);
+        match target {
+            Some(BoxTarget::Name(n)) => pat_mut(s, n).color = color,
             Some(BoxTarget::Rack(crate::rack::RBox::Channel(r))) => {
-                if let Some(ch) = s.project.channels.get_mut(r) {
-                    ch.color = col;
-                }
+                let ch = &mut s.project.channels[r];
+                ch.color = color;
+                if matches!(ch.kind, os_model::ChannelKind::AudioClip | os_model::ChannelKind::Automation) { ch.rack.stored_color = color; }
             }
-            // Color selected ▸ All...: every selected channel, and the box closes.
-            Some(BoxTarget::Rack(crate::rack::RBox::ColorSel)) => {
-                for r in s.rack.sel.clone() {
-                    if let Some(ch) = s.project.channels.get_mut(r) {
-                        ch.color = col;
-                    }
-                }
-                s.pat_ui.name_box = None;
-            }
-            _ => return,
+            _ => {}
         }
         s.piano.dirty = true;
     }
     if let Some(b) = s.pat_ui.name_box.as_mut() {
         b.palette = false;
+        b.custom = None;
     }
+}
+
+fn edit_swatch(s: &mut State, i: usize) {
+    if let Some(b) = &mut s.pat_ui.name_box {
+        let color = custom_swatch(i).map(os_ui::Color::rgb).unwrap_or(os_ui::Color::rgb(0xffffff));
+        b.custom = Some((i, crate::theme_adjust::hsv(color)));
+    }
+}
+
+fn save_swatch(s: &mut State, clear: bool) {
+    let Some(b) = &mut s.pat_ui.name_box else { return };
+    let Some((i, hsv)) = b.custom else { return };
+    if clear {
+        crate::prefs::set_text(&format!("clip_custom_swatch_{i}"), "");
+    } else {
+        let c = crate::theme_adjust::from_hsv(hsv);
+        let color = (u32::from(c.r) << 16) | (u32::from(c.g) << 8) | u32::from(c.b);
+        crate::prefs::set_text(&format!("clip_custom_swatch_{i}"), &format!("{color:06X}"));
+        if matches!(b.target, BoxTarget::MixerTrack(_) | BoxTarget::PlaylistTrack(_)) {
+            apply_swatch(s, color);
+            return;
+        }
+    }
+    b.custom = None;
 }
 
 /// A click in the name box / its popups / the confirmation.
@@ -584,6 +826,7 @@ pub fn hit(s: &mut State, h: Hit) {
             if let Some(b) = s.pat_ui.name_box.as_mut() {
                 b.suggestions = !b.suggestions;
                 b.palette = false;
+                b.custom = None;
             }
         }
         Hit::Suggest(c, r) => suggest(s, c, r),
@@ -591,18 +834,30 @@ pub fn hit(s: &mut State, h: Hit) {
             if let Some(b) = s.pat_ui.name_box.as_mut() {
                 b.palette = !b.palette;
                 b.suggestions = false;
+                b.custom = None;
             }
         }
         Hit::Swatch(i) => set_color(s, i),
+        Hit::CustomSwatch(i) => match custom_swatch(i) {
+            Some(color) => apply_swatch(s, color),
+            None => edit_swatch(s, i),
+        },
+        Hit::EditSwatch(i) => edit_swatch(s, i),
+        Hit::SaveSwatch => save_swatch(s, false),
+        Hit::ClearSwatch => save_swatch(s, true),
+        Hit::CancelSwatch => {
+            if let Some(b) = &mut s.pat_ui.name_box { b.custom = None; }
+        }
         Hit::ConfirmOk => delete_current(s),
         Hit::ConfirmCancel => cancel_confirm(s),
         Hit::ConfirmRemember => s.pat_ui.remember = !s.pat_ui.remember,
-        Hit::Inside => {}
+        Hit::Text(_) | Hit::Inside | Hit::SwatchWheel | Hit::SwatchBrightness => {}
     }
 }
 
 /// Typing into the name box. Returns whether the key was taken.
-pub fn key(s: &mut State, key: &winit::keyboard::Key, ctrl: bool) -> bool {
+pub fn key(s: &mut State, key: &winit::keyboard::Key, ctrl: bool) -> bool { key_mod(s,key,ctrl,false) }
+pub fn key_mod(s: &mut State, key: &winit::keyboard::Key, ctrl: bool, shift: bool) -> bool {
     use winit::keyboard::{Key, NamedKey};
     if s.pat_ui.confirm {
         match key {
@@ -613,27 +868,23 @@ pub fn key(s: &mut State, key: &winit::keyboard::Key, ctrl: bool) -> bool {
         return true;
     }
     let Some(b) = s.pat_ui.name_box.as_mut() else { return false };
-    let typed = |b: &mut NameBox, t: &str| {
-        if b.fresh {
-            b.text.clear();
-            b.fresh = false;
+    if b.custom.is_some() {
+        match key {
+            Key::Named(NamedKey::Enter) => save_swatch(s, false),
+            Key::Named(NamedKey::Escape) => b.custom = None,
+            _ => {}
         }
-        b.text.push_str(t);
-    };
+        return true;
+    }
+    if b.editor.text != b.text { b.editor.set(&b.text); if b.fresh { b.editor.select_all(); } }
     match key {
         Key::Named(NamedKey::Enter) => accept(s),
         Key::Named(NamedKey::Escape) => s.pat_ui.name_box = None,
-        Key::Named(NamedKey::Backspace) => {
-            if b.fresh {
-                b.text.clear();
-                b.fresh = false;
-            } else {
-                b.text.pop();
-            }
+        _ => {
+            b.editor.key_mod(key, ctrl, false, shift);
+            b.text.clone_from(&b.editor.text);
+            b.fresh = b.editor.all;
         }
-        Key::Named(NamedKey::Space) => typed(b, " "),
-        Key::Character(c) if !ctrl => typed(b, c),
-        _ => {}
     }
     true
 }
@@ -791,5 +1042,47 @@ mod tests {
         suggest(s, 4, 3);
         assert_eq!(name_of(s, 1), "Chorus");
         assert!(s.pat_ui.name_box.is_none());
+    }
+}
+
+
+#[cfg(test)]
+mod split_workflow_tests {
+    use super::*;
+    use crate::{app::App, dialog::{Answer, Reply}, playlist as pl};
+    use os_model::{Clip, Note, PlaylistTrackMode};
+
+    #[test]
+    fn arranged_split_workflows_preserve_placements_lanes_and_undo() {
+        for grouped in [false, true] {
+            let mut app = App::new(None);
+            app.state.project = crate::app::test_project();
+            app.state.pattern = 1;
+            pat_mut(&mut app.state, 1).notes = vec![Note::step(0, 0), Note::step(1, 24)];
+            let mut source = Clip::new(384, 192, 2, ClipSource::Pattern(1));
+            source.window = Some((24.0, 216.0));
+            let original = vec![source.clone(), Clip::new(768, 192, 3, ClipSource::Pattern(2))];
+            pl::arr_mut(&mut app.state).clips = original.clone();
+            let mut alternate = pl::arr_mut(&mut app.state).clone();
+            alternate.number = 2;
+            app.state.project.arrangements.push(alternate);
+            confirm_split(&mut app);
+            app.answer(Reply::Button(if grouped { Answer::No } else { Answer::Yes }));
+            for arrangement in &app.state.project.arrangements {
+                let new_clip = &arrangement.clips[1];
+                assert_eq!((new_clip.position, new_clip.length, new_clip.window, new_clip.track), (384, 192, source.window, 3));
+                assert_eq!(new_clip.source, ClipSource::Pattern(2));
+                assert_eq!(arrangement.clips[2].track, 4);
+                assert_eq!(arrangement.clips[2].source, ClipSource::Pattern(3));
+                assert_eq!(arrangement.tracks[3].grouped, grouped);
+                if !grouped {
+                    assert_eq!(arrangement.tracks[3].mode, PlaylistTrackMode::Instrument);
+                    assert!(app.state.project.instrument_lanes.iter().any(|v| *v == (1, arrangement.number, 3, 2)));
+                }
+            }
+            pl::run(&mut app, pl::Cmd::Undo);
+            assert!(app.state.project.arrangements.iter().all(|a| a.clips == original));
+            assert_eq!(app.state.project.pattern(1).unwrap().notes.len(), 2);
+        }
     }
 }

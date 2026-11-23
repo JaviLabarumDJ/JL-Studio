@@ -1,18 +1,15 @@
 [package]
 name = "os-plugkit"
-description = "Shared pieces of Lemon Studio's own plugin editors: live parameter edits, menus, native editor windows, popups and type-in boxes"
+description = "Shared pieces of ML Studio's own plugin editors: live parameter edits, menus, native editor windows, popups and type-in boxes"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-[lib]
-doctest = false
-
 [dependencies]
 nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", default-features = false, features = ["vst3"] }
-os-hostlink.workspace = true
 os-ui = { path = "../os-ui" }
 os-theme = { path = "../os-theme" }
+os-paths.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Controls", "Win32_System_LibraryLoader"] }

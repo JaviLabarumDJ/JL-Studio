@@ -35,6 +35,29 @@ fn clear() {
 }
 
 #[test]
+fn smart_disable_checks_pending_work_and_keeps_vst2_host_time() {
+    let (_m, mut p) = gain(); assert!(p.activate(1000));
+    assert_eq!(p.smart_disable_tail(), Some(0));
+    p.advance_silent(1000, 5000);
+    p.process_fx(1000, &mut [0.; 16], &mut [0.; 16]);
+    assert_eq!(probe(|p| p.times.last().unwrap().3), 5000.);
+    assert_eq!(p.steady, 5016);
+    p.param_fx(5, 0, 0.5); assert_eq!(p.smart_disable_tail(), None);
+    p.process_fx(1000, &mut [0.; 16], &mut [0.; 16]);
+    // VST2's minimum automation split can carry this edit into the next block.
+    assert_eq!(p.smart_disable_tail(), None);
+    p.process_fx(1000, &mut [0.; 16], &mut [0.; 16]);
+    assert_eq!(p.smart_disable_tail(), Some(0));
+    let editor = p.editor_state.lock().unwrap();
+    assert_eq!(p.smart_disable_tail(), None, "busy editor never blocks audio"); drop(editor);
+    p.inst.shared.io_changed.store(true, Ordering::Release);
+    assert_eq!(p.smart_disable_tail(), None);
+    let (_m, mut synth) = synth(); assert!(synth.activate(1000));
+    assert_eq!(synth.smart_disable_tail(), Some(4800));
+    synth.note_on(5000, 60, 1.); assert_eq!(synth.smart_disable_tail(), None);
+}
+
+#[test]
 fn a_plugin_file_lists_its_plugin_and_hands_the_describing_instance_on() {
     let m = module(mock::gain_main, "Mock Gain.dll");
     let d = &m.plugins()[0];
@@ -113,6 +136,19 @@ fn an_inactive_instance_asks_for_its_rate_and_stays_quiet() {
 }
 
 #[test]
+fn sidechain_reaches_vst2_auxiliary_inputs() {
+    let (_m,mut p)=gain();
+    unsafe { (*p.inst.effect).num_inputs=4; }
+    p.activate(48000);
+    let n=MAX_FRAMES as usize+19;
+    let l:Vec<_>=(0..n).map(|i|i as f32/n as f32).collect();
+    let r:Vec<_>=l.iter().map(|x|1.-x).collect();
+    let (mut a,mut b)=(vec![0.;n],vec![0.;n]);
+    p.process_fx_keyed(48000,&mut a,&mut b,(&l,&r));
+    assert_eq!((a,b),(l,r));
+}
+
+#[test]
 fn effects_process_their_input_and_host_edits_are_not_reported_as_the_plugins() {
     let (_m, mut p) = gain();
     p.activate(48000);
@@ -123,22 +159,6 @@ fn effects_process_their_input_and_host_edits_are_not_reported_as_the_plugins() 
     assert_eq!(l[10], 5.0);
     assert_eq!(r[10], -5.0);
     assert!(p.take_param_events().is_empty(), "the plugin's echo of a host edit is no edit");
-}
-
-/// MIDI channel through (spec: ui/channel-rack.md §18): a note started on a MIDI channel goes on it, and so does its end.
-#[test]
-fn notes_go_on_their_midi_channel() {
-    let (_m, mut p) = synth();
-    p.activate(48000);
-    let on_4 = os_engine::NoteLevels { channel: 3, ..Default::default() };
-    p.note_start(0, 60, 1.0, 0.0, on_4);
-    p.note_on(0, 62, 1.0);
-    let (mut l, mut r) = (vec![0.0; 64], vec![0.0; 64]);
-    p.process(48000, &mut l, &mut r);
-    p.note_off(0, 60);
-    p.note_off(0, 62);
-    p.process(48000, &mut l, &mut r);
-    assert_eq!(probe(|p| p.midi.iter().map(|m| (m.1, m.2)).collect::<Vec<_>>()), [(0x93, 60), (0x90, 62), (0x83, 60), (0x80, 62)]);
 }
 
 #[test]
@@ -362,7 +382,14 @@ fn the_editor_opens_in_its_parent_reports_edits_and_follows_resizes() {
     let (_m, mut p) = gain();
     assert!(p.has_editor());
     clear();
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("DISPLAY").is_none() {
+        assert!(p.open_editor(0x1234 as *mut c_void, 1.0).is_err());
+        assert!(logged("editor open").is_empty());
+        return;
+    }
     let size = p.open_editor(0x1234 as *mut c_void, 1.0).expect("editor");
+    assert_eq!(logged("host display"), [format!("host display {}", cfg!(target_os = "linux"))]);
     assert_eq!(size, (300, 200));
     assert_eq!(logged("editor open"), ["editor open 4660"]);
     // Outside macOS the scale is told even at 1: a plugin keeps the last one it was told.
@@ -420,7 +447,7 @@ fn the_host_answers_what_plugins_ask() {
     assert_eq!(ask(abi::host_op::SUPPORTS, c"offline"), 0);
     let mut buf = [0u8; 64];
     unsafe { mock::ask(e, abi::host_op::VENDOR_NAME, buf.as_mut_ptr().cast()) };
-    assert_eq!(text(&buf), "Lemon Studio");
+    assert_eq!(text(&buf), "ML Studio");
     assert_eq!(unsafe { mock::ask(e, abi::host_op::VERSION, std::ptr::null_mut()) }, 2400);
     assert_eq!(unsafe { mock::ask(e, abi::host_op::GET_BLOCK_SIZE, std::ptr::null_mut()) }, 1024, "the usual default before activation");
     if !cfg!(target_os = "macos") {
@@ -477,5 +504,97 @@ fn hosts_a_plugin_from_env() {
     if let Some(s) = p.save_state() {
         eprintln!("state: {} bytes", s.len());
         assert!(p.load_state(&s));
+    }
+}
+
+#[test]
+fn mpe_member_channels_and_reset_are_preserved() {
+    let (_m,mut p)=synth();assert!(p.activate(48000));clear();
+    for b in [[0x91,60,100],[0x92,60,90],[0xb1,74,110],[0xe2,0,96],[0xd1,80,0]]{p.midi(0,b);}
+    let(mut l,mut r)=(vec![0.;64],vec![0.;64]);p.process(48000,&mut l,&mut r);
+    let messages=probe(|p|p.midi.clone());assert!(messages.contains(&(0,0xb1,74,110)));assert!(messages.contains(&(0,0xe2,0,96)));assert!(messages.contains(&(0,0xd1,80,0)));
+    clear();p.reset();p.process(48000,&mut l,&mut r);let messages=probe(|p|p.midi.clone());for ch in [1,2]{assert!(messages.contains(&(0,0xb0|ch,120,0)));}
+}
+
+    /// Opt-in lifecycle test with independent synthetic processing; never uses an audio device.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "opens hidden editors for the installed effect named in the environment"]
+    fn installed_editor_jobs_keep_audio_processing() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        #[link(name = "ole32")]
+        unsafe extern "system" { fn CoInitializeEx(reserved: *mut c_void, flags: u32) -> i32; }
+        unsafe { CoInitializeEx(std::ptr::null_mut(), 2); }
+        let path = std::env::var_os("OS_VST2_PLUGIN").expect("plugin path");
+        let name = std::env::var("OS_VST2_NAME").expect("plugin name");
+        let module = Module::load(Path::new(&path)).expect("load");
+        let desc = module.plugins().iter().find(|d| d.name == name && d.is_effect()).expect("effect");
+        let shared = module.clone().create(&desc.id).expect("create");
+        assert!(shared.lock().unwrap().activate(48000));
+        let stop = Arc::new(AtomicBool::new(false));
+        let blocks = Arc::new(AtomicUsize::new(0));
+        let audio = shared.clone(); let done = stop.clone(); let count = blocks.clone();
+        let worker = std::thread::spawn(move || {
+            while !done.load(Ordering::Acquire) {
+                if let Ok(mut p) = audio.try_lock() {
+                    let mut l = [0.01; 64]; let mut r = l;
+                    p.process_fx(48000, &mut l, &mut r);
+                    assert!(l.iter().chain(&r).all(|v| v.is_finite()));
+                    count.fetch_add(1, Ordering::Release);
+                }
+                std::thread::sleep(std::time::Duration::from_micros(1333));
+            }
+        });
+        #[link(name = "user32")]
+        unsafe extern "system" {
+            fn CreateWindowExW(ex: u32, class: *const u16, title: *const u16, style: u32, x: i32, y: i32, w: i32, h: i32, parent: *mut c_void, menu: *mut c_void, instance: *mut c_void, param: *const c_void) -> *mut c_void;
+            fn DestroyWindow(window: *mut c_void) -> i32;
+        }
+        let class: Vec<u16> = "STATIC".encode_utf16().chain(Some(0)).collect();
+        let hwnd = unsafe { CreateWindowExW(0, class.as_ptr(), class.as_ptr(), 0x80000000, 0, 0, 1200, 900, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null()) };
+        assert!(!hwnd.is_null());
+        let mut results = Vec::new();
+        for _ in 0..3 {
+            for action in [os_host::EditorAction::Open { parent: hwnd.cast(), scale: 1.25 }, os_host::EditorAction::Close] {
+                let job = shared.lock().unwrap().editor_job(action);
+                let Some(job) = job else {
+                    results.push((std::time::Duration::ZERO, 0, Err("No independent editor job (editor unavailable or plugin stopped)".to_string())));
+                    continue;
+                };
+                let before = blocks.load(Ordering::Acquire);
+                let started = std::time::Instant::now();
+                let result = job();
+                results.push((started.elapsed(), blocks.load(Ordering::Acquire) - before, result));
+            }
+        }
+        stop.store(true, Ordering::Release); worker.join().unwrap();
+        unsafe { DestroyWindow(hwnd); }
+        eprintln!("{name}: editor duration / concurrent 64-frame blocks / result: {results:?}");
+        assert!(results.iter().all(|(_, _, r)| r.is_ok()));
+        assert!(results.iter().filter(|(t,_,_)| t.as_millis() > 30).all(|(_,n,_)| *n > 0), "slow editor operations blocked audio");
+        assert!(blocks.load(Ordering::Acquire) > 0);
+        assert_eq!(shared.lock().unwrap().stopped(), None);
+    }
+
+#[test]
+fn multiple_instrument_outputs_sum_and_split_across_render_chunks() {
+    let (_module, mut plugin) = synth();
+    unsafe {(*plugin.inst.effect).num_outputs=5;}
+    plugin.setup_buffers();
+    assert!(plugin.activate(48000));
+    plugin.note_on(3,60,1.);
+    let n=MAX_FRAMES as usize+17;
+    let (mut l,mut r)=(vec![0.;n],vec![0.;n]);
+    plugin.process(48000,&mut l,&mut r);
+    let summed=l[4];
+    assert!(summed>0. && l==r && l[2]==0. && l[n-1]==summed);
+    plugin.set_split_outputs(true);
+    plugin.process(48000,&mut l,&mut r);
+    assert_eq!(plugin.extra_outputs(),2);
+    assert!((l[n-1]*3.-summed).abs()<1e-5);
+    for port in 0..2 {
+        assert!(plugin.extra_output(port,&mut l,&mut r));
+        assert_eq!(l,r);
+        assert!((r[n-1]*3.-summed).abs()<1e-5);
     }
 }

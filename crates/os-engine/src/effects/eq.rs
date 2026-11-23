@@ -9,9 +9,13 @@
 // spec: plugins/fruity-parametric-eq-2.md, plugins/parametric-eq-2.md (the state's option table)
 
 pub mod design;
+pub mod dynamic;
+pub mod spectral;
+pub mod routed;
 mod equalizer;
 mod fft;
 pub(crate) mod hq;
+pub use hq::HalfBand;
 pub mod lin;
 mod matched;
 
@@ -191,19 +195,29 @@ impl Settings {
 /// The engine's own slot effect: the original's processing for a project's saved state, with the buffers of silence FL
 /// runs before a render already run (so LIN starts at full level, as in FL's exports).
 pub struct ParametricEq {
-    eq: Equalizer,
+    eq: routed::RoutedEq,
+    key_port: usize,
+    key_l: Vec<f32>,
+    key_r: Vec<f32>,
     l: Vec<f32>,
     r: Vec<f32>,
 }
 
 impl ParametricEq {
     pub fn from_state(state: &[u8], sample_rate: u32) -> Option<Self> {
-        let mut eq = Equalizer::from_state(state, f64::from(sample_rate))?;
+        let mut eq = routed::RoutedEq::from_state(state, f64::from(sample_rate))?;
         eq.preroll();
-        Some(ParametricEq { eq, l: Vec::new(), r: Vec::new() })
+        Some(ParametricEq {
+            eq,
+            key_port: routed::sidechain_port(state),
+            key_l: Vec::new(),
+            key_r: Vec::new(),
+            l: Vec::new(),
+            r: Vec::new(),
+        })
     }
 
-    pub fn equalizer(&self) -> &Equalizer {
+    pub fn equalizer(&self) -> &routed::RoutedEq {
         &self.eq
     }
 
@@ -212,6 +226,25 @@ impl ParametricEq {
     pub fn latency(&self) -> usize {
         self.eq.latency()
     }
+    fn run(&mut self, buf: &mut [f32], key: Option<&[f32]>) {
+        self.l.clear();
+        self.r.clear();
+        self.l.extend(buf.chunks_exact(2).map(|f| f[0]));
+        self.r.extend(buf.chunks_exact(2).map(|f| f[1]));
+        let key = key.map(|key| {
+            self.key_l.clear();
+            self.key_r.clear();
+            self.key_l.extend(key.chunks_exact(2).map(|f| f[0]));
+            self.key_r.extend(key.chunks_exact(2).map(|f| f[1]));
+            (&self.key_l[..], &self.key_r[..])
+        });
+        self.eq.process_keyed(&mut self.l, &mut self.r, key);
+        for (f, (&l, &r)) in buf.chunks_exact_mut(2).zip(self.l.iter().zip(&self.r)) {
+            f[0] = l;
+            f[1] = r;
+        }
+    }
+
 }
 
 impl Effect for ParametricEq {
@@ -224,16 +257,16 @@ impl Effect for ParametricEq {
         self.eq.latency()
     }
 
+    fn key_input(&self) -> usize {
+        self.key_port
+    }
+
     fn process(&mut self, buf: &mut [f32]) {
-        self.l.clear();
-        self.r.clear();
-        self.l.extend(buf.chunks_exact(2).map(|f| f[0]));
-        self.r.extend(buf.chunks_exact(2).map(|f| f[1]));
-        self.eq.process(&mut self.l, &mut self.r);
-        for (f, (&l, &r)) in buf.chunks_exact_mut(2).zip(self.l.iter().zip(&self.r)) {
-            f[0] = l;
-            f[1] = r;
-        }
+        self.run(buf, None);
+    }
+
+    fn process_keyed(&mut self, buf: &mut [f32], key: &[f32]) {
+        self.run(buf, Some(key));
     }
 }
 

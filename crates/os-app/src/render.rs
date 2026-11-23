@@ -8,7 +8,7 @@
 //! plugins run offline at the render rate, and the song is written as a 32-bit float WAV. It also prints what plays
 //! each channel and mixer slot. No audio device is opened.
 //!
-//! `lemonstudio --render <project.flp> <out.wav> [--rate HZ] [--seconds S] [--from TICK] [--builtin-only]`
+//! `lemonstudio --render <project.lmn|project.flp|project.zip> <out.wav> [--rate HZ] [--seconds S] [--from TICK] [--builtin-only]`
 //!
 //! - `--rate` (44100): the render rate; every plugin starts at it.
 //! - `--seconds`: stop after this many seconds of song.
@@ -78,7 +78,7 @@ pub fn cli(args: &[String]) -> i32 {
 
 fn parse(args: &[String]) -> Result<Opts, String> {
     let mut paths = Vec::new();
-    let (mut rate, mut seconds, mut from, mut hosted) = (44100u32, None, 0u64, Hosted::LastScan);
+    let (mut rate, mut seconds, mut from, mut hosted) = (44100u32, None::<f64>, 0u64, Hosted::LastScan);
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let mut value = |name: &str| it.next().cloned().ok_or(format!("{name} needs a value"));
@@ -95,11 +95,22 @@ fn parse(args: &[String]) -> Result<Opts, String> {
     if !(8000..=384000).contains(&rate) {
         return Err(format!("--rate {rate}: outside 8000..384000"));
     }
+    if seconds.is_some_and(|s| !s.is_finite() || s < 0.0) {
+        return Err("--seconds must be finite and nonnegative".into());
+    }
     Ok(Opts { rate, seconds, from, hosted, ..Opts::new(project, out) })
 }
 
 /// Renders `o.project` into `o.out`. Progress and what plays each channel go to standard error.
 pub fn render(o: &Opts) -> Result<(), String> {
+    let approved = crate::export::existing_files([o.out.clone()]).map_err(|e| e.to_string())?;
+    let protect_project = |project: &std::path::Path| -> Result<(), String> {
+        if !approved.is_empty() && same_file::is_same_file(project, &o.out).map_err(|e| e.to_string())? {
+            return Err("Choose an output file different from the project".into());
+        }
+        Ok(())
+    };
+    protect_project(&o.project)?;
     // The audio thread must not open the user's audio device (an ASIO driver opens at start).
     crate::transport::headless();
     let mut app = crate::app::App::new(None);
@@ -114,17 +125,17 @@ pub fn render(o: &Opts) -> Result<(), String> {
     // Instances start at the render rate (`Plugins::create_with` activates at the current rate).
     app.plugins.set_rate(o.rate);
     app.open(o.project.clone());
-    let opened = app.state.path.is_some();
-    eprintln!("OPEN {}", app.state.message.clone().unwrap_or_default());
-    if !opened {
-        app.reset_hosted();
-        return Err(format!("could not open {}", o.project.display()));
-    }
     let t0 = Instant::now();
     while app.loading() && t0.elapsed() < Duration::from_secs(300) {
         app.plugin_tick();
         std::thread::sleep(Duration::from_millis(5));
     }
+    eprintln!("OPEN {}", app.state.message.clone().unwrap_or_default());
+    if app.loading() {
+        return Err(format!("Timed out opening {}", o.project.display()));
+    }
+    let project_path = app.state.path.as_deref().ok_or_else(|| format!("could not open {}", o.project.display()))?;
+    protect_project(project_path)?;
     // Effects, wrapped plugins and 3x Osc are hosted on the ticks after loading.
     let mut last = usize::MAX;
     for _ in 0..400 {
@@ -141,9 +152,16 @@ pub fn render(o: &Opts) -> Result<(), String> {
 
     app.plugins.set_offline(true);
     let project = crate::rack::play_project(&app.state);
+    let preparing = Instant::now();
+    while !crate::plugins::prepare_sampler_playback(&project) {
+        if preparing.elapsed() >= Duration::from_secs(300) {
+            return Err("Timed out preparing samples for the current tempo".into());
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
     let mut library = crate::transport::host_library(crate::factory_folder::dir());
-    lemon_sampler::set_host_ticks(project.ppq);
     let mut e = Engine::with_instruments(&project, &mut library, o.rate, PlayMode::Song, &app.plugins.instruments());
+    e.set_interpolation(512);
     crate::project_plugins::attach_effects(&mut e, &project, app.plugins.effects());
     if o.from > 0 {
         e.seek_tick(o.from);
@@ -157,21 +175,27 @@ pub fn render(o: &Opts) -> Result<(), String> {
     let cap = (len + rate * 30).min(limit);
     let mut audio: Vec<f32> = Vec::new();
     let t1 = Instant::now();
-    loop {
+    while (audio.len() as u64 / 2) < cap {
         let done = e.render_ticks(32, &mut audio);
-        if done || audio.len() as u64 / 2 >= cap {
+        if done {
             break;
         }
     }
+    if audio.len() as u64 / 2 > cap {
+        audio.truncate(cap as usize * 2);
+    }
     drop(e);
-    let written = std::fs::File::create(&o.out).and_then(|file| {
+    let written = crate::export::write_file(&o.out, &approved, |file| {
         let mut w = std::io::BufWriter::new(file);
         os_engine::wav::write_f32_stereo(&mut w, o.rate, &audio)?;
         std::io::Write::flush(&mut w)
     });
     let peak = audio.iter().fold(0.0f32, |m, v| m.max(v.abs()));
     eprintln!("RENDERED {:.2} s (song {:.2} s) at {} Hz in {:.1} s, peak {peak:.3}", audio.len() as f64 / 2.0 / rate as f64, len as f64 / rate as f64, o.rate, t1.elapsed().as_secs_f64());
+    app.transport.shutdown();
     app.reset_hosted();
+    drop(app);
+    crate::plugins::sweep_retired();
     written.map_err(|e| format!("{}: {e}", o.out.display()))
 }
 
@@ -264,6 +288,32 @@ mod tests {
         assert_eq!(&wav[..4], b"RIFF");
         assert!(wav.len() > 44, "the file holds audio");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn portable_render_preserves_project_and_honors_frame_limit() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("song.lmn");
+        let bytes = os_flp::project::create(&crate::app::test_project()).unwrap().to_bytes().unwrap();
+        std::fs::write(&project, &bytes).unwrap();
+        let alias = dir.path().join("alias.wav");
+        std::fs::hard_link(&project, &alias).unwrap();
+        for target in [&project, &alias] {
+            assert!(render(&Opts::new(project.clone(), target.clone())).is_err());
+            assert_eq!(std::fs::read(&project).unwrap(), bytes);
+        }
+        let archive = dir.path().join("portable.zip");
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&archive).unwrap());
+        zip.start_file("song.lmn", zip::write::SimpleFileOptions::default()).unwrap();
+        zip.write_all(&bytes).unwrap();
+        zip.finish().unwrap();
+        let out = dir.path().join("mix.wav");
+        let opts = Opts { hosted: Hosted::Builtin, seconds: Some(0.013), rate: 48000, ..Opts::new(archive, out.clone()) };
+        render(&opts).unwrap();
+        let wav = std::fs::read(out).unwrap();
+        let at = wav.windows(4).position(|w| w == b"data").unwrap();
+        assert_eq!(u32::from_le_bytes(wav[at+4..at+8].try_into().unwrap()), 624 * 2 * 4);
     }
 
     /// A Lemon Sampler channel on a short sample with a sustain loop (a single-cycle wave, as MicrO_5.wav) and no

@@ -285,6 +285,7 @@ impl Logic {
             }
             (Target::LoadSample, Btn::Left) => acts.push(Act::OpenDialog),
             (Target::Flag(b), Btn::Left) => self.toggle_flag(*b),
+            (Target::OscEnv(n), Btn::Left) => self.view.osc_env=if self.view.osc_env==Some(*n){None}else{Some(*n)},
             (Target::Tab(i), Btn::Left) => self.view.tab = *i,
             (Target::SubTab(i), Btn::Left) => self.view.sub = *i,
             (Target::EnvPoint(i), Btn::Left) => {
@@ -393,7 +394,7 @@ impl Logic {
                 m.sep(Cmd::None);
                 m.add(MenuItem::item("Copy value"), Cmd::CopyValue(id.clone()));
                 m.add(MenuItem::item("Paste value").enabled(self.copied.is_some()), Cmd::PasteValue(id.clone()));
-                m.add(MenuItem::item("Enter value..."), Cmd::TypeIn(id.clone()));
+                m.add(MenuItem::item("Type in value..."), Cmd::TypeIn(id.clone()));
                 // Automation belongs to the host: offered when Lemon Studio hosts the editor (host link).
                 m.sep(Cmd::None);
                 m.add(MenuItem::item("Create automation clip").enabled(self.hosted), Cmd::Automate(id.clone()));
@@ -545,7 +546,7 @@ mod win32 {
                 tracking: false,
                 slot: slot.clone(),
             });
-            let title = pw::wide("Lemon Trio");
+            let title = pw::wide("ML Trio");
             let hwnd = CreateWindowExW(
                 0,
                 class.as_ptr(),
@@ -715,6 +716,7 @@ mod win32 {
 
         /// Timer / parameter change: expire confirmed overlay values, repaint when anything shown changed.
         fn poll(&mut self) {
+            if self.canvas.sync_stock_editor_theme() { self.invalidate(); }
             let dirty = self.logic.vals.expire();
             self.logic.sync_sample();
             let sig = self.logic.vals.signature();
@@ -810,11 +812,12 @@ mod win32 {
                     }
                     1
                 }
-                Cmd::Changed | Cmd::Note | Cmd::Automate | Cmd::Audio | Cmd::Resizable | Cmd::SetSize | Cmd::Notes => 0,
+                Cmd::StateEdit | Cmd::SampleFit | Cmd::BrowseSample | Cmd::Changed | Cmd::Note | Cmd::Automate | Cmd::Audio | Cmd::Resizable | Cmd::SetSize => 0,
             }
         }
 
         fn paint(&mut self) {
+            self.canvas.sync_stock_editor_theme();
             let (hdc, ps) = pw::begin_paint(self.hwnd);
             let hint = if self.logic.hosted { String::new() } else { self.logic.hint.clone() };
             self.logic.hits = view::paint(&mut self.canvas, &self.palette, &self.logic.vals, &self.logic.view, &hint, self.logic.hosted);
@@ -845,7 +848,7 @@ mod win32 {
             return None;
         }
         let mut file = vec![0u16; 1024];
-        let filter: Vec<u16> = "Audio files\0*.wav;*.flac;*.ogg;*.wv;*.aif;*.aiff;*.mp3;*.m4a\0All files\0*.*\0\0".encode_utf16().collect();
+        let filter: Vec<u16> = "Audio files\0*.wav;*.flac;*.ogg;*.wv;*.aif;*.aiff;*.mp3\0All files\0*.*\0\0".encode_utf16().collect();
         let title = pw::wide("Sample for the custom shape");
         unsafe {
             let mut ofn: OPENFILENAMEW = std::mem::zeroed();
@@ -1030,6 +1033,7 @@ mod gui {
 
         /// Timer / parameter change: expire confirmed overlay values, repaint when anything shown changed.
         fn poll(&mut self) {
+            if self.canvas.sync_stock_editor_theme() { self.dirty = true; }
             let dirty = self.logic.vals.expire();
             self.logic.sync_sample();
             let sig = self.logic.vals.signature();
@@ -1105,6 +1109,7 @@ mod gui {
         }
 
         fn paint(&mut self) {
+            self.canvas.sync_stock_editor_theme();
             self.dirty = false;
             let hint = if self.logic.hosted { String::new() } else { self.logic.hint.clone() };
             self.logic.hits = view::paint(&mut self.canvas, &self.palette, &self.logic.vals, &self.logic.view, &hint, self.logic.hosted);
@@ -1137,7 +1142,7 @@ mod gui {
         let path = win.dialog(move || {
             rfd::FileDialog::new()
                 .set_title("Sample for the custom shape")
-                .add_filter("Audio files", &["wav", "flac", "ogg", "wv", "aif", "aiff", "mp3", "m4a"])
+                .add_filter("Audio files", &["wav", "flac", "ogg", "wv", "aif", "aiff", "mp3"])
                 .pick_file()
         });
         path.flatten().map(|p| p.to_string_lossy().into_owned())
@@ -1194,7 +1199,7 @@ mod tests {
         let acts = l.down(x, y, Btn::Right, Mods::default(), false);
         assert!(matches!(acts.last(), Some(Act::Menu(MenuReq::Param(id), _, _)) if id == "o2_coarse"));
         let m = l.menu(&MenuReq::Param("o2_coarse".into()));
-        assert_eq!(m.find("Enter value..."), Some(Cmd::TypeIn("o2_coarse".into())));
+        assert_eq!(m.find("Type in value..."), Some(Cmd::TypeIn("o2_coarse".into())));
         l.typed("o2_coarse", "+7");
         assert_eq!(l.vals.plain("o2_coarse"), 7.0);
         l.pick(&MenuReq::Param("o2_coarse".into()), Cmd::CopyValue("o2_coarse".into()), 0.0, 0.0);

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! The value box of "Enter value...": field, mode buttons, ✓ / ✗ and caption.
+//! The value box of "Type in value...": field, mode buttons, ✓ / ✗ and caption.
 // spec: ui/type-in-value.md §2-3 (the measured layout and shades)
 
 use os_ui::{Font, Rect};
@@ -21,18 +21,11 @@ pub fn paint(ui: &mut Ui, s: &State, e: &TextEdit, t: Target, norm: bool) {
     // The field: the text, its selection or the caret.
     let font = Font::new(17);
     let max_w = r.w - 52.0;
-    let tw = ui.c.text_width(font, &e.text).min(max_w);
-    if e.sel && !e.text.is_empty() {
-        ui.c.fill_rect(Rect::new(r.x + 5.0, r.y + 4.0, tw + 2.0, 24.0), th.s(0x315d8a));
-    }
-    ui.c.text_clip(font, r.x + 6.0, r.y + 6.0, max_w, th.text, &e.text);
-    if !e.sel {
-        ui.c.fill_rect(Rect::new(r.x + 7.0 + tw, r.y + 6.0, 1.0, 19.0), th.text);
-    }
+    super::playlist::inline_text(ui,e,Rect::new(r.x+2.,r.y+4.,max_w+4.,24.),font,th.text);
 
     // Mode buttons: the knob's unit, then "A" (normalized).
     if let Some((label, name)) = typein::mode_button(t) {
-        let buttons = [(label, format!("Enter value as: {name}"), false), ("A", "Type in normalized value (0-1) or %".to_string(), true)];
+        let buttons = [(label, format!("Type in value as: {name}"), false), ("A", "Type in normalized value (0-1) or %".to_string(), true)];
         for (i, (label, hint, is_norm)) in buttons.into_iter().enumerate() {
             let b = Rect::new(r.x + 202.0 + 19.0 * i as f32, r.y + 3.0, 18.0, 17.0);
             let hov = ui.hit(b, Action::TypeIn(TiAct::Mode(is_norm)), hint);

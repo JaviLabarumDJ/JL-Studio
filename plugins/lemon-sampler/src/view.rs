@@ -51,7 +51,7 @@ pub const TARGET_COLORS: [(u32, u32, u32); 5] = [
     (0xf29a48, 0xf0792b, 0xce833c),
     (0xf64d70, 0xf13f37, 0xe2415f),
 ];
-pub const TARGET_NAMES: [&str; 5] = ["Panning", "Volume", "Mod A", "Mod B", "Pitch"];
+pub const TARGET_NAMES: [&str; 5] = ["Panning", "Volume", "Mod X", "Mod Y", "Pitch"];
 pub const ENV_PREFIX: [&str; 5] = ["envpan", "envvol", "envmodx", "envmody", "envpitch"];
 
 const LABEL: Font = inst::LABEL;
@@ -426,7 +426,7 @@ pub fn page_icon(c: &mut Canvas, page: u8, cx: f32, cy: f32, col: Color) {
 
 fn tab_strip(ui: &mut Ui) {
     let hover = (0..2u8).find(|&i| ui.state(rr(5.0 + 43.0 * f32::from(i), 49.0 + 43.0 * f32::from(i), 26.0, 71.0), &Target::Tab(i)).hover);
-    lemon::page_strip(ui.c, rr(4.0, 563.0, 25.0, 71.0), 2, ui.st.tab, hover, &|i| 5.0 + 43.0 * f32::from(i), &mut |c, i, x, yy, col| page_icon(c, i, x, yy, col));
+    lemon::page_strip(ui.c, rr(4.0, 563.0, 25.0, 71.0), 2, ui.st.tab, hover, &|i| 5.0 + 43.0 * f32::from(i), &mut |c, i, x, yy, col| page_icon(c, i, x, yy, if i == ui.st.tab { brand::MAIN } else { col }));
     for i in 0..2u8 {
         let x0 = 5.0 + 43.0 * f32::from(i);
         ui.hit(rr(x0, x0 + 44.0, 26.0, 71.0), Target::Tab(i));
@@ -477,7 +477,7 @@ fn sample_tab(ui: &mut Ui, sv: &SampleView) {
     radio(ui, "resample", 25.0, 178.0, "Resample");
     radio(ui, "load_regions", 153.0, 158.0, "Load regions");
     radio(ui, "load_slices", 153.0, 178.0, "Load slice markers");
-    label(ui, 21.0, 209.0, "Click removal");
+    label(ui, 21.0, 209.0, "Declicking mode");
     list(ui, "declick", 124.0, 270.0, 199.0, 219.0);
 
     panel(ui, 11.0, 280.0, 239.0, 319.0, 69.0, "Playback");
@@ -613,17 +613,17 @@ fn waveform(ui: &mut Ui, sv: &SampleView) {
         ui.c.fill_rect(Rect::new(area.x, gy, area.w, 1.0), plug::GRID);
     }
     ui.c.pop_clip();
-    // Wordmark: the lemon mark and "LEMON" in lemon, "SAMPLER" in a light grey.
+    // Wordmark: the lemon mark and "ML" in lemon, "SAMPLER" in a light grey.
     let (big, small) = (Font::condensed(22, 0).bold(), Font::condensed(10, 0).bold());
     let wb = lemon::spaced_width(ui.c, big, "SAMPLER", 2.0);
-    let ws = lemon::spaced_width(ui.c, small, "LEMON", 2.5);
+    let ws = lemon::spaced_width(ui.c, small, "ML", 2.5);
     let lh_b = ui.c.line_height(big);
     let lh_s = ui.c.line_height(small);
     let wy = y(328.0) + 15.0;
     let bx = 547.0 - wb;
     lemon::spaced(ui.c, big, bx, (wy - lh_b / 2.0).round(), Color::rgb(0xffffff).with_alpha(82), "SAMPLER", 2.0);
     let sx = bx - 8.0 - ws;
-    lemon::spaced(ui.c, small, sx, (wy - lh_s / 2.0).round() + 1.0, brand::MAIN, "LEMON", 2.5);
+    lemon::spaced(ui.c, small, sx, (wy - lh_s / 2.0).round() + 1.0, brand::MAIN, "ML", 2.5);
     lemon::lemon_mark(ui.c, sx - 8.0, wy, 4.0, brand::MAIN);
     // Overview bar: an outlined strip with arrows at both ends and the visible range as a lighter thumb.
     let ov = overview_track();

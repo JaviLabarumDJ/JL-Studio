@@ -28,7 +28,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use nih_plug::prelude::*;
-use os_plugkit::levels::Levels as ChannelLevels;
 
 use engine::{Citrus, NoteOn};
 use voice::Levels;
@@ -77,7 +76,7 @@ pub fn plugin_state_from_fl(fl: &[u8]) -> Vec<u8> {
 /// The Sytrus state inside a plugin state blob (see [`plugin_state_from_fl`]); `Some(empty)` for an instance that
 /// still plays its default patch, `None` when the blob is not a Citrus state.
 pub fn fl_from_plugin_state(blob: &[u8]) -> Option<Vec<u8>> {
-    let (_, json) = os_hostlink::state::json(blob);
+    let json = if blob.len() > 8 && blob[0] != b'{' { &blob[8..] } else { blob };
     let v: serde_json::Value = serde_json::from_str(std::str::from_utf8(json).ok()?).ok()?;
     let field = v.get("fields")?.get(STATE_FIELD)?.as_str()?;
     serde_json::from_str::<StateBytes>(field).ok().map(|s| s.0)
@@ -111,8 +110,8 @@ impl Default for CitrusParams {
             edit: Mutex::new(None),
             previews: Mutex::new(Vec::new()),
             playing: [AtomicU64::new(0), AtomicU64::new(0)],
-            mod_x: FloatParam::new("Mod A", 0.0, FloatRange::Linear { min: -1.0, max: 1.0 }).with_poly_modulation_id(MOD_X_POLY),
-            mod_y: FloatParam::new("Mod B", 0.0, FloatRange::Linear { min: -1.0, max: 1.0 }).with_poly_modulation_id(MOD_Y_POLY),
+            mod_x: FloatParam::new("Mod X", 0.0, FloatRange::Linear { min: -1.0, max: 1.0 }).with_poly_modulation_id(1),
+            mod_y: FloatParam::new("Mod Y", 0.0, FloatRange::Linear { min: -1.0, max: 1.0 }).with_poly_modulation_id(2),
         }
     }
 }
@@ -180,6 +179,9 @@ struct Held {
     id: u64,
     /// The host's tuning of the note in cents (portamento and slide notes: a note expression).
     tune: f32,
+    levels: Levels,
+    mods: [f32; 2],
+    gain: f32,
 }
 
 /// A note's pitch in cents from key 60: its key, the pitch bend and the host's tuning.
@@ -190,26 +192,6 @@ fn note_pitch(h: &Held, bend: f32) -> f32 {
 /// Released notes kept for the host's tunings (a glide goes on while a note rings out); the oldest goes first.
 const RINGING: usize = 64;
 
-/// The poly modulation ids of Mod X and Mod Y: a note's mod X / Y as the host's per-note modulation, in mod units
-/// added to the parameter (spec: plugins/citrus.md §2).
-const MOD_X_POLY: u32 = 1;
-const MOD_Y_POLY: u32 = 2;
-
-/// The mod X / Y offsets the host gives voice `id` right after its note-on at `timing` (the events after it, `rest`):
-/// the note's voices start with them.
-fn start_mods(rest: &[NoteEvent<ChannelLevels>], timing: u32, id: i32) -> [f32; 2] {
-    let mut mods = [0.0; 2];
-    for e in rest.iter().take_while(|e| e.timing() == timing) {
-        if let NoteEvent::PolyModulation { voice_id, poly_modulation_id, normalized_offset, .. } = *e
-            && voice_id == id
-            && let Some(k) = [MOD_X_POLY, MOD_Y_POLY].iter().position(|&p| p == poly_modulation_id)
-        {
-            mods[k] = normalized_offset;
-        }
-    }
-    mods
-}
-
 pub struct CitrusPlugin {
     params: Arc<CitrusParams>,
     engine: Citrus,
@@ -218,21 +200,11 @@ pub struct CitrusPlugin {
     /// Notes ended by the host, newest last: a tuning still moves them while they ring.
     ringing: Vec<Held>,
     bend: f32,
-    /// The block's events, read ahead for a note's mods.
-    events: Vec<NoteEvent<ChannelLevels>>,
 }
 
 impl Default for CitrusPlugin {
     fn default() -> Self {
-        CitrusPlugin {
-            params: Arc::new(CitrusParams::default()),
-            engine: Citrus::new(44100),
-            seen: 0,
-            held: Vec::new(),
-            ringing: Vec::new(),
-            bend: 0.0,
-            events: Vec::with_capacity(1024),
-        }
+        CitrusPlugin { params: Arc::new(CitrusParams::default()), engine: Citrus::new(44100), seen: 0, held: Vec::new(), ringing: Vec::new(), bend: 0.0 }
     }
 }
 
@@ -271,8 +243,9 @@ impl CitrusPlugin {
             for (note, on) in q.drain(..) {
                 if on {
                     let velocity = 100.0 / 128.0;
-                    let id = self.engine.note_on(NoteOn { levels: self.levels(note, velocity), velocity, release: 0.5 });
-                    self.held.push(Held { note, channel: PREVIEW, voice_id: None, id, tune: 0.0 });
+                    let levels = self.levels(note, velocity);
+                    let id = self.engine.note_on(NoteOn { levels, velocity, release: 0.5 });
+                    self.held.push(Held { note, channel: PREVIEW, voice_id: None, id, tune: 0.0, levels, mods: [0.; 2], gain: 1. });
                 } else if let Some(i) = self.held.iter().position(|h| h.note == note && h.channel == PREVIEW) {
                     let h = self.held.remove(i);
                     self.engine.note_off(h.id);
@@ -289,24 +262,59 @@ impl CitrusPlugin {
         }
     }
 
-    /// A note's own levels. The host sends FL's velocity byte / 128; the engine joins the volume and pan with the
-    /// channel's, which Lemon Studio sends (spec: plugins/citrus.md §2).
+    /// A note's levels. The host sends FL's velocity byte / 128; the channel's volume is the host's to apply (after the
+    /// plugin, as for Lemon Studio's other instruments), so the voice takes the velocity's level alone.
     fn levels(&self, note: u8, velocity: f32) -> Levels {
         let link = self.engine.state().is_none_or(|s| s.switch(8) != 0);
         let v = if link { (velocity * 128.0).round().min(128.0) * 0.01 } else { 1.0 };
         Levels {
             vol: os_dsp::level::curve(v),
             pan: 0.0,
-            pitch: note_pitch(&Held { note, channel: 0, voice_id: None, id: 0, tune: 0.0 }, self.bend),
+            pitch: (f32::from(note) - 60.0) * 100.0 + self.bend,
             mod_x: self.params.mod_x.value(),
             mod_y: self.params.mod_y.value(),
         }
     }
+
+    fn refresh_levels(&mut self) {
+        let base = [self.params.mod_x.value(), self.params.mod_y.value()];
+        for h in self.held.iter().chain(&self.ringing) {
+            let mut levels = h.levels;
+            levels.pitch = note_pitch(h, self.bend);
+            levels.vol *= h.gain;
+            levels.mod_x = (base[0] + h.mods[0]).clamp(-1., 1.);
+            levels.mod_y = (base[1] + h.mods[1]).clamp(-1., 1.);
+            self.engine.set_levels(h.id, levels);
+        }
+    }
+
+    fn note_expression(&mut self, event: NoteEvent<()>) -> bool {
+        match event {
+            NoteEvent::PolyModulation { voice_id, poly_modulation_id, normalized_offset, .. } if (1..=2).contains(&poly_modulation_id) => {
+                for h in self.held.iter_mut().chain(&mut self.ringing).filter(|h| h.voice_id == Some(voice_id)) {
+                    h.mods[(poly_modulation_id - 1) as usize] = normalized_offset.clamp(-1., 1.);
+                }
+            }
+            NoteEvent::PolyPan { voice_id, channel, note, pan, .. } => {
+                for h in self.held.iter_mut().chain(&mut self.ringing).filter(|h| voice_id.map_or(h.note == note && h.channel == channel, |id| h.voice_id == Some(id))) {
+                    h.levels.pan = pan.clamp(-1., 1.);
+                }
+            }
+            NoteEvent::PolyVolume { voice_id, channel, note, gain, .. } => {
+                for h in self.held.iter_mut().chain(&mut self.ringing).filter(|h| voice_id.map_or(h.note == note && h.channel == channel, |id| h.voice_id == Some(id))) {
+                    h.gain = gain.max(0.);
+                }
+            }
+            _ => return false,
+        }
+        self.refresh_levels();
+        true
+    }
 }
 
 impl Plugin for CitrusPlugin {
-    const NAME: &'static str = "Citrus";
-    const VENDOR: &'static str = "Lemon Studio";
+    const NAME: &'static str = "ML Citrus";
+    const VENDOR: &'static str = "ML Studio";
     const URL: &'static str = "";
     const EMAIL: &'static str = "";
     const VERSION: &'static str = env!("CARGO_PKG_VERSION");
@@ -316,7 +324,7 @@ impl Plugin for CitrusPlugin {
     const MIDI_INPUT: MidiConfig = MidiConfig::MidiCCs;
     const SAMPLE_ACCURATE_AUTOMATION: bool = false;
 
-    type SysExMessage = ChannelLevels;
+    type SysExMessage = ();
     type BackgroundTask = ();
 
     fn params(&self) -> Arc<dyn Params> {
@@ -355,27 +363,20 @@ impl Plugin for CitrusPlugin {
             return ProcessStatus::Normal;
         }
         let mut at = 0;
-        self.events.clear();
+        self.refresh_levels();
         while let Some(ev) = ctx.next_event() {
-            self.events.push(ev);
-        }
-        for i in 0..self.events.len() {
-            let ev = self.events[i];
             let t = (ev.timing() as usize).min(len);
             if t > at {
                 let (left, right) = out.split_at_mut(1);
                 self.engine.render(&mut left[0][at..t], &mut right[0][at..t]);
                 at = t;
             }
+            if self.note_expression(ev) { continue; }
             match ev {
-                NoteEvent::NoteOn { timing, note, velocity, voice_id, channel } => {
-                    let mut levels = self.levels(note, velocity);
-                    if let Some(v) = voice_id {
-                        let [x, y] = start_mods(&self.events[i + 1..], timing, v);
-                        (levels.mod_x, levels.mod_y) = (levels.mod_x + x, levels.mod_y + y);
-                    }
+                NoteEvent::NoteOn { note, velocity, voice_id, channel, .. } => {
+                    let levels = self.levels(note, velocity);
                     let id = self.engine.note_on(NoteOn { levels, velocity, release: 0.5 });
-                    self.held.push(Held { note, channel, voice_id, id, tune: 0.0 });
+                    self.held.push(Held { note, channel, voice_id, id, tune: 0.0, levels, mods: [0.; 2], gain: 1. });
                 }
                 NoteEvent::NoteOff { note, voice_id, channel, velocity, .. } => {
                     let _ = velocity;
@@ -409,29 +410,6 @@ impl Plugin for CitrusPlugin {
                         }
                     }
                 }
-                // A note's own pan (a note expression): the note its id names, or else every note of the key.
-                NoteEvent::PolyPan { note, voice_id, channel, pan, .. } => {
-                    let named = voice_id.is_some_and(|v| self.held.iter().chain(&self.ringing).any(|h| h.voice_id == Some(v)));
-                    for h in self.held.iter().chain(&self.ringing) {
-                        if if named { h.voice_id == voice_id } else { h.note == note && h.channel == channel } {
-                            self.engine.note_pan(h.id, pan);
-                        }
-                    }
-                }
-                // A note's mod X / Y (the host's per-note modulation of Mod X / Mod Y), added to the parameter.
-                NoteEvent::PolyModulation { voice_id, poly_modulation_id, normalized_offset, .. } => {
-                    let k = match poly_modulation_id {
-                        MOD_X_POLY => 0,
-                        MOD_Y_POLY => 1,
-                        _ => continue,
-                    };
-                    let value = [&self.params.mod_x, &self.params.mod_y][k].value() + normalized_offset;
-                    for h in self.held.iter().chain(&self.ringing).filter(|h| h.voice_id == Some(voice_id)) {
-                        self.engine.note_mod(h.id, k, value);
-                    }
-                }
-                // The channel's volume and pan from Lemon Studio (spec: plugins/host-link.md "Channel levels").
-                NoteEvent::MidiSysEx { message: ChannelLevels(volume, pan), .. } => self.engine.set_channel(volume, pan),
                 NoteEvent::MidiPitchBend { value, .. } => {
                     // ±2 semitones, as the other Lemon instruments.
                     self.bend = (value * 2.0 - 1.0) * 200.0;
@@ -458,7 +436,7 @@ impl Plugin for CitrusPlugin {
 
 impl ClapPlugin for CitrusPlugin {
     const CLAP_ID: &'static str = "org.openstudio.citrus";
-    const CLAP_DESCRIPTION: Option<&'static str> = Some("Lemon Studio's six-operator synthesizer");
+    const CLAP_DESCRIPTION: Option<&'static str> = Some("ML Studio's six-operator synthesizer");
     const CLAP_MANUAL_URL: Option<&'static str> = None;
     const CLAP_SUPPORT_URL: Option<&'static str> = None;
     const CLAP_FEATURES: &'static [ClapFeature] = &[ClapFeature::Instrument, ClapFeature::Synthesizer, ClapFeature::Stereo];
@@ -490,22 +468,27 @@ fn playing_bits(notes: impl Iterator<Item = u8>) -> [u64; 2] {
 mod tests {
     use super::*;
 
-    /// A note's mods are the per-note modulation right after its note-on, at the same time and for its voice.
     #[test]
-    fn a_note_starts_with_its_mods() {
-        let m = |timing, voice_id, poly_modulation_id, normalized_offset| {
-            NoteEvent::PolyModulation { timing, voice_id, poly_modulation_id, normalized_offset }
-        };
-        let rest = [
-            m(5, 7, MOD_X_POLY, 0.25),
-            m(5, 8, MOD_Y_POLY, 0.5),
-            NoteEvent::PolyPan { timing: 5, voice_id: Some(7), channel: 0, note: 60, pan: 1.0 },
-            m(5, 7, MOD_Y_POLY, -0.5),
-            m(6, 7, MOD_X_POLY, 1.0),
-        ];
-        assert_eq!(start_mods(&rest, 5, 7), [0.25, -0.5]);
-        assert_eq!(start_mods(&rest, 5, 9), [0.0, 0.0]);
-        assert_eq!(start_mods(&rest[4..], 5, 7), [0.0, 0.0], "a later one is a change, not the start");
+    fn piano_roll_modulation_is_per_voice_and_survives_release() {
+        let mut plugin = CitrusPlugin::default();
+        plugin.engine.set_state(preset::default_patch());
+        for voice_id in [11, 12] {
+            let levels = plugin.levels(60, 0.8);
+            let id = plugin.engine.note_on(NoteOn { levels, velocity: 0.8, release: 0.5 });
+            plugin.held.push(Held { note: 60, channel: 0, voice_id: Some(voice_id), id, tune: 0., levels, mods: [0.; 2], gain: 1. });
+        }
+        assert!(plugin.note_expression(NoteEvent::PolyModulation { timing: 0, voice_id: 11, poly_modulation_id: 1, normalized_offset: -0.75 }));
+        assert_eq!(plugin.held[0].mods, [-0.75, 0.]);
+        assert_eq!(plugin.held[1].mods, [0.; 2]);
+        let h = plugin.held.remove(0);
+        plugin.engine.note_off(h.id);
+        plugin.ringing.push(h);
+        plugin.note_expression(NoteEvent::PolyModulation { timing: 0, voice_id: 11, poly_modulation_id: 2, normalized_offset: 0.5 });
+        assert_eq!(plugin.ringing[0].mods, [-0.75, 0.5]);
+        assert_eq!(plugin.held[0].mods, [0.; 2]);
+        plugin.note_expression(NoteEvent::PolyVolume { timing: 0, voice_id: Some(12), channel: 0, note: 60, gain: 0.25 });
+        assert_eq!(plugin.held[0].gain, 0.25);
+        assert_eq!(plugin.ringing[0].gain, 1.);
     }
 
     #[test]

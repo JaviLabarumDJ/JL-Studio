@@ -1,0 +1,2078 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+//! Visual editing of Lemon Studio's optional .flstheme extensions.
+
+use crate::app::{Action, App, State, Ui};
+use crate::dialog::{Field, Then};
+use crate::filedlg::{FileDlg, Mode};
+use crate::mixer_skin::{self, Designer, Part, PreviewState, Scope};
+use crate::theme_library::{History, Snap, Step};
+use crate::views::settings::{self, SAct};
+use os_theme::{Color, Palette, Theme, appearance, fl};
+use os_ui::{Font, Rect};
+use std::path::Path;
+use winit::keyboard::{Key, NamedKey};
+
+pub const OPEN: &str = "Open Theme Editor...";
+pub const INSERT_OPEN: &str = "Customize insert knobs...";
+pub const METER_OPEN: &str = "Customize peak meters...";
+pub const METER_VISIBILITY: &str = "visible_theme-traditional-meters";
+pub const METER_SECTION: &str = "Traditional Mixer peak meters";
+pub const MIXER_COLORS: &str = "Mixer labels and buttons";
+pub const SEPARATOR_COLOR_VISIBILITY: &str = "visible_theme-mixer-separator-color";
+pub const PLAYLIST_COLORS: &str = "Playlist bar";
+pub const SETTINGS_COLORS: &str = "Settings colors";
+pub const QUICK_COLORS_VISIBILITY: &str = "visible_theme-quick-colors";
+pub const MIXER_COLORS_OPEN: &str = "Mixer labels and buttons...";
+pub const PLAYLIST_COLORS_OPEN: &str = "Playlist bar colors...";
+pub const SETTINGS_COLORS_OPEN: &str = "Settings colors...";
+pub const PLAYLIST_RECORD_LIGHT: &str = "Playlist record light";
+pub const MIXER_RECORD_LIGHT: &str = "Traditional Mixer record button";
+pub const PLAYLIST_RECORD_OPEN: &str = "Customize Playlist record light...";
+pub const MIXER_RECORD_OPEN: &str = "Customize Traditional Mixer record button...";
+pub const RECORD_LIGHT_VISIBILITY: &str = "visible_theme-record-lights";
+pub const AREA_VISIBILITY: &str = "visible_theme-area-adjustments";
+pub const INSERT_VISIBILITY: &str = "visible_theme-insert-knobs";
+pub const KEYBOARD_SECTION: &str = "Playlist keyboard & activity";
+pub const INSERT_SECTION: &str = "Traditional FL-style mixer view";
+pub const ASSIGNED_COLOR_SECTION: &str = "Track & clip colors";
+pub const ASSIGNED_COLOR_VISIBILITY: &str = "visible_theme-assigned-colors";
+pub const APPLY: &str = "Apply theme";
+pub const CANCEL: &str = "Cancel edits";
+pub const EXPORT: &str = "Export theme...";
+pub const WALLPAPER: &str = "Choose wallpaper...";
+pub const CLEAR_WALLPAPER: &str = "Clear wallpaper";
+pub const CONTEXT_VISIBILITY: &str = "visible_appearance-context-shortcuts";
+pub const SAVE_NEW: &str = "Save as new theme...";
+pub const SAVE_BASE: &str = "Save base theme as...";
+const PROFILE_KEYS: &[&str] = &[
+    crate::vintage::INKS_KEY, crate::vintage::TINT_KEY,
+    crate::vintage::STEP_COLORS[0].1, crate::vintage::STEP_COLORS[1].1,
+    crate::prefs::NEON_GLOW.key, crate::prefs::NEON_SPREAD.key,
+    crate::prefs::BACKGROUND_LIGHT.key, crate::prefs::HEADER_LIGHT.key,
+    crate::prefs::SYNTHWAVE.key, crate::prefs::SYNTHWAVE_SENSITIVITY.key,
+    crate::theme_adjust::NEON_PLAYLIST_BRIGHTNESS_KEY, crate::theme_adjust::VINTAGE_PLAYLIST_BRIGHTNESS_KEY,
+    crate::prefs::PLAYLIST_SCROLLBAR_STYLE.key,
+    crate::playlist_grid::STYLE.key, crate::playlist_grid::BAR_WIDTH.key,
+    crate::playlist_grid::BEAT_WIDTH.key, crate::playlist_grid::TRACK_WIDTH.key,
+    crate::playlist_grid::Kind::Bar.color_key(), crate::playlist_grid::Kind::Beat.color_key(),
+    crate::playlist_grid::Kind::Track.color_key(),
+    crate::prefs::MIXER_STYLE.key,
+];
+const EXPORT_SKIN: &str = "LemonStudioExportSkin";
+pub const VERSION_KEY: &str = "LemonStudioThemeVersion";
+
+pub fn is_editor_theme(text: &str) -> bool {
+    fl::get_key(text, VERSION_KEY) == Some("1")
+}
+
+pub fn export_skin(text: &str) -> Option<os_theme::Design> {
+    fl::get_key(text, EXPORT_SKIN).and_then(os_theme::Design::parse)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Area {
+    #[default]
+    Overview,
+    Mixer,
+    Playlist,
+    Piano,
+    Rack,
+    Toolbar,
+    Interface,
+    Files,
+}
+
+impl Area {
+    pub const ALL: [Self; 8] = [
+        Self::Overview, Self::Mixer, Self::Playlist, Self::Piano, Self::Rack,
+        Self::Toolbar, Self::Interface, Self::Files,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Overview => "Overview",
+            Self::Mixer => "Mixer",
+            Self::Playlist => "Playlist",
+            Self::Piano => "Piano Roll",
+            Self::Rack => "Channel Rack",
+            Self::Toolbar => "Toolbar",
+            Self::Interface => "Interface",
+            Self::Files => "Theme files",
+        }
+    }
+
+    pub fn includes(self, title: &str) -> bool {
+        match title {
+            "Mixer" | MIXER_COLORS | INSERT_SECTION | METER_SECTION | MIXER_RECORD_LIGHT
+            | "Attached mixer inspector" => self == Self::Mixer,
+            "Playlist" | PLAYLIST_COLORS | PLAYLIST_RECORD_LIGHT | KEYBOARD_SECTION => self == Self::Playlist,
+            "Piano Roll" | "Piano Roll note groups" => self == Self::Piano,
+            "Channel Rack" => self == Self::Rack,
+            "Toolbar & shared controls" => self == Self::Toolbar,
+            _ => self == Self::Interface,
+        }
+    }
+
+    pub fn common(self) -> &'static [&'static str] {
+        match self {
+            Self::Overview => &["accent", "workspace", "text"],
+            Self::Mixer => &["mixer_separator", "mixer_channel_name", "mixer_channel_number", "mixer_strip", "fader_handle"],
+            Self::Playlist => &["grid", "grid_alt", "grid_gap", "track_header", "playlist_bar_face"],
+            Self::Piano => &["pr_row", "pr_row_black", "note_group_01"],
+            Self::Rack => &["rack_inset", "rack_row_box", "rack_control_border"],
+            Self::Toolbar => &["toolbar", "toolbar_line", "button", "menu_text"],
+            Self::Interface => &["text", "text_dim", "window_title", "settings_group_title"],
+            Self::Files => &[],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Target {
+    Separator,
+    PlaylistGrid,
+    Toolbar,
+}
+
+impl Target {
+    pub fn item(self, s: &crate::app::State) -> Option<crate::playlist::PItem> {
+        (crate::workspace_visibility::shown(CONTEXT_VISIBILITY)
+            && match self {
+                Self::Separator => !s.vintage_2005 && crate::workspace_visibility::shown(SEPARATOR_COLOR_VISIBILITY),
+                _ => !s.vintage_2005 && (!s.neon_3036 || crate::workspace_visibility::shown(crate::vintage::BACKGROUND_VISIBILITY)),
+            }).then(|| crate::playlist::PItem::new(match self {
+                Self::Separator => "Customize separator appearance...",
+                Self::PlaylistGrid => "Customize grid appearance...",
+                Self::Toolbar => "Customize toolbar appearance...",
+            }, crate::playlist::Cmd::Theme(crate::playlist::ThemeCmd::Appearance(self))))
+    }
+
+    fn location(self, neon: bool) -> (Area, &'static str) {
+        match (self, neon) {
+            (Self::Separator, _) => (Area::Mixer, "mixer_separator"),
+            (Self::PlaylistGrid, true) => (Area::Playlist, "playlist grid"),
+            (Self::Toolbar, true) => (Area::Toolbar, "extra header brightness"),
+            (Self::PlaylistGrid, false) => (Area::Playlist, "grid"),
+            (Self::Toolbar, false) => (Area::Toolbar, "toolbar"),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct Session {
+    original: Theme,
+    snapshot: Snap,
+    history: History,
+    pub query: Field,
+    pub groups: Vec<(&'static str, Vec<Row>)>,
+    pub target: Option<&'static str>,
+    pub mixer_designer: Option<Designer>,
+    pub identity: bool,
+    field: Field,
+    focus: Option<FieldFor>,
+}
+
+impl Session {
+    pub(crate) fn original_for(&self, snap: &Snap) -> Option<Theme> {
+        (snap.text == self.snapshot.text
+            && snap.base == self.snapshot.base
+            && snap.design == self.snapshot.design)
+            .then(|| self.original.clone())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FieldFor {
+    Search,
+    #[cfg(test)]
+    Hex(&'static str),
+    Number(usize),
+    IdentityValue(&'static str),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Hit {
+    Field(FieldFor),
+    Color(&'static str),
+    Choice(usize, &'static str),
+    ResetColor(&'static str),
+    ResetStyle(usize),
+    ResetGroup(&'static str),
+    Mixer(MixerHit),
+    Identity(IdentityHit),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MixerHit {
+    Scope(Scope),
+    Part(Part),
+    State(PreviewState),
+    Value(u8),
+    Style(u8),
+    Detail(u8),
+    Edge(u8),
+    Enabled(bool),
+    Color(&'static str),
+    ImportArt,
+    RemoveArt,
+    Reset,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum IdentityHit {
+    Pack(u8),
+    CursorPack(u8),
+    CursorColor,
+    ResetCursorColor,
+    IconColor(&'static str),
+    ResetIconColor(&'static str),
+    FollowIcons,
+    IconFamily(u8, u8),
+    CursorFamily(u8, u8),
+    ResetArtwork,
+    Font(u8),
+    Import,
+    Remove,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum IdentityRow {
+    Packs(u8),
+    CursorPacks(u8),
+    Icon(usize),
+    Cursor(usize),
+    Appearance,
+    FollowIcons,
+    Fonts,
+    Preview,
+    Files,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum MixerRow {
+    Target,
+    Components,
+    Preview,
+    States,
+    Value,
+    Style,
+    Detail,
+    Edge,
+    Colors,
+    Artwork,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum Row {
+    Preview,
+    AreaPreview(Area),
+    InsertPreview,
+    MeterPreview,
+    KeyboardPreview,
+    RecordPreview(crate::record_light::Surface),
+    Color(&'static str),
+    Style(usize),
+    Reset(&'static str),
+    Mixer(MixerRow),
+    Identity(IdentityRow),
+}
+
+impl Row {
+    pub fn height(self) -> f32 {
+        match self {
+            Self::Preview | Self::AreaPreview(_) => 76.0,
+            Self::InsertPreview => 64.0,
+            Self::MeterPreview => 122.0,
+            Self::KeyboardPreview => 100.0,
+            Self::RecordPreview(_) => 63.0,
+            Self::Mixer(MixerRow::Preview) => 128.0,
+            Self::Mixer(_) => 34.0,
+            Self::Identity(IdentityRow::Preview) => 170.0,
+            Self::Identity(IdentityRow::Appearance) => 100.0,
+            Self::Identity(_) => 36.0,
+            _ => 29.0,
+        }
+    }
+}
+
+enum Values {
+    Choices(&'static [&'static str]),
+    Number(f32),
+}
+
+struct StyleField {
+    key: &'static str,
+    label: &'static str,
+    values: Values,
+}
+
+const STYLES: &[StyleField] = &[
+    StyleField { key: "assigned-color-traditional", label: "Traditional Mixer strip (0–100%)", values: Values::Number(100.0) },
+    StyleField { key: "assigned-color-full-mixer", label: "Full Mixer & Channel Strip (0–100%)", values: Values::Number(100.0) },
+    StyleField { key: "assigned-color-playlist-tracks", label: "Playlist track header (0–100%)", values: Values::Number(100.0) },
+    StyleField { key: "assigned-color-playlist-clips", label: "Playlist clip body (0–100%)", values: Values::Number(100.0) },
+    StyleField { key: "assigned-color-rack-channels", label: "Channel Rack name (0–100%)", values: Values::Number(100.0) },
+    StyleField {
+        key: "buttons",
+        label: "Button finish",
+        values: Values::Choices(&appearance::Finish::CHOICES),
+    },
+    StyleField {
+        key: "panels",
+        label: "Panel finish",
+        values: Values::Choices(&appearance::Finish::CHOICES),
+    },
+    StyleField {
+        key: "indicator",
+        label: "Indicator shape",
+        values: Values::Choices(&["Inherit", "Round", "Square", "Bar"]),
+    },
+    StyleField {
+        key: "knob",
+        label: "Knob style",
+        values: Values::Choices(&["Inherit", "Dial", "Ring"]),
+    },
+    StyleField {
+        key: "mixer",
+        label: "Mixer finish",
+        values: Values::Choices(&[
+            "Inherit",
+            "Original",
+            "Clean Modern",
+            "Analog",
+            "Theme colors",
+        ]),
+    },
+    StyleField {
+        key: "button-radius",
+        label: "Button radius (0–12 px)",
+        values: Values::Number(12.0),
+    },
+    StyleField {
+        key: "small-radius",
+        label: "Small detail radius (0–8 px)",
+        values: Values::Number(8.0),
+    },
+    StyleField {
+        key: "panel-radius",
+        label: "Panel radius (0–20 px)",
+        values: Values::Number(20.0),
+    },
+    StyleField {
+        key: "bevel",
+        label: "Bevel depth (0–40%)",
+        values: Values::Number(40.0),
+    },
+    StyleField {
+        key: "border",
+        label: "Border width (0–3 px)",
+        values: Values::Number(3.0),
+    },
+    StyleField {
+        key: "title-text",
+        label: "Window title lettering",
+        values: Values::Choices(&["Inherit", "Bold", "Italic", "Light"]),
+    },
+    StyleField {
+        key: "playlist-lines",
+        label: "Playlist grid contrast (0–200%)",
+        values: Values::Number(200.0),
+    },
+    StyleField {
+        key: "piano-lines",
+        label: "Piano Roll grid contrast (0–200%)",
+        values: Values::Number(200.0),
+    },
+    StyleField {
+        key: "playlist-buttons",
+        label: "Playlist tool finish",
+        values: Values::Choices(&appearance::Finish::CHOICES),
+    },
+    StyleField {
+        key: "piano-buttons",
+        label: "Piano Roll tool finish",
+        values: Values::Choices(&appearance::Finish::CHOICES),
+    },
+    StyleField {
+        key: "rack-steps",
+        label: "Channel Rack step finish",
+        values: Values::Choices(&appearance::Finish::CHOICES),
+    },
+    StyleField {
+        key: "mixer-buttons",
+        label: "Themed Mixer button finish",
+        values: Values::Choices(&appearance::Finish::CHOICES),
+    },
+    StyleField { key: "insert-knob", label: "Insert mix knob style", values: Values::Choices(&["Inherit", "Traditional", "Full Mixer", "Dial", "Ring"]) },
+    StyleField { key: "insert-face-finish", label: "Custom face finish", values: Values::Choices(&appearance::Finish::CHOICES) },
+    StyleField { key: "insert-face-size", label: "Face diameter (6–18 px)", values: Values::Number(18.0) },
+    StyleField { key: "insert-face-edge-width", label: "Face edge width (0–2 px)", values: Values::Number(2.0) },
+    StyleField { key: "insert-pointer-width", label: "Pointer width (0–3 px)", values: Values::Number(3.0) },
+    StyleField { key: "insert-pointer-length", label: "Pointer length (0–100%)", values: Values::Number(100.0) },
+    StyleField { key: "insert-track", label: "Unfilled inner track", values: Values::Choices(&["Inherit", "Show", "Hide"]) },
+    StyleField { key: "insert-ring", label: "Thin value ring", values: Values::Choices(&["Inherit", "Show", "Hide"]) },
+    StyleField { key: "insert-rim", label: "Outer circle", values: Values::Choices(&["Inherit", "Show", "Hide"]) },
+    StyleField { key: "insert-ring-width", label: "Value ring width (0–2 px)", values: Values::Number(2.0) },
+    StyleField { key: "insert-rim-width", label: "Outer circle width (0–2 px)", values: Values::Number(2.0) },
+    StyleField { key: "insert-ring-radius", label: "Inner ring radius (4–12 px)", values: Values::Number(12.0) },
+    StyleField { key: "insert-rim-radius", label: "Outer circle radius (4–13 px)", values: Values::Number(13.0) },
+    StyleField { key: "trad-meter-fill", label: "Bar fill", values: Values::Choices(&["Inherit", "Gradient", "Solid", "Segments"]) },
+    StyleField { key: "trad-meter-width", label: "Bar width (20–100%)", values: Values::Number(100.0) },
+    StyleField { key: "trad-meter-gap", label: "Stereo gap (0–60%)", values: Values::Number(60.0) },
+    StyleField { key: "trad-meter-edge", label: "Edge shading (0–100%)", values: Values::Number(100.0) },
+    StyleField { key: "trad-meter-gradient", label: "Gradient strength (0–100%)", values: Values::Number(100.0) },
+    StyleField { key: "trad-meter-radius", label: "Corner radius (0–4 px)", values: Values::Number(4.0) },
+    StyleField { key: "trad-meter-ticks", label: "Scale ticks", values: Values::Choices(&["Inherit", "Show", "Hide"]) },
+    StyleField { key: "trad-meter-hold", label: "Peak hold line", values: Values::Choices(&["Inherit", "Show", "Hide"]) },
+    StyleField { key: "trad-meter-hold-width", label: "Peak hold thickness (0–3 px)", values: Values::Number(3.0) },
+    StyleField { key: "trad-meter-cap", label: "Moving tip", values: Values::Choices(&["Inherit", "Show", "Hide"]) },
+    StyleField { key: "knob-ring-visible", label: "Dial value ring", values: Values::Choices(&["Inherit", "Show", "Hide"]) },
+    StyleField { key: "knob-track-visible", label: "Dial unfilled track", values: Values::Choices(&["Inherit", "Show", "Hide"]) },
+    StyleField { key: "knob-rim-visible", label: "Dial outer border", values: Values::Choices(&["Inherit", "Show", "Hide"]) },
+    StyleField { key: "knob-ring-width", label: "Dial ring width (0–3 px)", values: Values::Number(3.0) },
+    StyleField { key: "knob-pointer-width", label: "Dial pointer width (0–3 px)", values: Values::Number(3.0) },
+    StyleField { key: "tone-toolbar-hue", label: "Hue (180 = unchanged)", values: Values::Number(360.0) },
+    StyleField { key: "tone-toolbar-saturation", label: "Saturation (100 = unchanged)", values: Values::Number(200.0) },
+    StyleField { key: "tone-toolbar-brightness", label: "Brightness (100 = unchanged)", values: Values::Number(200.0) },
+    StyleField { key: "tone-toolbar-contrast", label: "Contrast (100 = unchanged)", values: Values::Number(200.0) },
+    StyleField { key: "tone-browser-hue", label: "Hue (180 = unchanged)", values: Values::Number(360.0) },
+    StyleField { key: "tone-browser-saturation", label: "Saturation (100 = unchanged)", values: Values::Number(200.0) },
+    StyleField { key: "tone-browser-brightness", label: "Brightness (100 = unchanged)", values: Values::Number(200.0) },
+    StyleField { key: "tone-browser-contrast", label: "Contrast (100 = unchanged)", values: Values::Number(200.0) },
+    StyleField { key: "tone-frames-hue", label: "Hue (180 = unchanged)", values: Values::Number(360.0) },
+    StyleField { key: "tone-frames-saturation", label: "Saturation (100 = unchanged)", values: Values::Number(200.0) },
+    StyleField { key: "tone-frames-brightness", label: "Brightness (100 = unchanged)", values: Values::Number(200.0) },
+    StyleField { key: "tone-frames-contrast", label: "Contrast (100 = unchanged)", values: Values::Number(200.0) },
+    StyleField { key: "tone-playlist-hue", label: "Hue (180 = unchanged)", values: Values::Number(360.0) },
+    StyleField { key: "tone-playlist-saturation", label: "Saturation (100 = unchanged)", values: Values::Number(200.0) },
+    StyleField { key: "tone-playlist-brightness", label: "Brightness (100 = unchanged)", values: Values::Number(200.0) },
+    StyleField { key: "tone-playlist-contrast", label: "Contrast (100 = unchanged)", values: Values::Number(200.0) },
+    StyleField { key: "tone-mixer-hue", label: "Hue (180 = unchanged)", values: Values::Number(360.0) },
+    StyleField { key: "tone-mixer-saturation", label: "Saturation (100 = unchanged)", values: Values::Number(200.0) },
+    StyleField { key: "tone-mixer-brightness", label: "Brightness (100 = unchanged)", values: Values::Number(200.0) },
+    StyleField { key: "tone-mixer-contrast", label: "Contrast (100 = unchanged)", values: Values::Number(200.0) },
+    StyleField { key: "tone-inspector-hue", label: "Hue (180 = unchanged)", values: Values::Number(360.0) },
+    StyleField { key: "tone-inspector-saturation", label: "Saturation (100 = unchanged)", values: Values::Number(200.0) },
+    StyleField { key: "tone-inspector-brightness", label: "Brightness (100 = unchanged)", values: Values::Number(200.0) },
+    StyleField { key: "tone-inspector-contrast", label: "Contrast (100 = unchanged)", values: Values::Number(200.0) },
+    StyleField { key: "tone-rack-hue", label: "Hue (180 = unchanged)", values: Values::Number(360.0) },
+    StyleField { key: "tone-rack-saturation", label: "Saturation (100 = unchanged)", values: Values::Number(200.0) },
+    StyleField { key: "tone-rack-brightness", label: "Brightness (100 = unchanged)", values: Values::Number(200.0) },
+    StyleField { key: "tone-rack-contrast", label: "Contrast (100 = unchanged)", values: Values::Number(200.0) },
+    StyleField { key: "tone-menus-hue", label: "Hue (180 = unchanged)", values: Values::Number(360.0) },
+    StyleField { key: "tone-menus-saturation", label: "Saturation (100 = unchanged)", values: Values::Number(200.0) },
+    StyleField { key: "tone-menus-brightness", label: "Brightness (100 = unchanged)", values: Values::Number(200.0) },
+    StyleField { key: "tone-menus-contrast", label: "Contrast (100 = unchanged)", values: Values::Number(200.0) },
+    StyleField { key: "tone-piano-hue", label: "Hue (180 = unchanged)", values: Values::Number(360.0) },
+    StyleField { key: "tone-piano-saturation", label: "Saturation (100 = unchanged)", values: Values::Number(200.0) },
+    StyleField { key: "tone-piano-brightness", label: "Brightness (100 = unchanged)", values: Values::Number(200.0) },
+    StyleField { key: "tone-piano-contrast", label: "Contrast (100 = unchanged)", values: Values::Number(200.0) },
+    StyleField { key: "tone-finishes-hue", label: "Hue (180 = unchanged)", values: Values::Number(360.0) },
+    StyleField { key: "tone-finishes-saturation", label: "Saturation (100 = unchanged)", values: Values::Number(200.0) },
+    StyleField { key: "tone-finishes-brightness", label: "Brightness (100 = unchanged)", values: Values::Number(200.0) },
+    StyleField { key: "tone-finishes-contrast", label: "Contrast (100 = unchanged)", values: Values::Number(200.0) },
+    StyleField { key: "tone-notes-hue", label: "Hue (180 = unchanged)", values: Values::Number(360.0) },
+    StyleField { key: "tone-notes-saturation", label: "Saturation (100 = unchanged)", values: Values::Number(200.0) },
+    StyleField { key: "tone-notes-brightness", label: "Brightness (100 = unchanged)", values: Values::Number(200.0) },
+    StyleField { key: "tone-notes-contrast", label: "Contrast (100 = unchanged)", values: Values::Number(200.0) },
+    StyleField { key: "tone-workspace-hue", label: "Hue (180 = unchanged)", values: Values::Number(360.0) },
+    StyleField { key: "tone-workspace-saturation", label: "Saturation (100 = unchanged)", values: Values::Number(200.0) },
+    StyleField { key: "tone-workspace-brightness", label: "Brightness (100 = unchanged)", values: Values::Number(200.0) },
+    StyleField { key: "tone-workspace-contrast", label: "Contrast (100 = unchanged)", values: Values::Number(200.0) },
+    StyleField { key: "tone-dials-hue", label: "Hue (180 = unchanged)", values: Values::Number(360.0) },
+    StyleField { key: "tone-dials-saturation", label: "Saturation (100 = unchanged)", values: Values::Number(200.0) },
+    StyleField { key: "tone-dials-brightness", label: "Brightness (100 = unchanged)", values: Values::Number(200.0) },
+    StyleField { key: "tone-dials-contrast", label: "Contrast (100 = unchanged)", values: Values::Number(200.0) },
+    StyleField { key: "tone-inserts-hue", label: "Hue (180 = unchanged)", values: Values::Number(360.0) },
+    StyleField { key: "tone-inserts-saturation", label: "Saturation (100 = unchanged)", values: Values::Number(200.0) },
+    StyleField { key: "tone-inserts-brightness", label: "Brightness (100 = unchanged)", values: Values::Number(200.0) },
+    StyleField { key: "tone-inserts-contrast", label: "Contrast (100 = unchanged)", values: Values::Number(200.0) },
+    StyleField { key: "playlist-halo-visible", label: "Channel activity halo", values: Values::Choices(&["Inherit", "Show", "Hide"]) },
+    StyleField { key: "playlist-halo-strength", label: "Halo strength % (100 = default)", values: Values::Number(200.0) },
+    StyleField { key: "playlist-record-light", label: "Record light style", values: Values::Choices(&appearance::RecordLightStyle::CHOICES) },
+    StyleField { key: "playlist-record-size", label: "Light size (6–13 px)", values: Values::Number(13.0) },
+    StyleField { key: "playlist-record-glow", label: "Recording glow (0–100%)", values: Values::Number(100.0) },
+    StyleField { key: "trad-record-light", label: "Record button style", values: Values::Choices(&appearance::RecordLightStyle::MIXER_CHOICES) },
+    StyleField { key: "trad-record-size", label: "Light size (6–13 px)", values: Values::Number(13.0) },
+    StyleField { key: "trad-record-glow", label: "Armed glow (0–100%)", values: Values::Number(100.0) },
+];
+
+use os_theme::regions::{SECTIONS, section};
+
+pub(crate) fn appearance_profile() -> Vec<(&'static str, Option<String>)> {
+    crate::settings_file::read(|st| PROFILE_KEYS.iter().map(|&key| {
+        (key, st.get(key).filter(|v| !v.is_empty()).map(str::to_owned))
+    }).collect())
+}
+
+fn matches(query: &str, label: &str, hint: &str, group: &str) -> bool {
+    query.is_empty() || {
+        let text = format!("{label} {hint} {group}")
+            .to_ascii_lowercase()
+            .replace(['_', '-', '&'], " ");
+        query.replace(['_', '-', '&'], " ").split_whitespace().all(|part| text.contains(part))
+    }
+}
+
+pub fn search_matches(query: &str, label: &str, aliases: &str, group: &str) -> bool {
+    matches(&query.trim().to_ascii_lowercase(), label, aliases, group)
+}
+
+fn aliases(key: &str) -> &'static str {
+    match key {
+        "mixer_separator" => "mixer divider section border line",
+        "mixer_channel_number" => "mixer track numbers digits",
+        "mixer_channel_name" => "mixer track names labels",
+        "fader_handle" => "mixer slider fader cap volume handle",
+        "grid" => "playlist grid background darken brightness",
+        "grid_alt" => "playlist alternate grid background",
+        "grid_gap" | "grid_bar" => "playlist grid lines timeline",
+        "toolbar" => "toolbar background control strip",
+        "text" => "interface font lettering labels",
+        _ => "",
+    }
+}
+
+pub fn color_shown(key: &str) -> bool {
+    !matches!(key, "mixer_channel_number_selected" | "mixer_channel_header_selected")
+        && (key != "mixer_separator" || crate::workspace_visibility::shown(SEPARATOR_COLOR_VISIBILITY))
+}
+
+fn color_section(key: &str) -> &'static str {
+    if key.starts_with("playlist_key_") || key.starts_with("playlist_activity_") || key.starts_with("playlist_waveform") { KEYBOARD_SECTION } else { section(key) }
+}
+
+fn color_label(key: &str) -> String {
+    if let Some(role) = key.strip_prefix("playlist_record_").or_else(|| key.strip_prefix("trad_record_")) {
+        return match role {
+            "idle" => "Idle color",
+            "armed" => "Armed color",
+            "live" => "Recording color",
+            _ => "Bezel color",
+        }.into();
+    }
+    if let Some(label)=match key {
+        "playlist_key_white"=>Some("White keys"), "playlist_key_black"=>Some("Black keys"),
+        "playlist_key_white_active"=>Some("Played white keys"), "playlist_key_black_active"=>Some("Played black keys"),
+        "playlist_key_frame"=>Some("Keyboard frame"), "playlist_key_separator"=>Some("Key separators"),
+        "mixer_channel_name" => Some("Channel names"),
+        "mixer_channel_number" => Some("Channel numbers"),
+        "mixer_channel_header" => Some("Channel header background"),
+        "mixer_separator" => Some("Separator color"),
+        "mixer_action_face" => Some("Mixer action button background"),
+        "mixer_action_text" => Some("Mixer action button text"),
+        "settings_group_title" => Some("Section heading text"),
+        "settings_group_note" => Some("Section note and arrow color"),
+        "playlist_bar_face" => Some("Playlist toolbar background"),
+        "playlist_bar_text" => Some("Playlist toolbar text and icons"),
+        "playlist_overview_thumb" => Some("Overview scrollbar handle"),
+        "grid" => Some("Grid background"),
+        "grid_alt" => Some("Alternate grid background"),
+        "grid_gap" => Some("Beat lines and track gaps"),
+        "toolbar" => Some("Toolbar background"),
+        "insert_knob_face"=>Some("Face color"), "insert_knob_face_edge"=>Some("Face edge color"),
+        "insert_knob_pointer"=>Some("Pointer color"), "insert_knob_track"=>Some("Unfilled inner track color"),
+        "insert_knob_ring"=>Some("Value ring color"), "insert_knob_rim"=>Some("Outer circle color"),
+        "playlist_activity_halo"=>Some("Halo color"), "playlist_waveform"=>Some("Idle sample waveform"),
+        "playlist_waveform_active"=>Some("Active sample waveform"), _=>None,
+    } {return label.into();}
+    let mut label = key.strip_prefix("trad_meter_").unwrap_or(key).replace('_', " ");
+    label[..1].make_ascii_uppercase();
+    label
+}
+
+fn style_section(key: &str) -> &'static str {
+    if key.starts_with("assigned-color-") { return ASSIGNED_COLOR_SECTION; }
+    if key.starts_with("playlist-record-") { return PLAYLIST_RECORD_LIGHT; }
+    if key.starts_with("trad-record-") { return MIXER_RECORD_LIGHT; }
+    if key.starts_with("playlist-halo-") { return KEYBOARD_SECTION; }
+    if let Some(area) = key.strip_prefix("tone-") {
+        return SECTIONS.iter().find(|(id, _, _)| area.starts_with(&format!("{id}-"))).map(|(_, title, _)| *title).unwrap_or("Shape & finish");
+    }
+    if key.starts_with("insert-") { return INSERT_SECTION; }
+    if key.starts_with("trad-meter-") { return METER_SECTION; }
+    if key.starts_with("knob") { return "Shared dial controls"; }
+    match key {
+        "playlist-lines" | "playlist-buttons" => "Playlist",
+        "piano-lines" | "piano-buttons" => "Piano Roll",
+        "rack-steps" => "Channel Rack",
+        "mixer" | "mixer-buttons" => "Mixer",
+        _ => "Shape & finish",
+    }
+}
+
+pub fn groups(query: &str) -> Vec<(&'static str, Vec<Row>)> {
+    let query = query.trim().to_ascii_lowercase();
+    let mut result = Vec::new();
+    for title in ["Shape & finish", ASSIGNED_COLOR_SECTION, KEYBOARD_SECTION, PLAYLIST_RECORD_LIGHT, MIXER_RECORD_LIGHT].into_iter().chain(SECTIONS.iter().map(|(_, title, _)| *title)) {
+        if title == ASSIGNED_COLOR_SECTION && !crate::workspace_visibility::shown(ASSIGNED_COLOR_VISIBILITY) { continue; }
+        if title == INSERT_SECTION && !crate::workspace_visibility::shown(INSERT_VISIBILITY) { continue; }
+        if title == METER_SECTION && !crate::workspace_visibility::shown(METER_VISIBILITY) { continue; }
+        if matches!(title, PLAYLIST_RECORD_LIGHT | MIXER_RECORD_LIGHT)
+            && !crate::workspace_visibility::shown(RECORD_LIGHT_VISIBILITY) { continue; }
+        let mut rows = STYLES.iter().enumerate()
+            .filter(|(_, def)| (!def.key.starts_with("tone-") || crate::workspace_visibility::shown(AREA_VISIBILITY)) && style_section(def.key) == title && matches(&query, def.label, def.key, title))
+            .map(|(i, _)| Row::Style(i)).collect::<Vec<_>>();
+        rows.extend(Palette::NAMES.iter().copied()
+            .filter(|key| color_section(key) == title
+                && color_shown(key)
+                && (matches(&query, key, Palette::description(key), title) || matches(&query, &color_label(key), aliases(key), title)))
+            .map(Row::Color));
+        if !rows.is_empty() {
+            if title == INSERT_SECTION { rows.insert(0, Row::InsertPreview); }
+            if title == METER_SECTION { rows.insert(0, Row::MeterPreview); }
+            if title == KEYBOARD_SECTION { rows.insert(0, Row::KeyboardPreview); }
+            if title == PLAYLIST_RECORD_LIGHT { rows.insert(0, Row::RecordPreview(crate::record_light::Surface::Playlist)); }
+            if title == MIXER_RECORD_LIGHT { rows.insert(0, Row::RecordPreview(crate::record_light::Surface::TraditionalMixer)); }
+            rows.push(Row::Reset(title));
+            result.push((title, rows));
+        }
+    }
+    result
+}
+
+fn color_key(token: &str) -> String {
+    format!("{}{token}", appearance::COLOR_PREFIX)
+}
+
+fn style_key(index: usize) -> String {
+    format!("{}{}", appearance::STYLE_PREFIX, STYLES[index].key)
+}
+
+pub(crate) fn set_identity_color(text: &str, key: &str, color: Color) -> String {
+    let text = if key.starts_with("LemonStudioStyle.icon-") && key != "LemonStudioStyle.icon-color" {
+        explicit_icon_mix(text)
+    } else {
+        text.to_owned()
+    };
+    fl::set_key(&text, key, &hex(color))
+}
+
+pub fn set_color(text: &str, token: &str, color: Color) -> String {
+    if token.starts_with("skin_")
+        && let Some(part) = Part::ALL.into_iter().find(|part| part.colors().iter().any(|&(_, key)| key == token))
+    {
+        return mixer_skin::set_color(text, Scope::Theme, part, token, color);
+    }
+    let text = fl::set_key(text, &color_key(token), &hex(color));
+    // Preserve an explicitly chosen finish. Older themes without a finish keep
+    // their existing palette-renderer migration behavior.
+    if !matches!(token, "slot_text" | "slot_text_used" | "mixer_separator")
+        && (token.starts_with("mixer_") || token.starts_with("slot") || token == "fader_handle")
+        && fl::get_key(&text, "LemonStudioStyle.mixer").is_none() {
+        fl::set_key(&text, "LemonStudioStyle.mixer", "Theme colors")
+    } else {
+        text
+    }
+}
+
+fn hex(c: Color) -> String {
+    format!("#{:02X}{:02X}{:02X}", c.r, c.g, c.b)
+}
+
+fn value_label(t: &Palette, field: FieldFor, text: &str) -> String {
+    match field {
+        FieldFor::IdentityValue(key) => fl::get_key(text, key).unwrap_or("").into(),
+        FieldFor::Search => "Search appearance settings...".into(),
+        #[cfg(test)]
+        FieldFor::Hex(token) => t.get(token).map(hex).unwrap_or_default(),
+        FieldFor::Number(i) => fl::get_key(text, &style_key(i)).unwrap_or("Inherit").into(),
+    }
+}
+
+fn button(ui: &mut Ui, rect: Rect, hit: Hit, label: &str, hint: &str, selected: bool) {
+    let hover = ui.hit(
+        rect,
+        Action::Settings(SAct::ThemeEditor(hit)),
+        hint.to_owned(),
+    );
+    let t = ui.t;
+    let fill = if selected {
+        t.accent
+    } else if hover {
+        t.button_hi
+    } else {
+        t.button
+    };
+    let ink = if selected {
+        os_ui::kit::lemon::ink_on(fill)
+    } else {
+        t.text
+    };
+    ui.c.fill_rrect(rect, 3.0, fill);
+    ui.c.text_center(Font::new(12), rect, ink, label);
+}
+
+fn field(ui: &mut Ui, r: Rect, session: &Session, kind: FieldFor, text: &str) {
+    let label = if kind == FieldFor::Search && !session.query.text.is_empty() {
+        session.query.text.clone()
+    } else {
+        value_label(ui.theme_preview.unwrap_or(ui.t), kind, text)
+    };
+    let hover = ui.hit(
+        r,
+        Action::Settings(SAct::ThemeEditor(Hit::Field(kind))),
+        if kind == FieldFor::Search { "Search all appearance settings" } else { "Click to edit" },
+    );
+    ui.c.fill_rrect(r, 3.0, ui.t.sunken);
+    let typing = (session.focus == Some(kind)).then_some(if kind == FieldFor::Search {
+        &session.query
+    } else {
+        &session.field
+    });
+    settings::cell_text(ui, r, &label, typing, hover);
+}
+
+pub fn paint_search(ui: &mut Ui, s: &State, r: Rect) {
+    if let Some(session) = &s.settings.advanced_theme {
+        field(ui, r, session, FieldFor::Search, "");
+    } else {
+        let hot = ui.hit(r, Action::Settings(SAct::AppearanceSearch), "Search all appearance settings");
+        ui.c.fill_rrect(r, 3.0, ui.t.sunken);
+        settings::cell_text(ui, r, "Search appearance settings...", None, hot);
+    }
+}
+
+pub fn paint(ui: &mut Ui, s: &State, row: Row, r: Rect) {
+    let session = s.settings.advanced_theme.as_ref();
+    let t = ui.theme_preview.unwrap_or(ui.t);
+    let text = s.fl_text.as_deref().unwrap_or("");
+    let control = Rect::new(r.x + 228.0, r.y + 2.0, 90.0, 24.0);
+    let label = |ui: &mut Ui, title: &str| {
+        ui.c.text_clip(Font::new(13), r.x, r.y + 6.0, 220.0, ui.t.text, title)
+    };
+    match row {
+        Row::Preview => preview(ui, r),
+        Row::AreaPreview(area) => area_preview(ui, area, r),
+        Row::RecordPreview(surface) => {
+            use crate::record_light::{self, Lamp, Surface};
+            let face = match surface { Surface::Playlist => t.track_header, Surface::TraditionalMixer => t.mixer_strip };
+            let width = ((r.w - 12.) / 3.).clamp(70., 103.);
+            for (index, &lamp) in surface.states().iter().enumerate() {
+                let chip = Rect::new(r.x + index as f32 * (width + 6.), r.y + 5., width, 50.);
+                ui.c.fill_rrect(chip, 4., face);
+                record_light::paint(ui.c, t, Rect::new(chip.cx()-19., chip.y+5., 38., 16.), surface, lamp, false);
+                ui.c.text_center(Font::new(11), Rect::new(chip.x, chip.y+23., chip.w, 22.),
+                    os_ui::kit::lemon::ink_on(face), lamp.label());
+            }
+        }
+        Row::KeyboardPreview => {
+            for (i,notes) in [0, (1<<0)|(1<<4)|(1<<7)|(1<<10)].into_iter().enumerate() {
+                let face=Rect::new(r.x+i as f32*185.,r.y+4.,170.,88.);
+                ui.c.fill_rrect_matched(face,4.,t.track_header);
+                if notes!=0 { crate::views::playlist::activity_halo(ui.c,t,face,4.); }
+                crate::views::playlist::mini_keyboard(ui.c,t,Rect::new(face.x+6.,face.y+4.,16.,80.),notes);
+                ui.c.text(Font::new(12),face.x+30.,face.y+34.,t.text,if notes==0 {"Idle"}else{"Playing chord"});
+            }
+        },
+        Row::MeterPreview => {
+            ui.c.text_clip(Font::new(12), r.x, r.y + 3.0, r.w, ui.t.text_dim,
+                "Preview · Change the colors at the bottom and top of each level band.");
+            let cfg = &s.mixer.meter_cfg;
+            crate::views::mixer::preview_peak_meter(ui.c, t, Rect::new(r.x + 4.0, r.y + 24.0, 33.0, 88.0),
+                [-15.0, 10.0], cfg);
+            let chips = [
+                ("Clipping", "trad_meter_clip_bottom", "trad_meter_clip_top"),
+                ("High", "trad_meter_hot_bottom", "trad_meter_hot_top"),
+                ("Low", "trad_meter_low_bottom", "trad_meter_low_top"),
+            ];
+            ui.c.text(Font::new(11), r.x + 142.0, r.y + 24.0, ui.t.text_dim, "Bottom");
+            ui.c.text(Font::new(11), r.x + 204.0, r.y + 24.0, ui.t.text_dim, "Top");
+            for (row, (label, bottom, top)) in chips.into_iter().enumerate() {
+                let y = r.y + 41.0 + row as f32 * 23.0;
+                ui.c.text(Font::new(12), r.x + 52.0, y + 2.0, ui.t.text, label);
+                for (side, token) in [bottom, top].into_iter().enumerate() {
+                    let at = Rect::new(r.x + 142.0 + side as f32 * 62.0, y, 44.0, 18.0);
+                    let hot = ui.hit(at, Action::Settings(SAct::ThemeEditor(Hit::Color(token))), Palette::description(token));
+                    ui.c.fill_rrect(at, 3.0, if hot { ui.t.text } else { ui.t.window_border });
+                    ui.c.fill_rrect(at.inset(2.0), 2.0, t.get(token).expect("meter color"));
+                }
+            }
+        },
+        Row::InsertPreview => {
+            ui.c.text(Font::new(12), r.x, r.y + 3.0, ui.t.text_dim, "Dry/wet preview: 0%, 50%, 100%. Set a face finish or color to replace the inherited artwork.");
+            let chrome = ui.t;
+            ui.t = ui.theme_preview.unwrap_or(ui.t);
+            let chrome_finish = ui.mixer_finish;
+            let chrome_skin = ui.mixer_skin;
+            ui.mixer_finish = crate::views::mixer::Finish::current(ui.t.appearance);
+            ui.mixer_skin = ui.mixer_skins.get(crate::mixer_skin::Scope::from_finish(ui.mixer_finish));
+            for (i, value) in [0.0, 0.5, 1.0].into_iter().enumerate() {
+                crate::views::mixer::insert_knob(ui, crate::knobs::KnobId::SlotMix(0, 0), r.x + 25.0 + i as f32 * 56.0, r.y + 40.0, 1.0, value);
+            }
+            ui.t = chrome;
+            ui.mixer_finish = chrome_finish;
+            ui.mixer_skin = chrome_skin;
+        },
+        Row::Mixer(row) => {
+            if let Some(session) = session { paint_mixer(ui, session, row, r); }
+        }
+        Row::Identity(row) => paint_identity(ui, s, row, r),
+        Row::Color(token) => {
+            let clean_surface = token == "mixer_strip" && ui.mixer_finish == crate::views::mixer::Finish::CleanModern
+                && !s.neon_3036 && !s.vintage_2005;
+            let color = if clean_surface {
+                ui.mixer_skin.palette(t).skin_panel_face
+            } else if token == "mixer_separator" {
+                ui.mixer_separator_color.unwrap_or(t.mixer_separator)
+            } else {
+                t.get(token).expect("palette color")
+            };
+            label(ui, &color_label(token));
+            let hint = Palette::description(token);
+            let pick = Rect::new(control.x, control.y, 122.0, control.h);
+            button(ui, pick, Hit::Color(token), "Choose color…", hint, false);
+            let chip = Rect::new(pick.x + 6.0, pick.y + 5.0, 14.0, pick.h - 10.0);
+            ui.c.fill_rrect(chip.outset(1.0), 3.0, ui.t.window_border);
+            ui.c.fill_rrect(chip, 2.0, color);
+            let customized = if clean_surface {
+                mixer_skin::color(text, Scope::CleanModern, mixer_skin::PANEL_SURFACE).is_some()
+            } else {
+                fl::get_key(text, &color_key(token)).is_some()
+            };
+            if customized {
+                button(
+                    ui,
+                    Rect::new(pick.right() + 6.0, pick.y, 58.0, pick.h),
+                    Hit::ResetColor(token),
+                    "Reset",
+                    "Use the inherited color",
+                    false,
+                );
+            }
+            let hint_font = Font::new(11);
+            if ui.c.text_width(hint_font, hint) <= r.w - 422.0 {
+                ui.c.text(hint_font, r.x + 422.0, r.y + 7.0, ui.t.text_dim, hint);
+            }
+        }
+        Row::Style(i) => {
+            let def = &STYLES[i];
+            label(ui, def.label);
+            match def.values {
+                Values::Choices(choices) => {
+                    let mut x = control.x;
+                    let fallback = match def.key {
+                        "playlist-record-light" => t.appearance.playlist_record_light.style.label(),
+                        "trad-record-light" => crate::record_light::Surface::TraditionalMixer.appearance(t).style.label(),
+                        _ => "Inherit",
+                    };
+                    let current = fl::get_key(text, &style_key(i))
+                        .unwrap_or(fallback)
+                        .to_string();
+                    let modified = fl::get_key(text, &style_key(i)).is_some();
+                    let room = r.right() - x - if modified { 66.0 } else { 0.0 };
+                    let ideal: f32 = choices.iter().map(|choice| ui.c.text_width(Font::new(12), choice) + 19.0).sum();
+                    let scale = (room / ideal.max(1.0)).min(1.0);
+                    for &choice in choices {
+                        let w = ((ui.c.text_width(Font::new(12), choice) + 19.0) * scale - 3.0).max(10.0);
+                        let b = Rect::new(x, control.y, w, control.h);
+                        button(
+                            ui,
+                            b,
+                            Hit::Choice(i, choice),
+                            choice,
+                            def.label,
+                            current.eq_ignore_ascii_case(choice),
+                        );
+                        x += w + 3.0;
+                    }
+                    if modified {
+                        button(ui, Rect::new(x + 3.0, control.y, 58.0, control.h),
+                            Hit::ResetStyle(i), "Reset", "Use the inherited style", false);
+                    }
+                }
+                Values::Number(_) => {
+                    if let Some(session) = session {
+                        field(ui, control, session, FieldFor::Number(i), text);
+                    } else {
+                        let hot = ui.hit(control, Action::Settings(SAct::ThemeEditor(Hit::Field(FieldFor::Number(i)))), "Click to edit");
+                        ui.c.fill_rrect(control, 3.0, ui.t.sunken);
+                        settings::cell_text(ui, control, &value_label(t, FieldFor::Number(i), text), None, hot);
+                    }
+                    if fl::get_key(text, &style_key(i)).is_some() {
+                        button(
+                            ui,
+                            Rect::new(control.right() + 6.0, control.y, 58.0, control.h),
+                            Hit::ResetStyle(i),
+                            "Reset",
+                            "Use the inherited value",
+                            false,
+                        );
+                    }
+                }
+            }
+        }
+        Row::Reset(group) => {
+            if Palette::NAMES
+                .iter()
+                .any(|key| color_section(key) == group && fl::get_key(text, &color_key(key)).is_some())
+                || STYLES.iter().enumerate().any(|(i, def)| style_section(def.key) == group && fl::get_key(text, &style_key(i)).is_some())
+            {
+                button(
+                    ui,
+                    Rect::new(r.x, r.y + 2.0, 120.0, 24.0),
+                    Hit::ResetGroup(group),
+                    "Reset section",
+                    "Restore this section's colors, styles and area adjustments",
+                    false,
+                );
+            }
+        }
+    }
+}
+
+fn preview(ui: &mut Ui, r: Rect) {
+    use os_ui::kit::{self, State};
+    let t = ui.theme_preview.unwrap_or(ui.t);
+    let body = Rect::new(r.x, r.y + 5.0, r.w - 2.0, 59.0);
+    if !kit::panel_finish(ui.c, t, body, t.toolbar) {
+        ui.c.fill_rrect(body, t.style.radius_panel, t.toolbar);
+    }
+    ui.hit(
+        body,
+        Action::Settings(SAct::ThemeEditor(Hit::Color("toolbar"))),
+        "Edit toolbar color",
+    );
+    let mut x = body.x + 12.0;
+    for (label, token, state) in [
+        ("Normal", "button", State::NORMAL),
+        ("Hover", "button_hi", State::hover(true)),
+        ("Held", "button_pressed", State::new(true, true, false)),
+        ("Active", "on_top", State::NORMAL.with_on(true)),
+        (
+            "Disabled",
+            "button_disabled",
+            State::NORMAL.with_disabled(true),
+        ),
+    ] {
+        let b = Rect::new(x, body.y + 14.0, 68.0, 30.0);
+        ui.hit(
+            b,
+            Action::Settings(SAct::ThemeEditor(Hit::Color(token))),
+            "Edit this state",
+        );
+        kit::button(ui.c, t, b, state);
+        ui.c.text_center(Font::new(11), b, kit::ink(t, state), label);
+        x += 73.0;
+    }
+    let knob = Rect::new(x + 10.0, body.y + 14.0, 30.0, 30.0);
+    ui.hit(
+        knob,
+        Action::Settings(SAct::ThemeEditor(Hit::Color("knob_cap"))),
+        "Edit knob cap",
+    );
+    kit::knob(
+        ui.c,
+        t,
+        knob.cx(),
+        knob.cy(),
+        13.0,
+        0.72,
+        false,
+        kit::KnobLook::Ring,
+        State::NORMAL,
+    );
+    let led = Rect::new(knob.right() + 16.0, knob.y, 22.0, knob.h);
+    ui.hit(
+        led,
+        Action::Settings(SAct::ThemeEditor(Hit::Color("indicator_on"))),
+        "Edit indicator color",
+    );
+    kit::led(
+        ui.c,
+        t,
+        led.cx(),
+        led.cy(),
+        8.0,
+        State::NORMAL.with_on(true),
+    );
+}
+
+fn area_preview(ui: &mut Ui, area: Area, r: Rect) {
+    let t = ui.theme_preview.unwrap_or(ui.t);
+    let panel = Rect::new(r.x, r.y + 5.0, r.w - 2.0, 58.0);
+    let (face, header) = match area {
+        Area::Mixer => {
+            let strip = if ui.mixer_finish == crate::views::mixer::Finish::CleanModern
+                && ui.mixer_skin.uses(Part::Panel) {
+                ui.mixer_skin.palette(t).skin_panel_face
+            } else {
+                t.mixer_strip
+            };
+            (t.mixer_bg, strip)
+        },
+        Area::Playlist => (t.grid, t.track_header),
+        Area::Piano => (t.pr_row, t.pr_row_black),
+        Area::Rack => (t.rack_inset, t.rack_row_box),
+        Area::Toolbar => (t.toolbar, t.button),
+        _ => (t.workspace, t.window_title),
+    };
+    ui.c.fill_rrect(panel, 4.0, face);
+    match area {
+        Area::Mixer => {
+            let separator = ui.mixer_separator_color.unwrap_or(t.mixer_separator);
+            for i in 0..7 {
+                let x = panel.x + 8.0 + i as f32 * 46.0;
+                let track = Rect::new(x, panel.y + 5.0, 36.0, 48.0);
+                ui.c.fill_rrect(track, 3.0, header);
+                ui.c.fill_rect(Rect::new(track.right() + 2.0, track.y, 5.0, track.h), separator);
+                ui.c.text_center(Font::new(12), Rect::new(x, track.y, track.w, 16.0),
+                    os_theme::chrome::Chrome::MixerNumber.or(t, t.text), &(i + 1).to_string());
+                ui.c.fill_rect(Rect::new(track.cx()-1.0, track.y + 20.0, 2.0, 21.0), t.mixer_strip_dark);
+                ui.c.fill_rrect(Rect::new(track.cx()-6.0, track.y + 28.0, 12.0, 5.0), 2.0, t.fader_handle);
+            }
+        }
+        Area::Playlist | Area::Piano => {
+            let fine = (area == Area::Playlist).then(|| crate::playlist_grid::Fine::load(t)).flatten();
+            let scale = ui.c.scale;
+            for i in 0..4 {
+                let y = panel.y + i as f32 * 14.0;
+                let h = Rect::new(panel.x, y + 1.0, 110.0, 13.0);
+                ui.c.fill_rrect(h, 2.0, header);
+                let label = if area == Area::Playlist { format!("Track {}", i + 1) } else { format!("C{}", 5 - i) };
+                ui.c.text(Font::new(11), h.x + 8.0, h.y, os_ui::kit::button_ink_on(header, t.text), &label);
+                if i % 2 == 1 {
+                    ui.c.fill_rect(Rect::new(h.right(), y, panel.right() - h.right(), 13.0),
+                        if area == Area::Playlist { t.grid_alt } else { t.pr_row_black });
+                }
+                if let Some(style) = fine {
+                    let width = style.track.width(scale);
+                    ui.c.fill_rect(Rect::new(h.right(), y + 14.0 - width, panel.right() - h.right(), width), style.track.color);
+                } else {
+                    ui.c.line(h.right(), y + 14.0, panel.right(), y + 14.0, 1.0, t.grid_gap);
+                }
+            }
+            for (i, x) in (132..(panel.w as usize)).step_by(40).enumerate() {
+                let x = panel.x + x as f32;
+                if let Some(style) = fine {
+                    let line = if i % 4 == 0 { style.bar } else { style.beat };
+                    ui.c.fill_rect(Rect::new(x, panel.y, line.width(scale), panel.h - 2.0), line.color);
+                } else {
+                    ui.c.line(x, panel.y, x, panel.bottom(), 1.0, t.grid_bar);
+                }
+            }
+        }
+        _ => {
+            for (i, label) in ["Play", "Record", "Settings"].into_iter().enumerate() {
+                let chip = Rect::new(panel.x + 10.0 + i as f32 * 82.0, panel.y + 14.0, 74.0, 30.0);
+                ui.c.fill_rrect(chip, 4.0, header);
+                ui.c.text_center(Font::new(12), chip, os_ui::kit::button_ink_on(header, t.text), label);
+            }
+        }
+    }
+}
+
+// Activate mixing deliberately, without reviving hidden overrides from an older
+// Default-based theme when the user edits just one icon.
+fn explicit_icon_mix(text: &str) -> String {
+    let mut next = text.to_owned();
+    if fl::get_key(text, "LemonStudioStyle.icon-mixing") != Some("1")
+        && fl::get_key(text, "LemonStudioStyle.icon-family").and_then(|v| v.parse::<u8>().ok()).unwrap_or(0) == 0
+    {
+        for role in 0..crate::icons::CHOICES.len() {
+            for field in ["family", "color"] {
+                next = fl::remove_key(&next, &format!("LemonStudioStyle.icon-{role}-{field}"));
+            }
+        }
+    }
+    fl::set_key(&next, "LemonStudioStyle.icon-mixing", "1")
+}
+
+fn paint_identity(ui: &mut Ui, s: &State, row: IdentityRow, r: Rect) {
+    use crate::theme_identity as id;
+    let theme = ui.theme_preview.unwrap_or(ui.t);
+    let current = theme.appearance;
+    let text = s.fl_text.as_deref().unwrap_or("");
+    let name = fl::get_key(text, id::NAME);
+    let mut add = |slot: usize, title: &str, hit, active| {
+        let box_ = Rect::new(r.x + slot as f32 * 111.0, r.y + 3.0, 105.0, 27.0);
+        button(ui, box_, Hit::Identity(hit), title, title, active);
+    };
+    match row {
+        IdentityRow::FollowIcons => {
+            add(0, "Match icons", IdentityHit::FollowIcons, current.cursor_family.is_none());
+            button(ui, Rect::new(r.x + 120.0, r.y + 3.0, 150.0, 27.0),
+                Hit::Identity(IdentityHit::ResetArtwork), "Reset all artwork", "Reset all icon and cursor choices and colors; Apply or Cancel in the header", false);
+            let name = crate::playlist_tools::cursor_pack_name(current.cursor_family.unwrap_or(current.icon_pack));
+            ui.c.text(Font::new(12), r.x + 285.0, r.y + 10.0, ui.t.text, &format!("Cursor pack: {name}"));
+        }
+        IdentityRow::Icon(index) => {
+            let (icon, label, key) = crate::icons::CHOICES[index];
+            let choice = current.icon_variants[index / 16][index % 16];
+            let count = os_ui::icon_packs::PACKS.len() as u8 + 1;
+            let name = choice.checked_sub(1).map(|id| os_ui::icon_packs::get(id).name).unwrap_or("Follow pack");
+            ui.c.text_clip(Font::new(12), r.x + 30.0, r.y + 10.0, 125.0, ui.t.text, label);
+            ui.c.set_icon_pack(current.icon_pack, false);
+            ui.c.set_icon_overrides(current);
+            crate::icons::draw(ui.c, icon, Rect::new(r.x + 3.0, r.y + 6.0, 22.0, 22.0), theme.glyph);
+            ui.c.set_icon_pack(0, false);
+            for (x, title, next) in [(160.0, "<", (choice + count - 1) % count), (315.0, ">", (choice + 1) % count)] {
+                button(ui, Rect::new(r.x + x, r.y + 3.0, 28.0, 27.0),
+                    Hit::Identity(IdentityHit::IconFamily(index as u8, next)), title, "Choose this icon's family", false);
+            }
+            ui.c.text_center(Font::new(11), Rect::new(r.x + 189.0, r.y + 3.0, 124.0, 27.0), ui.t.text, name);
+            button(ui, Rect::new(r.x + 350.0, r.y + 3.0, 65.0, 27.0),
+                Hit::Identity(IdentityHit::IconFamily(index as u8, 1)), "Default", "Use this icon's original design", choice == 1);
+            button(ui, Rect::new(r.x + 420.0, r.y + 3.0, 55.0, 27.0),
+                Hit::Identity(IdentityHit::IconFamily(index as u8, 0)), "Pack", "Follow the icon pack", choice == 0);
+            let at = Rect::new(r.x + 485.0, r.y + 3.0, 68.0, 27.0);
+            button(ui, at, Hit::Identity(IdentityHit::IconColor(key)), "Color…", "Choose this icon's color", false);
+            if fl::get_key(text, key).is_some() {
+                button(ui, Rect::new(at.right() + 3.0, at.y, 23.0, at.h),
+                    Hit::Identity(IdentityHit::ResetIconColor(key)), "×", "Restore this icon's inherited color", false);
+            }
+        }
+        IdentityRow::Cursor(index) => {
+            let (label, cursor) = crate::playlist_tools::CURSOR_CHOICES[index];
+            let choice = current.cursor_variants[index / 16][index % 16];
+            let count = crate::playlist_tools::CURSOR_PACK_COUNT + 1;
+            let name = choice.checked_sub(1).map(crate::playlist_tools::cursor_pack_name).unwrap_or("Follow pack");
+            let pack = crate::playlist_tools::resolved_cursor_pack(current, cursor);
+            crate::playlist_tools::paint_cursor_sample(ui.c, cursor, pack,
+                Rect::new(r.x + 2.0, r.y + 4.0, 25.0, 25.0), current.cursor_color.unwrap_or(theme.glyph));
+            ui.c.text_clip(Font::new(12), r.x + 32.0, r.y + 10.0, 145.0, ui.t.text, label);
+            for (x, title, next) in [(185.0, "<", (choice + count - 1) % count), (350.0, ">", (choice + 1) % count)] {
+                button(ui, Rect::new(r.x + x, r.y + 3.0, 28.0, 27.0),
+                    Hit::Identity(IdentityHit::CursorFamily(index as u8, next)), title, "Choose this cursor's pack", false);
+            }
+            ui.c.text_center(Font::new(11), Rect::new(r.x + 215.0, r.y + 3.0, 133.0, 27.0), ui.t.text, name);
+            button(ui, Rect::new(r.x + 390.0, r.y + 3.0, 70.0, 27.0),
+                Hit::Identity(IdentityHit::CursorFamily(index as u8, 1)), "Default", "Use the original cursor", choice == 1);
+            button(ui, Rect::new(r.x + 468.0, r.y + 3.0, 70.0, 27.0),
+                Hit::Identity(IdentityHit::CursorFamily(index as u8, 0)), "Pack", "Follow the cursor pack", choice == 0);
+        }
+        IdentityRow::Appearance => {
+            let Some(session) = s.settings.advanced_theme.as_ref() else { return };
+            for (i, (label, key)) in [
+                ("Icon color", "LemonStudioStyle.icon-color"),
+                ("Cursor color", "LemonStudioStyle.cursor-color"),
+                ("Cursor size %", "LemonStudioStyle.cursor-size"),
+            ].into_iter().enumerate() {
+                let y = r.y + i as f32 * 32.0;
+                ui.c.text(Font::new(13), r.x, y + 7.0, ui.t.text, label);
+                if key == "LemonStudioStyle.icon-color" {
+                    let at = Rect::new(r.x + 130.0, y, 150.0, 28.0);
+                    button(ui, at, Hit::Identity(IdentityHit::IconColor(key)), "Choose color…", "Choose an icon color visually", false);
+                    let color = current.icon_color.unwrap_or(theme.glyph);
+                    ui.c.fill_rrect(Rect::new(at.x + 6.0, at.y + 7.0, 14.0, 14.0), 3.0, color);
+                    button(ui, Rect::new(at.right() + 8.0, y, 105.0, 28.0),
+                        Hit::Identity(IdentityHit::ResetIconColor(key)), "Pack color", "Restore the inherited icon color", false);
+                } else if key == "LemonStudioStyle.cursor-color" {
+                    let family = current.cursor_family.unwrap_or(current.icon_pack);
+                    let color = current.cursor_color.unwrap_or_else(|| crate::playlist_tools::cursor_pack_color(family));
+                    let b = Rect::new(r.x + 130.0, y, 150.0, 28.0);
+                    button(ui, b, Hit::Identity(IdentityHit::CursorColor), "Choose color…", "Choose a cursor color visually", false);
+                    ui.c.fill_rrect(Rect::new(b.x + 6.0, b.y + 7.0, 14.0, 14.0), 3.0, color);
+                    button(ui, Rect::new(b.right() + 8.0, y, 105.0, 28.0),
+                        Hit::Identity(IdentityHit::ResetCursorColor), "Pack color", "Restore the cursor pack's color", false);
+                } else {
+                    field(ui, Rect::new(r.x + 130.0, y, 150.0, 28.0), session, FieldFor::IdentityValue(key), text);
+                }
+            }
+        }
+        IdentityRow::CursorPacks(first) => {
+            for (slot, pack) in (first..crate::playlist_tools::CURSOR_PACK_COUNT).take(5).enumerate() {
+                add(slot, crate::playlist_tools::cursor_pack_name(pack), IdentityHit::CursorPack(pack),
+                    current.cursor_family.unwrap_or(current.icon_pack) == pack);
+            }
+        }
+        IdentityRow::Packs(first) => {
+            for (slot, pack) in (first..os_ui::icon_packs::PACKS.len() as u8).take(5).enumerate() {
+                add(
+                    slot,
+                    os_ui::icon_packs::get(pack).name,
+                    IdentityHit::Pack(pack),
+                    current.icon_pack == pack,
+                );
+            }
+        }
+        IdentityRow::Fonts => {
+            for (slot, title) in id::FONTS.into_iter().enumerate() {
+                if slot != 4 || name.is_some() {
+                    add(
+                        slot,
+                        title,
+                        IdentityHit::Font(slot as u8),
+                        current.ui_font as usize == slot,
+                    );
+                }
+            }
+        }
+        IdentityRow::Files => {
+            add(0, "Import font...", IdentityHit::Import, false);
+            if let Some(name) = name {
+                add(1, "Remove font", IdentityHit::Remove, false);
+                ui.c.text_clip(
+                    Font::new(12),
+                    r.x + 230.0,
+                    r.y + 8.0,
+                    315.0,
+                    ui.t.text,
+                    name,
+                );
+            } else {
+                ui.c.text(
+                    Font::new(12),
+                    r.x + 125.0,
+                    r.y + 8.0,
+                    ui.t.text_dim,
+                    "TTF / OTF · 512 KB maximum",
+                );
+            }
+        }
+        IdentityRow::Preview => {
+            ui.c.mute_theme_font(false);
+            ui.c.set_icon_pack(current.icon_pack, false);
+            ui.c.set_icon_color(current.icon_color);
+            ui.c.set_icon_overrides(current);
+            let box_ = Rect::new(r.x, r.y + 4.0, r.w - 2.0, r.h - 14.0);
+            ui.c.fill_rrect(box_, 6.0, theme.toolbar);
+            use crate::icons::{self, Icon};
+            let samples = [
+                Icon::Play,
+                Icon::Metronome,
+                Icon::WaitInput,
+                Icon::Countdown,
+                Icon::LoopRecord,
+                Icon::PianoRoll,
+                Icon::ChannelRack,
+                Icon::Mixer,
+                Icon::Playlist,
+                Icon::Magnet,
+                Icon::Cut,
+                Icon::Pencil,
+                Icon::Brush,
+                Icon::Slice,
+                Icon::Delete,
+                Icon::StretchBand,
+                Icon::Select,
+                Icon::Mute,
+                Icon::Speaker,
+                Icon::Zoom,
+            ];
+            for (i, icon) in samples.into_iter().enumerate() {
+                let rect = Rect::new(
+                    box_.x + 13.0 + (i % 10) as f32 * 37.0,
+                    box_.y + 10.0 + (i / 10) as f32 * 34.0,
+                    25.0,
+                    25.0,
+                );
+                icons::draw(ui.c, icon, rect, theme.glyph);
+            }
+            let cursor_area = box_.right() - 134.0;
+            for (i, cursor) in [crate::app::Cursor::Default, crate::app::Cursor::Playlist(crate::playlist::PlTool::Draw, crate::playlist_tools::GRAB)].into_iter().enumerate() {
+                let pack = crate::playlist_tools::resolved_cursor_pack(current, cursor);
+                crate::playlist_tools::paint_cursor_sample(ui.c, cursor, pack,
+                    Rect::new(cursor_area + 10.0 + i as f32 * 58.0, box_.y + 8.0, 28.0, 28.0),
+                    current.cursor_color.unwrap_or(theme.glyph));
+            }
+            let caption = "Independent cursors";
+            ui.c.text_clip(
+                Font::new(11),
+                cursor_area + 11.0,
+                box_.y + 50.0,
+                108.0,
+                theme.text_dim,
+                caption,
+            );
+            ui.c.text_clip(
+                Font::new(21).bold(),
+                box_.x + 14.0,
+                box_.y + 87.0,
+                box_.w - 28.0,
+                theme.text,
+                "ML Studio   01:23   Mixer",
+            );
+            ui.c.text_clip(
+                Font::new(13),
+                box_.x + 14.0,
+                box_.y + 118.0,
+                box_.w - 28.0,
+                theme.text_dim,
+                "Recording  ·  Playlist  ·  Piano Roll  ·  Effects  ·  120 BPM",
+            );
+            ui.c.mute_theme_font(true);
+            ui.c.set_icon_pack(0, false);
+        }
+    }
+}
+
+fn paint_mixer(ui: &mut Ui, session: &Session, row: MixerRow, r: Rect) {
+    let Some(design) = &session.mixer_designer else {
+        return;
+    };
+    let part = design.part;
+    let skin = ui.mixer_skins.get(design.scope);
+    let paint_buttons = |ui: &mut Ui, choices: &[(&str, MixerHit, bool)]| {
+        let mut x = r.x;
+        for &(label, hit, active) in choices {
+            let w = ui.c.text_width(Font::new(12), label).ceil() + 16.0;
+            let b = Rect::new(x, r.y + 3.0, w, 26.0);
+            button(ui, b, Hit::Mixer(hit), label, label, active);
+            x += w + 5.0;
+        }
+    };
+    match row {
+        MixerRow::Target => {
+            let choices = Scope::ALL
+                .map(|scope| (scope.label(), MixerHit::Scope(scope), scope == design.scope));
+            paint_buttons(ui, &choices);
+            ui.c.text(
+                Font::new(12),
+                r.right() - 133.0,
+                r.y + 8.0,
+                ui.t.text_dim,
+                &format!(
+                    "Live Mixer · {}",
+                    Scope::from_finish(ui.mixer_finish).label()
+                ),
+            );
+        }
+        MixerRow::Components => {
+            let buttons = Part::ALL.map(|p| (p.label(), MixerHit::Part(p), p == part));
+            paint_buttons(ui, &buttons);
+            let active = skin.active();
+            let label = if active {
+                "Use in Mixer: On"
+            } else {
+                "Use in Mixer: Off"
+            };
+            button(
+                ui,
+                Rect::new(r.right() - 129.0, r.y + 3.0, 128.0, 26.0),
+                Hit::Mixer(MixerHit::Enabled(!active)),
+                label,
+                "Toggle custom components on the Mixer",
+                active,
+            );
+        }
+        MixerRow::Preview => {
+            let theme = skin.palette(ui.theme_preview.unwrap_or(ui.t));
+            mixer_skin::preview(
+                ui.c,
+                theme,
+                skin,
+                design,
+                Rect::new(r.x, r.y + 2.0, r.w, r.h - 8.0),
+            );
+        }
+        MixerRow::States => {
+            let states: &[PreviewState] = match part {
+                Part::Button => &PreviewState::ALL,
+                Part::Knob => &[PreviewState::Normal, PreviewState::Hover],
+                Part::Fader => &[
+                    PreviewState::Normal,
+                    PreviewState::Hover,
+                    PreviewState::Active,
+                ],
+                Part::Panel => &[PreviewState::Normal, PreviewState::Active],
+                Part::Meter => &[],
+            };
+            let choices: Vec<_> = states
+                .iter()
+                .map(|&state| (state.label(), MixerHit::State(state), design.state == state))
+                .collect();
+            paint_buttons(ui, &choices);
+        }
+        MixerRow::Value | MixerRow::Detail | MixerRow::Edge => {
+            let (label, value, change): (&str, u8, fn(u8) -> MixerHit) = match row {
+                MixerRow::Value => ("Preview value", design.value, MixerHit::Value),
+                MixerRow::Edge => ("Edge / weight", skin.edge(part), MixerHit::Edge),
+                _ => ("Surface detail", skin.detail(part), MixerHit::Detail),
+            };
+            let t = ui.t;
+            ui.c.text(
+                Font::new(13),
+                r.x,
+                r.y + 7.0,
+                t.text,
+                &format!("{label}  {value}%"),
+            );
+            for (i, n) in [0, 20, 40, 60, 80, 100].into_iter().enumerate() {
+                let b = Rect::new(r.x + 136.0 + i as f32 * 47.0, r.y + 3.0, 42.0, 26.0);
+                button(
+                    ui,
+                    b,
+                    Hit::Mixer(change(n)),
+                    &n.to_string(),
+                    label,
+                    value == n,
+                );
+            }
+        }
+        MixerRow::Style => {
+            let choices: Vec<_> = part
+                .styles()
+                .into_iter()
+                .enumerate()
+                .map(|(i, label)| {
+                    (
+                        label,
+                        MixerHit::Style(i as u8),
+                        skin.style(part) as usize == i && !skin.inherited(part),
+                    )
+                })
+                .collect();
+            paint_buttons(ui, &choices);
+        }
+        MixerRow::Colors => {
+            let t = skin.palette(ui.theme_preview.unwrap_or(ui.t));
+            for (i, &(label, key)) in part.colors().iter().enumerate() {
+                let b = Rect::new(r.x + i as f32 * 90.0, r.y + 3.0, 83.0, 26.0);
+                button(
+                    ui,
+                    b,
+                    Hit::Mixer(MixerHit::Color(key)),
+                    label,
+                    "Edit this layer's color",
+                    false,
+                );
+                if let Some(color) = t.get(key) {
+                    ui.c.fill_rrect(Rect::new(b.x + 4.0, b.y + 8.0, 9.0, 10.0), 1.0, color);
+                }
+            }
+        }
+        MixerRow::Artwork => {
+            let mut choices = vec![
+                ("Import PNG...", MixerHit::ImportArt, false),
+                ("Reset component", MixerHit::Reset, false),
+            ];
+            if skin.has_art(part) {
+                choices.insert(1, ("Remove artwork", MixerHit::RemoveArt, false));
+            }
+            paint_buttons(ui, &choices);
+            ui.c.text(
+                Font::new(11),
+                r.right() - 178.0,
+                r.y + 9.0,
+                ui.t.text_dim,
+                "PNG · 512 × 512 max · 64 KB",
+            );
+        }
+    }
+}
+
+impl App {
+    pub(crate) fn reload_appearance_profile(&mut self) {
+        self.state.neon_colors = crate::vintage::NeonColors::load();
+        self.state.synthwave.enabled = crate::prefs::check(&crate::prefs::SYNTHWAVE);
+        self.state.synthwave.sensitivity = crate::prefs::slider(&crate::prefs::SYNTHWAVE_SENSITIVITY) as u8;
+        os_theme::set_current(self.state.featured_palette().unwrap_or(&self.theme.colors));
+    }
+
+    pub(crate) fn select_appearance_area(&mut self, area: Area) {
+        self.picker_close();
+        let st = &mut self.state.settings;
+        st.appearance_area = area;
+        st.scroll = 0.0;
+        if let Some(edit) = &mut st.advanced_theme {
+            edit.query.set("");
+            edit.groups = groups("");
+            edit.target = None;
+            edit.identity = false;
+            edit.mixer_designer = None;
+        }
+        self.invalidate();
+    }
+
+    pub(crate) fn search_appearance(&mut self) {
+        self.start_theme_editor();
+        self.theme_editor_act(Hit::Field(FieldFor::Search));
+    }
+
+    pub(crate) fn open_appearance_target(&mut self, target: Target) {
+        self.open_settings(settings::THEME);
+        let (area, control) = target.location(self.state.neon_3036);
+        self.state.settings.appearance_area = area;
+        self.start_theme_editor();
+        let edit = self.state.settings.advanced_theme.as_mut().unwrap();
+        edit.mixer_designer = None;
+        edit.identity = false;
+        // A deep link pins one color instead of matching every description containing its name.
+        edit.target = Palette::NAMES.contains(&control).then_some(control);
+        edit.query.set(if edit.target.is_some() { "" } else { control });
+        edit.groups = groups(&edit.query.text);
+        self.state.settings.scroll = 0.0;
+        self.invalidate();
+    }
+
+    pub(crate) fn open_insert_theme_editor(&mut self) {
+        self.open_theme_section(INSERT_SECTION);
+    }
+
+    pub(crate) fn open_theme_section(&mut self, section: &str) {
+        self.start_theme_editor();
+        let edit = self.state.settings.advanced_theme.as_mut().unwrap();
+        edit.mixer_designer = None;
+        edit.identity = false;
+        edit.target = None;
+        edit.query.set(section);
+        edit.groups = groups(section);
+        self.state.settings.scroll = 0.0;
+        self.invalidate();
+    }
+
+    pub(crate) fn start_theme_editor(&mut self) {
+        if self.state.settings.advanced_theme.is_some() {
+            return;
+        }
+        self.state.settings.advanced_theme = Some(Session {
+            original: self.theme.clone(),
+            snapshot: self.snap_theme(),
+            history: std::mem::take(&mut self.state.settings.history),
+            query: Field::default(),
+            groups: groups(""),
+            target: None,
+            mixer_designer: None,
+            identity: false,
+            field: Field::default(),
+            focus: None,
+        });
+        crate::settings_file::begin_appearance_preview(PROFILE_KEYS);
+        self.state.settings.scroll = 0.0;
+        self.invalidate();
+    }
+
+    pub(crate) fn finish_theme_editor(&mut self, apply: bool) {
+        let Some(session) = self.state.settings.advanced_theme.take() else {
+            return;
+        };
+        self.picker_close();
+        self.state.settings.scroll = 0.0;
+        self.state.settings.history = session.history;
+        let portable_changed = self.state.fl_text != session.snapshot.text || self.design() != session.snapshot.design;
+        let profile_changed = appearance_profile() != session.snapshot.profile;
+        crate::settings_file::finish_appearance_preview(apply);
+        if apply && (portable_changed || profile_changed) {
+            if self.design() != session.snapshot.design { crate::app::save_design(self.design()); }
+            self.theme_mark_snapshot(Step::Other, session.snapshot);
+            if portable_changed {
+                if let Some(text) = &mut self.state.fl_text {
+                    *text = fl::set_key(text, VERSION_KEY, "1");
+                    self.theme_store();
+                } else if let Some(dir) = crate::app::theme_dir() {
+                    let _ = std::fs::remove_file(dir.join("current.flstheme"));
+                }
+            }
+            self.state.message = Some("Theme changes applied".into());
+        } else {
+            self.theme = session.original;
+            self.state.fl_text = session.snapshot.text;
+            self.state.theme_base = session.snapshot.base;
+        }
+        if profile_changed { self.reload_appearance_profile(); }
+        else { os_theme::set_current(self.state.featured_palette().unwrap_or(&self.theme.colors)); }
+        self.sync_preset();
+        self.invalidate();
+    }
+
+    pub(crate) fn theme_editor_blur(&mut self) {
+        if let Some(edit) = self.state.settings.advanced_theme.as_mut() {
+            edit.focus = None;
+        }
+    }
+
+    pub(crate) fn theme_editor_focused(&self) -> bool {
+        let st = &self.state.settings;
+        st.open
+            && st.tab == settings::THEME
+            && st
+                .advanced_theme
+                .as_ref()
+                .is_some_and(|edit| edit.focus.is_some())
+    }
+
+    pub(crate) fn editor_source_text(&self) -> String {
+        let mut text = crate::theme_adjust::applied_text(&self.state, self.design());
+        if self.state.fl_text.is_none()
+            && self.theme.colors != os_theme::design::palette(self.design(), None)
+        {
+            // A native theme.txt has no legacy text. Preserve the colors the user sees as the editable base.
+            for &name in Palette::NAMES {
+                text.push_str(&format!(
+                    "{}={}\n",
+                    color_key(name),
+                    hex(self.theme.colors.get(name).expect("palette color"))
+                ));
+            }
+        }
+        text
+    }
+
+    fn apply_editor_text(&mut self, text: String) {
+        if text != self.editor_source_text() {
+            self.theme_mark(Step::Other);
+            self.theme_edit(text);
+        }
+    }
+
+    pub(crate) fn edits_clean_modern_surface(&self, token: &str) -> bool {
+        use crate::views::mixer::Finish;
+        token == "mixer_strip" && !self.state.neon_3036 && !self.state.vintage_2005
+            && Finish::current(self.theme.colors.appearance) == Finish::CleanModern
+    }
+
+    pub(crate) fn theme_editor_act(&mut self, hit: Hit) {
+        self.start_theme_editor();
+        if let Hit::Mixer(hit) = hit {
+            self.mixer_designer_act(hit);
+            return;
+        }
+        if let Hit::Identity(hit) = hit {
+            self.theme_identity_act(hit);
+            return;
+        }
+        let text = self.editor_source_text();
+        let value = if let Hit::Field(kind) = hit {
+            value_label(&self.theme.colors, kind, &text)
+        } else {
+            String::new()
+        };
+        let Some(session) = self.state.settings.advanced_theme.as_mut() else {
+            return;
+        };
+        session.focus = None;
+        let next = match hit {
+            Hit::Field(kind) => {
+                session.focus = Some(kind);
+                if kind == FieldFor::Search {
+                    session.query.select_all();
+                } else {
+                    session
+                        .field
+                        .set(if value == "Inherit" { "" } else { &value });
+                    session.field.select_all();
+                }
+                self.invalidate();
+                return;
+            }
+            Hit::Color(token) => {
+                self.open_editor_swatch(token);
+                return;
+            }
+            Hit::Choice(i, "Inherit") | Hit::ResetStyle(i) => fl::remove_key(&text, &style_key(i)),
+            Hit::Choice(i, value) => fl::set_key(&text, &style_key(i), value),
+            Hit::ResetColor(token) if self.edits_clean_modern_surface(token) => {
+                mixer_skin::reset_clean_modern_surface(&text)
+            }
+            Hit::ResetColor(token) => fl::remove_key(&text, &color_key(token)),
+            Hit::Mixer(_) | Hit::Identity(_) => unreachable!("Designer hits dispatched above"),
+            Hit::ResetGroup(group) => {
+                let text = Palette::NAMES.iter().filter(|key| color_section(key) == group)
+                    .fold(text, |text, token| fl::remove_key(&text, &color_key(token)));
+                STYLES.iter().enumerate().filter(|(_, def)| style_section(def.key) == group)
+                    .fold(text, |text, (i, _)| fl::remove_key(&text, &style_key(i)))
+            },
+        };
+        self.apply_editor_text(next);
+        self.invalidate();
+    }
+
+    pub(crate) fn theme_editor_key(&mut self, key: &Key, ctrl: bool, alt: bool) -> bool {
+        if !self.theme_editor_focused() {
+            return false;
+        }
+        let st = &mut self.state.settings;
+        let edit = st.advanced_theme.as_mut().unwrap();
+        let Some(kind) = edit.focus else { return false };
+        match key {
+            Key::Named(NamedKey::Escape) => edit.focus = None,
+            Key::Named(NamedKey::Enter | NamedKey::Tab) => {
+                let input = edit.field.text.trim().to_string();
+                edit.focus = None;
+                let text = self.editor_source_text();
+                let next = match kind {
+                    FieldFor::IdentityValue(key) => {
+                        if input.is_empty() {
+                            fl::remove_key(&text, key)
+                        } else if key.ends_with("size") {
+                            let Some(value) = input.parse::<f32>().ok().filter(|v| v.is_finite() && (50.0..=200.0).contains(v)) else {
+                                self.state.message = Some("Enter a cursor size from 50 to 200, or clear to reset.".into());
+                                return true;
+                            };
+                            fl::set_key(&text, key, &value.to_string())
+                        } else {
+                            let Some(color) = Color::parse(&input) else {
+                                self.state.message = Some("Enter a color such as #E8D5A0, or clear to reset.".into());
+                                return true;
+                            };
+                            set_identity_color(&text, key, color)
+                        }
+                    }
+                    FieldFor::Search => return true,
+                    #[cfg(test)]
+                    FieldFor::Hex(token) => {
+                        let input = input.trim_start_matches('#');
+                        if input.len() != 6 || !input.bytes().all(|b| b.is_ascii_hexdigit()) {
+                            self.state.message =
+                                Some("Enter six hex digits, for example #647363".into());
+                            return true;
+                        }
+                        set_color(
+                            &text,
+                            token,
+                            Color::parse(&format!("#{input}")).expect("validated hex"),
+                        )
+                    }
+                    FieldFor::Number(i) => {
+                        let Values::Number(max) = STYLES[i].values else {
+                            return true;
+                        };
+                        let min = if STYLES[i].key.ends_with("-record-size") { 6.0 } else { 0.0 };
+                        let Some(n) = input
+                            .parse::<f32>()
+                            .ok()
+                            .filter(|n| n.is_finite() && (min..=max).contains(n))
+                        else {
+                            self.state.message = Some(format!("Enter a number from {min} to {max}"));
+                            return true;
+                        };
+                        fl::set_key(&text, &style_key(i), &n.to_string())
+                    }
+                };
+                self.apply_editor_text(next);
+            }
+            _ => {
+                let field = if kind == FieldFor::Search {
+                    &mut edit.query
+                } else {
+                    &mut edit.field
+                };
+                field.key_limited(key, ctrl, alt, self.shift, 128);
+                if kind == FieldFor::Search {
+                    edit.groups = groups(&edit.query.text);
+                    edit.target = None;
+                    edit.mixer_designer = None;
+                    edit.identity = false;
+                    st.scroll = 0.0;
+                }
+            }
+        }
+        true
+    }
+
+    pub(crate) fn mixer_designer_open(&mut self, on: bool) {
+        if self.state.settings.advanced_theme.is_none() {
+            self.start_theme_editor();
+        }
+        let scope = Scope::from_finish(crate::views::mixer::Finish::current(
+            self.theme.colors.appearance,
+        ));
+        let st = &mut self.state.settings;
+        if let Some(edit) = st.advanced_theme.as_mut() {
+            edit.identity = false;
+            edit.mixer_designer = on.then(|| Designer {
+                scope,
+                ..Designer::default()
+            });
+            edit.focus = None;
+            st.scroll = 0.0;
+        }
+        self.invalidate();
+    }
+
+    fn mixer_designer_act(&mut self, hit: MixerHit) {
+        let text = self.editor_source_text();
+        let Some(designer) = self
+            .state
+            .settings
+            .advanced_theme
+            .as_mut()
+            .and_then(|s| s.mixer_designer.as_mut())
+        else {
+            return;
+        };
+        let (scope, part) = (designer.scope, designer.part);
+        let next = match hit {
+            MixerHit::Scope(next) => {
+                designer.scope = next;
+                designer.state = PreviewState::Normal;
+                Some(next.select(&text))
+            }
+            MixerHit::Part(p) => {
+                designer.part = p;
+                None
+            }
+            MixerHit::State(state) => {
+                designer.state = state;
+                None
+            }
+            MixerHit::Value(value) => {
+                designer.value = value.min(100);
+                None
+            }
+            MixerHit::Style(style) => {
+                Some(mixer_skin::edit(&text, scope, part, "Style", style.min(4)))
+            }
+            MixerHit::Detail(detail) => Some(mixer_skin::edit(
+                &text,
+                scope,
+                part,
+                "Detail",
+                detail.min(100),
+            )),
+            MixerHit::Edge(edge) => {
+                Some(mixer_skin::edit(&text, scope, part, "Edge", edge.min(100)))
+            }
+            MixerHit::Enabled(on) => Some(mixer_skin::enable(&text, scope, on)),
+            MixerHit::Color(key) => {
+                let color = self.mixer_skin_color(scope, key);
+                if let Some(color) = color {
+                    self.open_editor_swatch_color(key, color);
+                }
+                return;
+            }
+            MixerHit::ImportArt => {
+                self.file_dialog(
+                    FileDlg::new(
+                        Mode::Open,
+                        "Import Mixer artwork",
+                        "Mixer artwork",
+                        Then::MixerSkinArt(part),
+                    )
+                    .filter("Transparent PNG", &["png"]),
+                );
+                return;
+            }
+            MixerHit::RemoveArt => Some(mixer_skin::remove_art(&text, scope, part)),
+            MixerHit::Reset => Some(mixer_skin::reset(&text, scope, part)),
+        };
+        if let Some(next) = next {
+            self.apply_editor_text(next);
+        }
+        self.invalidate();
+    }
+
+    pub(crate) fn mixer_designer_import(&mut self, part: Part, path: &Path) {
+        let Some(design) = self
+            .state
+            .settings
+            .advanced_theme
+            .as_ref()
+            .and_then(|s| s.mixer_designer.as_ref())
+        else {
+            return;
+        };
+        match mixer_skin::import_art(&self.editor_source_text(), design.scope, part, path) {
+            Ok(text) => {
+                self.apply_editor_text(text);
+                self.state.message = Some(format!("{} artwork imported", part.label()));
+            }
+            Err(error) => self.state.message = Some(error),
+        }
+    }
+
+    pub(crate) fn theme_identity_open(&mut self) {
+        self.start_theme_editor();
+        if let Some(edit) = self.state.settings.advanced_theme.as_mut() {
+            edit.identity = true;
+            edit.mixer_designer = None;
+            edit.focus = None;
+        }
+        self.state.settings.scroll = 0.0;
+        self.invalidate();
+    }
+
+    fn theme_identity_act(&mut self, hit: IdentityHit) {
+        use crate::theme_identity as id;
+        let text = self.editor_source_text();
+        let next = match hit {
+            IdentityHit::CursorColor => {
+                let appearance = self.theme.colors.appearance;
+                let family = appearance.cursor_family.unwrap_or(appearance.icon_pack);
+                let color = appearance.cursor_color.unwrap_or_else(|| crate::playlist_tools::cursor_pack_color(family));
+                self.open_editor_swatch_color("LemonStudioStyle.cursor-color", color);
+                return;
+            }
+            IdentityHit::ResetCursorColor => fl::remove_key(&text, "LemonStudioStyle.cursor-color"),
+            IdentityHit::IconColor(key) => {
+                let color = fl::get_key(&text, key).and_then(|value| Color::parse(&value))
+                    .or(self.theme.colors.appearance.icon_color).unwrap_or(self.theme.colors.glyph);
+                self.open_editor_swatch_color(key, color);
+                return;
+            }
+            IdentityHit::ResetIconColor(key) => fl::remove_key(&text, key),
+            IdentityHit::FollowIcons => fl::remove_key(&text, "LemonStudioStyle.cursor-family"),
+            IdentityHit::IconFamily(role, family) => {
+                let key = format!("LemonStudioStyle.icon-{role}-family");
+                let text = explicit_icon_mix(&text);
+                if family == 0 { fl::remove_key(&text, &key) } else { fl::set_key(&text, &key, &family.to_string()) }
+            }
+            IdentityHit::CursorFamily(role, family) => {
+                let key = format!("LemonStudioStyle.cursor-{role}-family");
+                if family == 0 { fl::remove_key(&text, &key) } else { fl::set_key(&text, &key, &family.to_string()) }
+            }
+            IdentityHit::ResetArtwork => {
+                let mut next = text.clone();
+                for key in ["icon-family", "icon-mixing", "icon-color", "cursor-family", "cursor-color", "cursor-size"] {
+                    next = fl::remove_key(&next, &format!("LemonStudioStyle.{key}"));
+                }
+                for role in 0..crate::icons::CHOICES.len() {
+                    for field in ["family", "color"] {
+                        next = fl::remove_key(&next, &format!("LemonStudioStyle.icon-{role}-{field}"));
+                    }
+                }
+                for role in 0..crate::playlist_tools::CURSOR_CHOICES.len() {
+                    next = fl::remove_key(&next, &format!("LemonStudioStyle.cursor-{role}-family"));
+                }
+                next
+            }
+            IdentityHit::CursorPack(pack) => fl::set_key(&text, "LemonStudioStyle.cursor-family", &pack.to_string()),
+            IdentityHit::Pack(0) => fl::remove_key(&text, id::ICON),
+            IdentityHit::Pack(pack) => fl::set_key(&text, id::ICON, &pack.to_string()),
+            IdentityHit::Font(4) if fl::get_key(&text, id::DATA).is_none() => return,
+            IdentityHit::Font(font) => fl::set_key(&text, id::FONT, &font.min(4).to_string()),
+            IdentityHit::Import => {
+                self.file_dialog(
+                    FileDlg::new(Mode::Open, "Import UI font", "UI font", Then::ThemeFont)
+                        .filter("TrueType/OpenType font", &["ttf", "otf"]),
+                );
+                return;
+            }
+            IdentityHit::Remove => {
+                let text = fl::remove_key(&fl::remove_key(&text, id::DATA), id::NAME);
+                if fl::get_key(&text, id::FONT) == Some("4") {
+                    fl::remove_key(&text, id::FONT)
+                } else {
+                    text
+                }
+            }
+        };
+        self.apply_editor_text(next);
+        self.invalidate();
+    }
+
+    pub(crate) fn theme_identity_import(&mut self, path: &Path) {
+        if self
+            .state
+            .settings
+            .advanced_theme
+            .as_ref()
+            .is_none_or(|s| !s.identity)
+        {
+            return;
+        }
+        match crate::theme_identity::import(&self.editor_source_text(), path) {
+            Ok(text) => {
+                self.apply_editor_text(text);
+                self.state.message = Some("UI font imported".into());
+            }
+            Err(error) => self.state.message = Some(error),
+        }
+    }
+
+    pub(crate) fn theme_editor_file(&mut self, export: bool) {
+        let dialog = if export {
+            FileDlg::new(
+                Mode::Save,
+                "Export theme",
+                "theme export",
+                Then::ExportTheme,
+            )
+            .name("My Theme.flstheme")
+            .filter("ML Studio theme", &["flstheme"])
+        } else {
+            FileDlg::new(
+                Mode::Open,
+                "Choose wallpaper",
+                "theme wallpaper",
+                Then::ThemeWallpaper,
+            )
+            .filter("Pictures", &["png", "jpg", "jpeg"])
+        };
+        self.file_dialog(dialog);
+    }
+
+    pub(crate) fn theme_editor_wallpaper(&mut self, path: Option<&Path>) {
+        let text = self.editor_source_text();
+        let next = if let Some(path) = path {
+            if crate::wallpaper::read(path).is_none() {
+                self.state.message = Some("Choose a readable PNG or JPEG wallpaper".into());
+                return;
+            }
+            let name = path.to_string_lossy();
+            if name.contains(['\r', '\n']) {
+                return;
+            }
+            fl::set_key(
+                &fl::set_key(&text, "BackMode", "2"),
+                "BackPicFilename",
+                &name,
+            )
+        } else {
+            fl::remove_key(&text, "BackPicFilename")
+        };
+        self.apply_editor_text(next);
+    }
+
+    pub(crate) fn export_theme(&mut self, path: &Path) {
+        let path = path.with_extension("flstheme");
+        let text = self.editor_source_text();
+        let text = fl::set_key(&text, VERSION_KEY, "1");
+        let text = fl::set_key(&text, EXPORT_SKIN, self.design().key());
+        let image = self.theme.colors.wallpaper.as_deref();
+        self.state.message = Some(match write_export(&path, &text, image) {
+            Ok(true) => format!(
+                "Theme exported to {} with its wallpaper. Keep both files together.",
+                path.display()
+            ),
+            Ok(false) => format!("Theme exported to {}", path.display()),
+            Err(e) => format!("Could not export theme: {e}"),
+        });
+    }
+}
+
+/// A portable wallpaper sits next to the exported theme. Existing images are never overwritten.
+fn write_export(path: &Path, text: &str, wallpaper: Option<&str>) -> std::io::Result<bool> {
+    use std::{fs, io};
+    let Some(name) = wallpaper else {
+        fs::write(path, text)?;
+        return Ok(false);
+    };
+    let source = crate::wallpaper::resolve(name, crate::app::theme_dir().as_deref());
+    let suffix = match source
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("jpg" | "jpeg") => "jpg",
+        Some("png") => "png",
+        _ => return Err(io::Error::other("Wallpaper must be a PNG or JPEG")),
+    };
+    let mut from = fs::File::open(source)?;
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+    let image = (1..=1000)
+        .find_map(|i| {
+            let name = if i == 1 {
+                format!("{stem} Wallpaper.{suffix}")
+            } else {
+                format!("{stem} Wallpaper {i}.{suffix}")
+            };
+            let target = path.with_file_name(name);
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&target)
+            {
+                Ok(file) => Some(Ok((target, file))),
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => None,
+                Err(e) => Some(Err(e)),
+            }
+        })
+        .ok_or_else(|| io::Error::other("Too many wallpaper files with this name"))??;
+    let (target, mut to) = image;
+    let result = io::copy(&mut from, &mut to);
+    drop(to);
+    let result = result.and_then(|_| {
+        let relative = target.file_name().unwrap_or_default().to_string_lossy();
+        if relative.contains(['\r', '\n']) {
+            return Err(io::Error::other("Invalid wallpaper filename"));
+        }
+        fs::write(path, fl::set_key(text, "BackPicFilename", &relative))
+    });
+    if result.is_err() {
+        let _ = fs::remove_file(target);
+    }
+    result.map(|_| true)
+}

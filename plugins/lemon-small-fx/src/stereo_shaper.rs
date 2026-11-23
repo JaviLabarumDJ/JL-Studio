@@ -79,16 +79,15 @@ const CONTROLS: [Control; 7] = [
 ];
 
 pub const SPEC: &Spec = &Spec {
-    name: "Lemon Stereo Shaper",
+    name: "ML Stereo Shaper",
     word: "STEREO SHAPER",
-    about: "Lemon Studio's stereo shaper",
+    about: "ML Studio's stereo shaper",
     settings: &SETTINGS,
+    studio_settings: 0,
     version: Some(dsp::VERSION),
     any_version: true,
     fields: &FIELDS,
     tail: &[],
-    blank: None,
-    locate: None,
     size: (360, 372),
     cards: &CARDS,
     controls: &CONTROLS,
@@ -179,6 +178,11 @@ fn settings(v: &[i32]) -> Settings {
 
 struct Shaper(StereoShaper);
 
+impl Clone for Shaper {
+    fn clone(&self) -> Self { Self(self.0.clone()) }
+    fn clone_from(&mut self, source: &Self) { self.0.copy_state_from(&source.0); }
+}
+
 impl Sound for Shaper {
     fn set(&mut self, v: &[i32]) {
         self.0.set(&settings(v));
@@ -201,7 +205,7 @@ impl Sound for Shaper {
 fn sound(rate: u32, v: &[i32]) -> Box<dyn Sound> {
     let mut e = StereoShaper::with_settings(rate, &settings(v));
     e.flush();
-    Box::new(Shaper(e))
+    super::quality::ControlTransition::<_, { SETTINGS.len() }>::boxed(Shaper(e), v, rate)
 }
 
 pub struct StereoShaperKind;
@@ -209,7 +213,7 @@ pub struct StereoShaperKind;
 impl Kind for StereoShaperKind {
     const SPEC: &'static Spec = SPEC;
     const CLAP_ID: &'static str = "org.openstudio.lemon-stereo-shaper";
-    const CLAP_DESCRIPTION: &'static str = "Lemon Studio's stereo shaper";
+    const CLAP_DESCRIPTION: &'static str = "ML Studio's stereo shaper";
     const CLAP_FEATURES: &'static [ClapFeature] = &[ClapFeature::AudioEffect, ClapFeature::Utility, ClapFeature::Mixing, ClapFeature::Stereo];
     const VST3_CLASS_ID: [u8; 16] = *b"LemonStudioStShp";
     const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] = &[Vst3SubCategory::Fx, Vst3SubCategory::Spatial];

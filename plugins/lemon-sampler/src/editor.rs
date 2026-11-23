@@ -62,6 +62,14 @@ impl SamplerEditor {
 impl Editor for SamplerEditor {
     fn spawn(&self, parent: ParentWindowHandle, context: Arc<dyn GuiContext>) -> Box<dyn Any + Send> {
         let scale = f32::from_bits(self.scale.load(Ordering::Relaxed));
+        let handle = match &parent {
+            ParentWindowHandle::Win32Hwnd(hwnd) => *hwnd as usize,
+            ParentWindowHandle::X11Window(window) => *window as usize,
+            ParentWindowHandle::AppKitNsView(view) => *view as usize,
+            #[allow(unreachable_patterns)]
+            _ => 0,
+        };
+        self.shared.editor_parent.store(handle, Ordering::Relaxed);
         match parent {
             #[cfg(windows)]
             ParentWindowHandle::Win32Hwnd(hwnd) => {
@@ -292,6 +300,7 @@ pub fn note_from_text(t: &str) -> Option<i32> {
 /// What a menu entry does.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Cmd {
+    Fit(isize),
     None,
     Reset,
     /// Envelope time knob: the stage lasts `n` steps (16ths of a bar) at the host tempo.
@@ -316,6 +325,11 @@ pub enum Cmd {
     Browse,
     /// "Create automation clip" (host link).
     Automate,
+}
+
+fn source_tempo_code(text:&str)->Option<isize>{
+    text.trim().parse::<f64>().ok().filter(|v|v.is_finite() && (20.0..=400.0).contains(v))
+        .map(|v|1000000+(v*1000.).round() as isize)
 }
 
 /// A menu to show: rows, what each does, submenus by row.
@@ -375,6 +389,8 @@ pub enum MenuReq {
 /// Something the window has to do after an event.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Act {
+    Fit(isize),
+    SourceTempo(f32,f32),
     Repaint,
     /// Hide the cursor and hold it in place (knob drag).
     Lock,
@@ -415,7 +431,7 @@ enum Drag {
     KeyScroll { x0: f32, s0: f32, ratio: f32 },
     Keys,
     /// The sample sounding at its root note while the waveform is held (`held`).
-    Wave,
+    Wave { origin: (f32,f32), moved: bool },
     Ruler { from: i32 },
     Overview { track: Rect, grab: f64 },
     Loop { which: u8, both: bool, x0: f32, s0: f32, e0: f32 },
@@ -657,7 +673,7 @@ impl Logic {
                     // A press plays the sample at its own pitch (the root note) until the button is let go.
                     let root = (self.vals.plain("root") as i32).clamp(0, 127) as u8;
                     self.held = Some((root, 100));
-                    self.drag = Some(Drag::Wave);
+                    self.drag = Some(Drag::Wave { origin: (x,y), moved: false });
                     return vec![Act::Note(root, 100, true), Act::Repaint];
                 }
             }
@@ -744,6 +760,9 @@ impl Logic {
     /// Mouse move (not locked). Returns the acts (repaint when something changed).
     pub fn moved(&mut self, x: f32, y: f32, _m: Mods) -> Vec<Act> {
         self.view.mouse = Some((x, y));
+        if let Some(Drag::Wave { origin, moved }) = self.drag.as_mut() {
+            *moved = (x-origin.0).abs().max((y-origin.1).abs()) > 5.0 && (x < 0.0 || y < 0.0 || x >= view::W as f32 || y >= view::H as f32);
+        }
         match self.drag.clone() {
             Some(Drag::Slider { id, track }) => {
                 self.set(&id, (x - track.x) / track.w);
@@ -814,7 +833,7 @@ impl Logic {
                 self.hint_for(&ids[0]);
                 vec![Act::Repaint]
             }
-            Some(Drag::Knob { .. } | Drag::Wave) => vec![],
+            Some(Drag::Knob { .. } | Drag::Wave { .. }) => vec![],
             None => {
                 let h = self.hover_hint(x, y);
                 let changed = h != self.hint;
@@ -848,9 +867,12 @@ impl Logic {
     pub fn up(&mut self, _btn: Btn) -> Vec<Act> {
         self.view.pressed = None;
         let mut acts = vec![Act::Repaint];
+        if matches!(self.drag, Some(Drag::Wave { moved: true, .. })) {
+            crate::sample_drop::released(&self.shared, &self.params);
+        }
         match self.drag.take() {
             Some(Drag::Knob { id } | Drag::Slider { id, .. }) => self.end(&id),
-            Some(Drag::Keys | Drag::Wave) => {
+            Some(Drag::Keys | Drag::Wave { .. }) => {
                 if let Some((k, _)) = self.held.take() {
                     acts.push(Act::Note(k, 0, false));
                 }
@@ -1025,7 +1047,7 @@ impl Logic {
                 m.add(MenuItem::item("Edit in pitch corrector").enabled(false), Cmd::None);
                 m.add(MenuItem::item("Edit in time warper").enabled(false), Cmd::None);
                 m.sep();
-                m.add(MenuItem::item("Detect tempo").enabled(has), Cmd::DetectTempo);
+                m.add(MenuItem::item("Estimate tempo from length").enabled(has), Cmd::DetectTempo);
                 m.add(MenuItem::item("Get properties").enabled(has), Cmd::Properties);
                 m.sep();
                 m.add(MenuItem::item("Spectrum view").mark(Mark::Check(self.view.spectrum)), Cmd::Spectrum);
@@ -1061,13 +1083,19 @@ impl Logic {
             let on = |s: i32| (cur - f64::from(s)).abs() < 1e-3;
             m.add(MenuItem::item("(none)").mark(Mark::Radio(on(0))), Cmd::Time(0));
             let has = self.shared.has_sample();
-            m.add(MenuItem::item("Autodetect...").enabled(has), Cmd::Time(-1));
+            m.add(MenuItem::item(if self.hosted{"Make it fit"}else{"Autodetect..."}).enabled(has), if self.hosted{Cmd::Fit(1)}else{Cmd::Time(-1)});
+            if self.hosted{
+                m.add(MenuItem::item("Detect tempo").enabled(has),Cmd::Fit(0));
+                m.add(MenuItem::item("Enter source BPM...").enabled(has),Cmd::Fit(2));
+                m.add(MenuItem::item("Reset stretching").enabled(has),Cmd::Fit(3));
+            }
             m.add(MenuItem::item("Project tempo").enabled(has), Cmd::Time(-1));
             m.sep();
             // In steps (a quarter beat; spec §2.2).
             for (l, s) in [("1 beat", 4), ("2 beats", 8), ("1 bar", 16), ("2 bars", 32), ("3 bars", 48), ("4 bars", 64)] {
                 m.add(MenuItem::item(l).mark(Mark::Radio(on(s))), Cmd::Time(s));
             }
+            if self.hosted{for bars in [8,16]{m.add(MenuItem::item(&format!("{bars} bars")).enabled(has),Cmd::Fit(1000+bars));}}
             m.add(MenuItem::Column, Cmd::None);
         }
         m.add(MenuItem::item("Reset"), Cmd::Reset);
@@ -1081,19 +1109,19 @@ impl Logic {
         }
         // Automation and remote control belong to the host: shown; "Create automation clip" goes to Lemon Studio (host link).
         m.head("Automation");
-        for l in ["Edit automation", "Edit automation in a window", "Edit automation in piano roll", "Set as song start value", "Remove start value"] {
+        for l in ["Edit events", "Edit events in new window", "Edit events in piano roll", "Init song with this position", "Delete initial value"] {
             m.add(MenuItem::item(l).enabled(false), Cmd::None);
         }
         m.sep();
         m.add(MenuItem::item("Create automation clip").enabled(self.hosted), Cmd::Automate);
         m.add(MenuItem::item("Edit automation clip...").enabled(false), Cmd::None);
         m.head("Remote control");
-        m.add(MenuItem::item("MIDI learn...").enabled(false), Cmd::None);
-        m.add(MenuItem::item("Override global mapping...").enabled(false), Cmd::None);
+        m.add(MenuItem::item("Link to controller...").enabled(false), Cmd::None);
+        m.add(MenuItem::item("Override global link...").enabled(false), Cmd::None);
         m.head("Value");
         m.add(MenuItem::item("Copy value"), Cmd::CopyValue);
         m.add(MenuItem::item("Paste value").enabled(self.copied.is_some()), Cmd::PasteValue);
-        m.add(MenuItem::item("Enter value..."), Cmd::TypeIn);
+        m.add(MenuItem::item("Type in value..."), Cmd::TypeIn);
         m.add(MenuItem::item("Set..."), Cmd::TypeIn);
         m
     }
@@ -1105,6 +1133,8 @@ impl Logic {
             _ => String::new(),
         };
         match cmd {
+            Cmd::Fit(2) => return vec![Act::SourceTempo(x,y)],
+            Cmd::Fit(code) => return vec![Act::Fit(code)],
             Cmd::None => return vec![],
             Cmd::Automate => return vec![Act::Automate(id)],
             Cmd::Reset => self.reset(&id),
@@ -1124,6 +1154,7 @@ impl Logic {
             }
             Cmd::TypeIn => return vec![Act::TypeIn(id, x, y)],
             Cmd::Time(s) => {
+                if self.hosted && s>0{return vec![Act::Fit(if s>=16{1000+isize::try_from(s/16).unwrap_or(0)}else{100+isize::try_from(s/4).unwrap_or(0)})];}
                 // The menu sets the time and leaves the method alone (a Resample channel stays Resample).
                 let steps = if s < 0 { self.detect_beats() * 4 } else { s };
                 self.edit("ts_time", params::time_norm(f64::from(steps)));
@@ -1142,10 +1173,11 @@ impl Logic {
             Cmd::CopyAudio => return vec![Act::CopyAudio],
             Cmd::PasteAudio => return vec![Act::PasteAudio],
             Cmd::DetectTempo => {
+                if self.hosted{return vec![Act::Fit(0)];}
                 let beats = self.detect_beats();
                 let secs = self.shared.secs().unwrap_or(0.0);
                 if secs > 0.0 {
-                    self.hint = format!("Tempo: {:.2} BPM ({beats} beats)", f64::from(beats) * 60.0 / secs);
+                    self.hint = format!("Length estimate: {:.2} BPM ({beats} beats; uses project tempo)", f64::from(beats) * 60.0 / secs);
                 }
             }
             Cmd::Properties => {
@@ -1479,7 +1511,7 @@ mod win32 {
     use windows_sys::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, ShellExecuteW, HDROP};
     use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
-    use super::{Act, Btn, Cmd, Logic, MenuDef, Mods, NearCache, Shown, SpectrumCache, ToneCache};
+    use super::{source_tempo_code, Act, Btn, Cmd, Logic, MenuDef, Mods, NearCache, Shown, SpectrumCache, ToneCache};
     use crate::params::SamplerParams;
     use crate::view::{self, SampleView, ViewState};
     use crate::Shared;
@@ -1591,7 +1623,7 @@ mod win32 {
                 tracking: false,
                 slot: slot.clone(),
             });
-            let title = wide("Lemon Sampler");
+            let title = wide("ML Sampler");
             let hwnd = CreateWindowExW(
                 0,
                 class.as_ptr(),
@@ -1706,15 +1738,16 @@ mod win32 {
                     0
                 }
                 WM_LBUTTONUP | WM_RBUTTONUP | WM_MBUTTONUP => {
+                    let acts = w.logic.up(Btn::Left);
                     w.unlock();
                     ReleaseCapture();
-                    let acts = w.logic.up(Btn::Left);
                     w.run(acts);
                     0
                 }
                 WM_CAPTURECHANGED => {
                     // Another window took the mouse (not this one capturing again): end the drag.
                     if w.logic.dragging() && lp as HWND != hwnd {
+                        if let Some(super::Drag::Wave { moved, .. }) = &mut w.logic.drag { *moved = false; }
                         w.unlock();
                         let acts = w.logic.up(Btn::Left);
                         w.run(acts);
@@ -1806,6 +1839,7 @@ mod win32 {
         /// Timer / parameter change: expire confirmed overlay values, refresh the lit keys, keep the processed sample
         /// current, repaint when anything shown changed.
         fn poll(&mut self) {
+            if self.canvas.sync_stock_editor_theme() { self.invalidate(); }
             let mut dirty = self.logic.vals.expire();
             dirty |= self.logic.refresh_lit();
             if self.shared.stale(&self.params) {
@@ -1877,6 +1911,14 @@ mod win32 {
                         }
                         repaint = true;
                     }
+                    Act::SourceTempo(x,y) => {
+                        let (sx,sy)=self.screen(x,y);
+                        if let Some(t)=type_in(self.hwnd,sx,sy,&format!("{:.2}",self.shared.tempo()),self.scale){
+                            if let Some(code)=source_tempo_code(&t){os_hostlink::to_host(self.hwnd as isize,os_hostlink::Cmd::SampleFit,code);}else{self.logic.hint="Enter a source tempo between 20 and 400 BPM".into();}
+                        }
+                        repaint=true;
+                    }
+                    Act::Fit(code) => {os_hostlink::to_host(self.hwnd as isize,os_hostlink::Cmd::SampleFit,code);}
                     Act::TypeIn(id, x, y) => {
                         let (sx, sy) = self.screen(x, y);
                         let cur = self.logic.value_text(&id);
@@ -1901,7 +1943,7 @@ mod win32 {
                         }
                     }
                     Act::OpenDialog => {
-                        if let Some(path) = file_dialog(self.hwnd, false) {
+                        if os_hostlink::to_host(self.hwnd as isize,os_hostlink::Cmd::BrowseSample,0)!=1 && let Some(path) = file_dialog(self.hwnd, false) {
                             self.load(&path);
                         }
                         repaint = true;
@@ -1933,6 +1975,7 @@ mod win32 {
                         repaint = true;
                     }
                     Act::Locate => {
+                        if os_hostlink::to_host(self.hwnd as isize,os_hostlink::Cmd::BrowseSample,1)==1 {continue;}
                         let p = self.params.sample_path.read().map(|p| p.clone()).unwrap_or_default();
                         if !p.is_empty() {
                             let args = wide(&format!("/select,\"{p}\""));
@@ -2015,11 +2058,12 @@ mod win32 {
                     }
                     1
                 }
-                Cmd::Changed | Cmd::Note | Cmd::Automate | Cmd::Audio | Cmd::Resizable | Cmd::SetSize | Cmd::Notes => 0,
+                Cmd::StateEdit | Cmd::SampleFit | Cmd::BrowseSample | Cmd::Changed | Cmd::Note | Cmd::Automate | Cmd::Audio | Cmd::Resizable | Cmd::SetSize => 0,
             }
         }
 
         fn paint(&mut self) {
+            self.canvas.sync_stock_editor_theme();
             unsafe {
                 let mut ps: PAINTSTRUCT = std::mem::zeroed();
                 let hdc = BeginPaint(self.hwnd, &mut ps);
@@ -2101,6 +2145,7 @@ mod win32 {
                     kmenu::paint(&mut pop.canvas, &pop.palette, &pop.items, &pop.layout, pop.style, 0.0, 0.0, pop.hover, pop.current);
                     let (w, h) = ((pop.layout.w * pop.scale).ceil() as u32, (pop.layout.h * pop.scale).ceil() as u32);
                     pop.buf.resize((w * h) as usize, 0);
+                    pop.canvas.sync_stock_editor_theme();
                     pop.canvas.copy_to_xrgb(&mut pop.buf);
                     let mut bmi: BITMAPINFO = std::mem::zeroed();
                     bmi.bmiHeader = BITMAPINFOHEADER {
@@ -2382,7 +2427,7 @@ mod win32 {
             return None;
         }
         let mut file = vec![0u16; 1024];
-        let filter: Vec<u16> = if save { "WAV files\0*.wav\0\0" } else { "Audio files\0*.wav;*.flac;*.ogg;*.wv;*.aif;*.aiff;*.mp3;*.m4a\0All files\0*.*\0\0" }
+        let filter: Vec<u16> = if save { "WAV files\0*.wav\0\0" } else { "Audio files\0*.wav;*.flac;*.ogg;*.wv;*.aif;*.aiff;*.mp3;*.rx2;*.rex;*.rcy\0All files\0*.*\0\0" }
             .encode_utf16()
             .collect();
         let title = wide(if save { "Save sample as" } else { "Open sample" });
@@ -2455,7 +2500,7 @@ mod gui {
     use os_theme::Palette;
     use os_ui::Canvas;
 
-    use super::{Act, Btn, Logic, Mods, NearCache, Shown, SpectrumCache, ToneCache};
+    use super::{source_tempo_code, Act, Btn, Logic, Mods, NearCache, Shown, SpectrumCache, ToneCache};
     use crate::params::SamplerParams;
     use crate::view::{self, SampleView, ViewState};
     use crate::Shared;
@@ -2631,6 +2676,7 @@ mod gui {
         /// Timer / parameter change: expire confirmed overlay values, refresh the lit keys, keep the processed sample
         /// current, repaint when anything shown changed.
         fn poll(&mut self) {
+            if self.canvas.sync_stock_editor_theme() { self.dirty = true; }
             let mut dirty = self.logic.vals.expire();
             dirty |= self.logic.refresh_lit();
             if self.shared.stale(&self.params) {
@@ -2706,6 +2752,14 @@ mod gui {
                         }
                         self.dirty = true;
                     }
+                    Act::SourceTempo(x,y) => {
+                        let (sx,sy)=self.screen(x,y);
+                        if let Some(t)=self.win.type_in(sx,sy,&format!("{:.2}",self.shared.tempo()),self.scale){
+                            if let Some(code)=source_tempo_code(&t){self.link.to_host(os_hostlink::Cmd::SampleFit,code);}else{self.logic.hint="Enter a source tempo between 20 and 400 BPM".into();}
+                        }
+                        self.dirty=true;
+                    }
+                    Act::Fit(code) => {self.link.to_host(os_hostlink::Cmd::SampleFit,code);}
                     Act::TypeIn(id, x, y) => {
                         let (sx, sy) = self.screen(x, y);
                         let cur = self.logic.value_text(&id);
@@ -2730,7 +2784,7 @@ mod gui {
                         }
                     }
                     Act::OpenDialog => {
-                        if let Some(path) = file_dialog(&self.win, false) {
+                        if self.link.to_host(Cmd::BrowseSample,0)!=1 && let Some(path) = file_dialog(&self.win, false) {
                             self.load(&path);
                         }
                         self.dirty = true;
@@ -2762,6 +2816,7 @@ mod gui {
                         self.dirty = true;
                     }
                     Act::Locate => {
+                        if self.link.to_host(Cmd::BrowseSample,1)==1 {continue;}
                         // The sample's folder in the file manager (on macOS a Finder window with the sample picked).
                         let p = self.params.sample_path.read().map(|p| p.clone()).unwrap_or_default();
                         if let Some(dir) = std::path::Path::new(&p).parent().filter(|d| !p.is_empty() && d.is_dir()) {
@@ -2811,6 +2866,7 @@ mod gui {
         }
 
         fn paint(&mut self) {
+            self.canvas.sync_stock_editor_theme();
             self.dirty = false;
             let path = self.params.sample_path.read().map(|p| p.clone()).unwrap_or_default();
             let shown = Shown::of(&self.shared, &self.logic.view, Some(&mut self.near));
@@ -2854,7 +2910,7 @@ mod gui {
             if save {
                 d.set_title("Save sample as").add_filter("WAV files", &["wav"]).save_file()
             } else {
-                d.set_title("Open sample").add_filter("Audio files", &["wav", "flac", "ogg", "wv", "aif", "aiff", "mp3", "m4a"]).pick_file()
+                d.set_title("Open sample").add_filter("Audio files", &["wav", "flac", "ogg", "wv", "aif", "aiff", "mp3", "rx2", "rex", "rcy"]).pick_file()
             }
         });
         path.flatten().map(|p| p.to_string_lossy().into_owned())
@@ -3036,6 +3092,23 @@ mod tests {
         // A stored time keeps its fractions.
         assert_eq!(params::time_from_file(params::time_file(17.5)), 17.5);
         assert!((params::time_steps(params::time_norm(1234.25)) - 1234.25).abs() < 0.01);
+    }
+
+    #[test]
+    fn hosted_sampler_fit_menus_send_commands_without_local_parameter_edits(){
+        let mut l=logic(0);l.hosted=true;
+        let req=MenuReq::Knob("ts_time".into());let menu=l.menu(&req);
+        for (label,code) in [("Make it fit",1),("Detect tempo",0),("Reset stretching",3)]{
+            let i=menu.items.iter().position(|i|matches!(i,MenuItem::Item{label:shown,..} if shown==label)).unwrap();
+            assert_eq!(l.pick(&req,menu.cmds[i].clone(),0.,0.),vec![Act::Fit(code)]);
+        }
+        assert_eq!(l.pick(&req,Cmd::Fit(2),12.,24.),vec![Act::SourceTempo(12.,24.)]);
+        assert_eq!(source_tempo_code("126.5"),Some(1126500));assert_eq!(source_tempo_code("NaN"),None);
+        let before=l.vals.norm("ts_time");
+        assert_eq!(l.pick(&req,Cmd::Time(4),0.,0.),vec![Act::Fit(101)]);
+        assert_eq!(l.pick(&req,Cmd::Time(32),0.,0.),vec![Act::Fit(1002)]);
+        assert_eq!(l.pick(&MenuReq::Wave,Cmd::DetectTempo,0.,0.),vec![Act::Fit(0)]);
+        assert_eq!(l.vals.norm("ts_time"),before);
     }
 
     #[test]

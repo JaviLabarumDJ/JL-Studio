@@ -173,12 +173,56 @@ pub fn from_hsv([h, s, v]: [f32; 3]) -> Color {
     Color { r: f(5.0), g: f(3.0), b: f(1.0), a: 255 }
 }
 
+/// A shared visual picker for both theme colors and project swatches.
+pub(crate) fn paint_color_wheel(canvas: &mut os_ui::Canvas, wheel_rect: Rect, value_rect: Rect, hsv: [f32; 3]) {
+    const WHEEL_SIZE: usize = 120;
+    static WHEEL: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    let wheel = WHEEL.get_or_init(|| {
+        let radius = WHEEL_SIZE as f32 * 0.5;
+        let mut pixels = Vec::with_capacity(WHEEL_SIZE * WHEEL_SIZE * 4);
+        for y in 0..WHEEL_SIZE {
+            for x in 0..WHEEL_SIZE {
+                let (x, y) = (x as f32 + 0.5 - radius, y as f32 + 0.5 - radius);
+                let distance = x.hypot(y);
+                let hue = y.atan2(x).to_degrees().rem_euclid(360.0);
+                let c = from_hsv([hue, (distance / radius).min(1.0), 1.0]);
+                let alpha = ((radius - distance + 0.5).clamp(0.0, 1.0) * 255.0).round() as u8;
+                pixels.extend([c.r, c.g, c.b, alpha]);
+            }
+        }
+        pixels
+    });
+    canvas.image_rgba(wheel_rect, WHEEL_SIZE, WHEEL_SIZE, wheel);
+    let angle = hsv[0].to_radians();
+    let radius = hsv[1] * (wheel_rect.w * 0.5 - 3.0);
+    let (mx, my) = (wheel_rect.cx() + angle.cos() * radius, wheel_rect.cy() + angle.sin() * radius);
+    canvas.stroke_circle(mx, my, 5.0, 1.5, Color::rgb(0));
+    canvas.stroke_circle(mx, my, 4.0, 1.5, Color::rgb(0xffffff));
+    canvas.fill_rect_gradient(value_rect, from_hsv([hsv[0], hsv[1], 1.0]), Color::rgb(0), 2.0);
+    let hy = (value_rect.y + (1.0 - hsv[2]) * value_rect.h).round();
+    canvas.fill_rect(Rect::new(value_rect.x - 2.0, hy - 2.0, value_rect.w + 4.0, 4.0), Color::rgb(0));
+    canvas.fill_rect(Rect::new(value_rect.x - 1.0, hy - 1.0, value_rect.w + 2.0, 2.0), Color::rgb(0xffffff));
+}
+
+pub(crate) fn pick_color_component(hsv: &mut [f32; 3], r: Rect, x: f32, y: f32, brightness: bool) {
+    if brightness {
+        hsv[2] = (1.0 - (y - r.y) / r.h).clamp(0.0, 1.0);
+    } else {
+        let (x, y) = (x - r.cx(), y - r.cy());
+        hsv[0] = y.atan2(x).to_degrees().rem_euclid(360.0);
+        hsv[1] = (x.hypot(y) / (r.w * 0.5)).clamp(0.0, 1.0);
+    }
+}
+
 /// The open colour picker (`SettingsUi::picker`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Picker {
     /// Which circle and which of its colours (`parts`).
     pub swatch: usize,
     pub part: usize,
+    pub custom: Option<(&'static str, Color)>,
+    /// Whether reverting should remove an optional profile colour override.
+    pub original_inherited: bool,
     /// The colour being picked, kept as HSV so hue and saturation survive black and greys.
     pub hsv: [f32; 3],
     /// The applied theme when the picker opened (`State::fl_text`), for Revert and the old colour.
@@ -192,8 +236,8 @@ pub struct PickerRects {
     pub panel: Rect,
     pub close: Rect,
     pub chips: Vec<Rect>,
-    pub sv: Rect,
-    pub hue: Rect,
+    pub wheel: Rect,
+    pub value: Rect,
     /// New colour over old colour.
     pub new: Rect,
     pub old: Rect,
@@ -217,15 +261,73 @@ pub fn picker_rects(p: &Picker, n_parts: usize, win: Rect) -> PickerRects {
         panel,
         close: Rect::new(panel.right() - 26.0, y + 6.0, 20.0, 20.0),
         chips,
-        sv: Rect::new(x + 10.0, by, 150.0, 110.0),
-        hue: Rect::new(x + 168.0, by, 14.0, 110.0),
+        wheel: Rect::new(x + 22.0, by, 110.0, 110.0),
+        value: Rect::new(x + 148.0, by, 32.0, 110.0),
         new: Rect::new(x + 192.0, by, 66.0, 30.0),
         old: Rect::new(x + 192.0, by + 30.0, 66.0, 22.0),
         revert: Rect::new(x + 192.0, by + 88.0, 66.0, 22.0),
     }
 }
 
+pub(crate) const PLAYLIST_BRIGHTNESS: &str = "Playlist clip brightness";
+pub(crate) const PLAYLIST_BRIGHTNESS_VISIBILITY: &str = "visible_playlist-brightness";
+const PLAYLIST_BRIGHTNESS_KEY: &str = "LemonStudioStyle.playlist_clip_brightness";
+pub(crate) const NEON_PLAYLIST_BRIGHTNESS_KEY: &str = "neon_3036_playlist_clip_brightness";
+pub(crate) const VINTAGE_PLAYLIST_BRIGHTNESS_KEY: &str = "vintage_playlist_clip_brightness";
+
+impl State {
+    pub(crate) fn playlist_brightness(&self) -> f32 {
+        if let Some(preview) = self.playlist_brightness_preview {
+            return preview;
+        }
+        let parse = |value: &str| value.parse::<u8>().ok().filter(|&percent| percent <= 100);
+        let percent = if self.neon_3036 {
+            crate::settings_file::read(|settings| settings.get(NEON_PLAYLIST_BRIGHTNESS_KEY).and_then(parse))
+        } else if self.vintage_2005 {
+            crate::settings_file::read(|settings| settings.get(VINTAGE_PLAYLIST_BRIGHTNESS_KEY).and_then(parse))
+        } else {
+            self.fl_text.as_deref().and_then(|text| fl::get_key(text, PLAYLIST_BRIGHTNESS_KEY)).and_then(parse)
+        };
+        percent.map_or_else(|| {
+            if crate::prefs::check(&crate::prefs::BRIGHT_PLAYLIST_CLIPS) { 1.0 } else { 0.0 }
+        }, |percent| f32::from(percent) / 100.0)
+    }
+}
+
 impl App {
+    pub(crate) fn preview_playlist_brightness(&mut self, x: f32, w: f32) {
+        self.state.playlist_brightness_preview = Some(((self.mouse.0 - x) / w).clamp(0.0, 1.0));
+        self.invalidate();
+    }
+
+    pub(crate) fn finish_playlist_brightness(&mut self) {
+        if let Some(value) = self.state.playlist_brightness_preview.take() {
+            self.store_playlist_brightness(value);
+        }
+    }
+
+    pub(crate) fn store_playlist_brightness(&mut self, value: f32) {
+        if self.state.settings.open && self.state.settings.tab == crate::views::settings::THEME {
+            self.start_theme_editor();
+        }
+        let value = format!("{:.0}", value.clamp(0.0, 1.0) * 100.0);
+        if self.state.neon_3036 {
+            self.theme_mark(crate::theme_library::Step::Other);
+            crate::settings_file::write(NEON_PLAYLIST_BRIGHTNESS_KEY, &value);
+        } else if self.state.vintage_2005 {
+            self.theme_mark(crate::theme_library::Step::Other);
+            crate::settings_file::write(VINTAGE_PLAYLIST_BRIGHTNESS_KEY, &value);
+        } else {
+            let text = fl::set_key(&self.theme_text(), PLAYLIST_BRIGHTNESS_KEY, &value);
+            if self.state.fl_text.as_deref() != Some(&text) {
+                self.theme_mark(crate::theme_library::Step::Other);
+                self.theme_edit(text);
+                self.theme_store();
+            }
+        }
+        self.invalidate();
+    }
+
     /// The applied theme's text (`applied_text`) to edit. The Lemon theme's key goes: edited, it is a theme like any
     /// other (on Lemon still Lemon's colours, `os_theme::design::default_text`); the Citrus theme keeps its key, so on
     /// Lemon it stays laid over Lemon even where it is stock Dark.
@@ -242,10 +344,11 @@ impl App {
         }
         let th = FlTheme::parse(&text);
         let palette = os_theme::design::palette(self.design(), Some(&th));
-        self.theme = os_theme::Theme::new(&self.theme.name.clone(), palette, self.theme.adjust);
-        os_theme::set_current(&self.theme.colors);
+        let adjust = if self.state.settings.advanced_theme.is_some() { Default::default() } else { self.theme.adjust };
+        self.theme = os_theme::Theme::new(&self.theme.name.clone(), palette, adjust);
+        os_theme::set_current(self.state.featured_palette().unwrap_or(&self.theme.colors));
         self.state.fl_text = Some(text);
-        if self.state.settings.open {
+        if self.state.settings.open && self.state.settings.advanced_theme.is_none() {
             self.state.settings.skin_previews = os_theme::design::Design::ALL.iter().map(|d| os_theme::design::palette(*d, Some(&th))).collect();
         }
         self.check_readable();
@@ -254,6 +357,7 @@ impl App {
 
     /// Keeps the applied theme for the next start (`current.flstheme` in the user folder).
     pub(crate) fn theme_store(&self) {
+        if self.state.settings.advanced_theme.is_some() { return; }
         if let (Some(d), Some(text)) = (crate::app::theme_dir(), &self.state.fl_text) {
             let _ = std::fs::create_dir_all(&d);
             let _ = std::fs::write(d.join("current.flstheme"), text);
@@ -284,6 +388,9 @@ impl App {
 
     /// Wheel notches over knob `i`: one step each, up for more.
     pub(crate) fn theme_knob_wheel(&mut self, i: usize, notches: i32) {
+        if self.state.settings.open && self.state.settings.tab == crate::views::settings::THEME {
+            self.start_theme_editor();
+        }
         self.theme_mark(crate::theme_library::Step::Wheel(i));
         let v = knob_value(&FlTheme::parse(&self.theme_text()), i);
         self.knob_set(i, v + notches as f32 * KNOBS[i].notch);
@@ -292,6 +399,9 @@ impl App {
 
     /// A middle click: knob `i` goes back to the value of the theme as it was chosen.
     pub(crate) fn theme_knob_reset(&mut self, i: usize) {
+        if self.state.settings.open && self.state.settings.tab == crate::views::settings::THEME {
+            self.start_theme_editor();
+        }
         self.theme_mark(crate::theme_library::Step::Other);
         let base = self.state.theme_base.clone().unwrap_or_else(|| os_theme::design::default_text(self.design()));
         self.knob_set(i, knob_value(&FlTheme::parse(&base), i));
@@ -300,6 +410,18 @@ impl App {
 
     /// Colour circle `i` (its colour `part`) was clicked: the picker opens under it, or moves to that colour.
     pub(crate) fn picker_open(&mut self, i: usize, part: usize, at: (f32, f32, f32)) {
+        if i == STEPS && self.state.neon_3036 {
+            let palette = &self.state.neon_colors.palette;
+            let (label, _) = crate::vintage::STEP_COLORS[part.min(1)];
+            let color = if part == 0 { palette.step_a } else { palette.step_b };
+            self.open_editor_swatch_color(label, color);
+            if let Some(picker) = &mut self.state.settings.picker {
+                picker.swatch = STEPS;
+                picker.part = part.min(1);
+                picker.at = at;
+            }
+            return;
+        }
         let parts = parts(&self.theme_text(), i);
         let part = part.min(parts.len() - 1);
         let before = match &self.state.settings.picker {
@@ -307,8 +429,34 @@ impl App {
             _ => self.state.fl_text.clone(),
         };
         let hint = format!("{}: pick a colour", SWATCHES[i]);
-        self.state.settings.picker = Some(Picker { swatch: i, part, hsv: hsv(parts[part].colour), before, at });
+        self.state.settings.picker = Some(Picker { swatch: i, part, custom: None, original_inherited: false, hsv: hsv(parts[part].colour), before, at });
         self.state.message = Some(hint);
+        self.invalidate();
+    }
+
+    pub(crate) fn open_editor_swatch(&mut self, token: &'static str) {
+        let color = if self.edits_clean_modern_surface(token) {
+            self.mixer_skin_color(crate::mixer_skin::Scope::CleanModern, crate::mixer_skin::PANEL_SURFACE)
+        } else {
+            self.theme.colors.get(token)
+        };
+        let Some(color) = color else { return };
+        self.open_editor_swatch_color(token, color);
+    }
+
+    pub(crate) fn open_editor_swatch_color(&mut self, token: &'static str, color: Color) {
+        let at = (self.mouse.0, self.mouse.1, 12.0);
+        self.state.settings.picker = Some(Picker {
+            swatch: 0, part: 0, custom: Some((token, color)), hsv: hsv(color),
+            original_inherited: if let Some(kind) = crate::playlist_grid::Kind::from_color_key(token) {
+                !kind.has_color()
+            } else if let Some(key) = crate::vintage::step_key(token) {
+                crate::settings_file::get(key).is_none()
+            } else {
+                token == crate::vintage::BACKGROUND_TINT && self.state.neon_colors.palette.style.background.tint.is_none()
+            },
+            before: self.state.fl_text.clone(), at,
+        });
         self.invalidate();
     }
 
@@ -324,30 +472,90 @@ impl App {
         self.invalidate();
     }
 
+    pub(crate) fn set_neon_colors(&mut self, inks:[Color;3]) {
+        self.state.neon_colors.store(inks);
+        os_theme::set_current(&self.state.neon_colors.palette);
+        self.invalidate();
+    }
+
+    pub(crate) fn refresh_neon_background(&mut self) {
+        self.state.neon_colors.refresh_background();
+        os_theme::set_current(&self.state.neon_colors.palette);
+        self.invalidate();
+    }
+
+    pub(crate) fn set_background_tint(&mut self, color: Option<Color>) {
+        let value = color.map(|c| format!("#{:02x}{:02x}{:02x}", c.r,c.g,c.b)).unwrap_or_default();
+        crate::settings_file::write(crate::vintage::TINT_KEY, &value);
+        self.refresh_neon_background();
+    }
+
+    fn set_neon_step(&mut self, key: &str, color: Option<Color>) {
+        let value = color.map(|c| format!("#{:02x}{:02x}{:02x}", c.r, c.g, c.b)).unwrap_or_default();
+        crate::settings_file::write(key, &value);
+        self.refresh_neon_background();
+    }
+
+    fn apply_neon_color(&mut self, token:&str, color:Color) -> bool {
+        if !self.state.neon_3036 {return false;}
+        if token == crate::vintage::BACKGROUND_TINT {
+            self.set_background_tint(Some(color));
+            return true;
+        }
+        if let Some(key) = crate::vintage::step_key(token) {
+            self.set_neon_step(key, Some(color));
+            return true;
+        }
+        let Some(i)=crate::vintage::INK_LABELS.iter().position(|&name|name==token) else {return false;};
+        let mut inks=self.state.neon_colors.inks;
+        inks[i]=color;
+        self.set_neon_colors(inks);
+        true
+    }
+
     /// Sets the picked colour from the picker's HSV and applies it.
     fn picker_apply(&mut self) {
         let Some(p) = self.state.settings.picker.clone() else { return };
         let text = self.theme_text();
-        let Some(part) = parts(&text, p.swatch).get(p.part).cloned() else { return };
         let c = from_hsv(p.hsv);
+        if let Some((token, _)) = p.custom {
+            if let Some(kind) = crate::playlist_grid::Kind::from_color_key(token) {
+                kind.set_color(Some(c));
+                self.invalidate();
+                return;
+            }
+            if self.apply_neon_color(token,c) {return;}
+            let text = self.editor_source_text();
+            let next = if token.starts_with("LemonStudioStyle.") {
+                crate::advanced_theme::set_identity_color(&text, token, c)
+            } else if let Some(design) = self.state.settings.advanced_theme.as_ref().and_then(|s| s.mixer_designer.as_ref()) {
+                crate::mixer_skin::set_color(&text, design.scope, design.part, token, c)
+            } else if self.edits_clean_modern_surface(token) {
+                use crate::mixer_skin::{self, PANEL_SURFACE, Part, Scope};
+                mixer_skin::set_color(&text, Scope::CleanModern, Part::Panel, PANEL_SURFACE, c)
+            } else {
+                crate::advanced_theme::set_color(&text, token, c)
+            };
+            self.theme_edit(next);
+            return;
+        }
+        let Some(part) = parts(&text, p.swatch).get(p.part).cloned() else { return };
         self.theme_edit(set_part(&text, p.swatch, &part.key, c));
         self.hint = std::borrow::Cow::Owned(format!("{}: #{:02x}{:02x}{:02x}", SWATCHES[p.swatch], c.r, c.g, c.b));
     }
 
-    /// The saturation / brightness square `r` was pressed or dragged to (`x`, `y`): saturation left to right,
-    /// brightness bottom to top.
-    pub(crate) fn picker_sv(&mut self, r: Rect, x: f32, y: f32) {
+    /// Angle selects hue, distance from the center selects saturation.
+    pub(crate) fn picker_wheel(&mut self, r: Rect, x: f32, y: f32) {
         if let Some(p) = &mut self.state.settings.picker {
-            p.hsv[1] = ((x - r.x) / r.w).clamp(0.0, 1.0);
-            p.hsv[2] = (1.0 - (y - r.y) / r.h).clamp(0.0, 1.0);
+            pick_color_component(&mut p.hsv, r, x, y, false);
         }
         self.picker_apply();
     }
 
-    /// The hue strip `r` was pressed or dragged to height `y`: 0° at the top round to 360° at the bottom.
-    pub(crate) fn picker_hue(&mut self, r: Rect, y: f32) {
+    /// Brightness runs from full color at the top to black at the bottom.
+    pub(crate) fn picker_value(&mut self, r: Rect, y: f32) {
         if let Some(p) = &mut self.state.settings.picker {
-            p.hsv[0] = ((y - r.y) / r.h).clamp(0.0, 1.0) * 360.0;
+            pick_color_component(&mut p.hsv, r, r.cx(), y, true);
         }
         self.picker_apply();
     }
@@ -355,12 +563,43 @@ impl App {
     /// Revert (or a click on the old colour): the theme goes back to how it was when the picker opened.
     pub(crate) fn picker_revert(&mut self) {
         let Some(p) = self.state.settings.picker.clone() else { return };
+        if let Some((token, color)) = p.custom
+            && let Some(kind) = crate::playlist_grid::Kind::from_color_key(token) {
+            self.theme_mark(crate::theme_library::Step::Other);
+            kind.set_color((!p.original_inherited).then_some(color));
+            if let Some(picker) = &mut self.state.settings.picker {
+                picker.hsv = hsv(color);
+            }
+            self.invalidate();
+            return;
+        }
+        if self.state.neon_3036 { self.theme_mark(crate::theme_library::Step::Other); }
+        if p.original_inherited && self.state.neon_3036 && let Some((token,color))=p.custom {
+            if let Some(key) = crate::vintage::step_key(token) {
+                self.set_neon_step(key, None);
+            } else {
+                self.set_background_tint(None);
+            }
+            if let Some(picker)=self.state.settings.picker.as_mut(){picker.hsv=hsv(color);}
+            return;
+        }
+        if let Some((token,color))=p.custom && self.apply_neon_color(token,color) {
+            if let Some(picker)=self.state.settings.picker.as_mut(){picker.hsv=hsv(color);}
+            return;
+        }
         self.theme_mark(crate::theme_library::Step::Other);
+        if let Some((_, color)) = p.custom {
+            let mut snap = self.snap_theme();
+            snap.text = p.before;
+            self.theme_restore(snap);
+            if let Some(picker) = self.state.settings.picker.as_mut() { picker.hsv = hsv(color); }
+            return;
+        }
         match p.before.clone() {
             Some(text) => self.theme_edit(text),
             None => {
                 self.theme = crate::app::design_theme(self.design(), false);
-                os_theme::set_current(&self.theme.colors);
+                os_theme::set_current(self.state.featured_palette().unwrap_or(&self.theme.colors));
                 self.state.fl_text = None;
                 self.sync_preset();
             }

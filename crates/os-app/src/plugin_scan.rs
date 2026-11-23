@@ -7,7 +7,7 @@
 //! the app; the sweep runs on a background thread and hands its results to the UI thread.
 // spec: ui/plugin-manager.md
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -50,10 +50,10 @@ pub fn child_main(args: &[String]) -> ! {
             }
             Err(e) => serde_json::json!({ "ok": false, "error": e, "crashed": os_host::guard::tripped() }),
         },
-        _ => serde_json::json!({ "ok": false, "error": format!("usage: {ARG} clap|vst3|vst2|native <path>") }),
+        _ => serde_json::json!({ "ok": false, "error": format!("usage: {ARG} clap|vst3|vst2|au|native <path>") }),
     };
     let mut stdout = std::io::stdout().lock();
-    let _ = writeln!(stdout, "{TAG}{out}");
+    let _ = writeln!(stdout, "\n{TAG}{out}");
     let _ = stdout.flush();
     end_now(0)
 }
@@ -65,6 +65,13 @@ fn end_now(code: u32) -> ! {
         use windows_sys::Win32::System::Threading::{GetCurrentProcess, TerminateProcess};
         TerminateProcess(GetCurrentProcess(), code);
     }
+    #[cfg(target_os = "macos")]
+    unsafe {
+        // The tagged reply has been flushed. Loaded modules may register exit
+        // handlers that crash or block a completed scan during normal exit.
+        libc::_exit(code as i32)
+    }
+    #[cfg(not(target_os = "macos"))]
     std::process::exit(code as i32)
 }
 
@@ -79,9 +86,34 @@ fn parse(line: &str) -> Scanned {
     Scanned::failed(if v["crashed"].as_bool() == Some(true) { Status::Crashed } else { Status::Error }, error)
 }
 
+/// Drain arbitrary plug-in logging without buffering unbounded lines in the DAW.
+fn scanner_reply(mut output: impl BufRead, max_reply: u64) -> Option<String> {
+    let mut prefix = Vec::with_capacity(TAG.len());
+    loop {
+        prefix.clear();
+        let read = (&mut output).take(TAG.len() as u64).read_until(b'\n', &mut prefix).ok()?;
+        if read == 0 { return None; }
+        if prefix == TAG.as_bytes() {
+            let mut bytes = Vec::new();
+            (&mut output).take(max_reply + 1).read_until(b'\n', &mut bytes).ok()?;
+            if bytes.len() as u64 > max_reply {
+                return Some(r#"{"ok":false,"error":"The scanner reply was too large"}"#.into());
+            }
+            return String::from_utf8(bytes).ok();
+        }
+        if !prefix.ends_with(b"\n") {
+            output.skip_until(b'\n').ok()?;
+        }
+    }
+}
+
 /// Scans file `path` in a scanner process (§4).
 pub fn scan_in_child(path: &Path, format: Format) -> Scanned {
     let Ok(exe) = std::env::current_exe() else { return Scanned::failed(Status::Error, "no scanner program") };
+    scan_with_program(&exe, path, format)
+}
+
+fn scan_with_program(exe: &Path, path: &Path, format: Format) -> Scanned {
     let mut cmd = std::process::Command::new(exe);
     cmd.arg(ARG).arg(format.as_str()).arg(path).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null());
     #[cfg(windows)]
@@ -98,11 +130,8 @@ pub fn scan_in_child(path: &Path, format: Format) -> Scanned {
     if let Some(out) = child.stdout.take() {
         // Plugins may print anything while they load: only the tagged line counts.
         std::thread::spawn(move || {
-            for line in BufReader::new(out).lines().map_while(Result::ok) {
-                if let Some(rest) = line.strip_prefix(TAG) {
-                    let _ = tx.send(rest.to_string());
-                    break;
-                }
+            if let Some(reply) = scanner_reply(BufReader::new(out), 16 * 1024 * 1024) {
+                let _ = tx.send(reply);
             }
         });
     }
@@ -130,6 +159,10 @@ pub fn scan_in_child(path: &Path, format: Format) -> Scanned {
     match line {
         Some(l) => parse(&l),
         None => {
+            #[cfg(unix)]
+            if let Some(signal) = status.as_ref().and_then(std::os::unix::process::ExitStatusExt::signal) {
+                return Scanned::failed(Status::Crashed, format!("the scanner received signal {signal} while loading {}", path.display()));
+            }
             let code = status.and_then(|s| s.code()).map_or(0, |c| c as u32);
             Scanned::failed(Status::Crashed, format!("the scanner ended with {} while loading it", os_host::guard::describe(code)))
         }
@@ -147,6 +180,13 @@ pub fn scan_here(path: &Path, format: Format) -> Scanned {
 /// How the sweep scans one file: a plugin this program cannot load (its file tells) is not tried at all; native files
 /// are scanned in this process (nothing is loaded), the others in a scanner process.
 fn scan_file(path: &Path, format: Format) -> Scanned {
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    if crate::legacy_vst::is_x86(path, format) {
+        if !crate::legacy_vst::available() {
+            return Scanned::failed(Status::Unsupported, "32-bit VST2: download the optional bridge in Settings > Plugins");
+        }
+        return scan_here(path, format);
+    }
     if let Some(why) = unsupported(path, format) {
         return Scanned::failed(Status::Unsupported, why);
     }
@@ -214,29 +254,27 @@ pub fn start(prefs: &db::Prefs, old: Cache, mode: Mode) -> Sweep {
 }
 
 impl App {
-    /// Startup (spec: ui/plugin-manager.md §4 "When"): the built-in plugins and the cached plugins are listed at once
-    /// (no plugin file is loaded), then a background scan starts when "Scan for new plugins at startup" is on (always
-    /// when there is no cache yet).
+    /// Startup lists the built-in plugins and the last scan's cache. Discovery is manual.
     pub fn start_plugins(&mut self) {
-        let first = !self.load_plugins();
-        if first || self.state.plugdb.prefs.startup_scan {
-            self.start_scan(Mode::Changed);
+        #[cfg(all(windows,target_arch="x86_64"))]
+        if std::env::var_os("OPENSTUDIO_NATIVE").is_none() && crate::prefs::text("host_installed_fl_plugins").as_deref()==Some("1") {
+            os_native::set_enabled(true);
         }
+        self.load_plugins();
     }
 
-    /// The built-in plugins plus the last scan's, and the user's choices. False when there is no scan cache yet.
-    pub fn load_plugins(&mut self) -> bool {
+    /// The built-in plugins plus the last scan's, and the user's choices.
+    pub fn load_plugins(&mut self) {
+        crate::plugin_menu::import_installed_database();
         let (owner, scale) = (self.plugins.owner, self.plugins.scale);
         self.plugins = crate::plugins::Plugins::builtins();
         (self.plugins.owner, self.plugins.scale) = (owner, scale);
         let db = &mut self.state.plugdb;
         db.prefs = db::Prefs::load();
-        let cached = db::Cache::load();
-        let found = cached.is_some();
-        db.cache = cached.unwrap_or_default();
+        db.cache = db::Cache::load().unwrap_or_default();
         self.plugins.merge(&self.state.plugdb.cache);
         self.state.plugdb.rebuild(&self.plugins);
-        found
+        crate::plugin_menu::sync_user_folders(&self.state);
     }
 
     /// Starts a scan, or queues it after the running one (one at a time).
@@ -286,14 +324,16 @@ impl App {
     }
 
     /// A scan ended: its results are kept, the lists updated in place, the hint bar says what changed.
-    fn apply_scan(&mut self, cache: Cache) {
+    pub(crate) fn apply_scan(&mut self, cache: Cache) {
         let report = db::compare(&self.state.plugdb.cache, &cache);
         cache.save();
         self.plugins.merge(&cache);
+        self.retry_scanned_wrappers();
         let db = &mut self.state.plugdb;
         db.cache = cache;
         db.progress = None;
         db.rebuild(&self.plugins);
+        crate::plugin_menu::sync_user_folders(&self.state);
         self.state.message = Some(report.message());
         self.invalidate();
     }
@@ -302,6 +342,7 @@ impl App {
     pub(crate) fn prefs_changed(&mut self) {
         self.state.plugdb.prefs.save();
         self.state.plugdb.rebuild(&self.plugins);
+        crate::plugin_menu::sync_user_folders(&self.state);
         self.invalidate();
     }
 }
@@ -309,6 +350,35 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scanner_ignores_long_unterminated_log_lines_and_bounds_its_reply() {
+        let mut log = vec![b'x'; 100_000];
+        assert!(scanner_reply(log.as_slice(), 64).is_none());
+        log.extend_from_slice(b"\nhi\nOSSCAN {\"ok\":true,\"plugins\":[]}\n");
+        assert_eq!(parse(&scanner_reply(log.as_slice(), 64).unwrap()).status, Status::Ok);
+        assert_eq!(parse(&scanner_reply(log.as_slice(), 8).unwrap()).status, Status::Error);
+    }
+
+    /// Exercises discovery, isolated scanners, both cache replacements and the UI catalog.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore]
+    fn mac_repeated_full_scans_refresh_the_installed_catalog() {
+        let exe = PathBuf::from(std::env::var_os("ML_TEST_SCANNER").expect("production scanner"));
+        let mut app = App::new(None);
+        app.plugins = crate::plugins::Plugins::builtins();
+        let dirs = db::search_dirs(&db::Prefs::default());
+        for _ in 0..2 {
+            let found = db::discover(&dirs, Vec::new());
+            let scan = |path: &Path, format| scan_with_program(&exe, path, format);
+            let cache = db::sweep(&found, &app.state.plugdb.cache, Mode::All, false, WORKERS, &scan, &|_, _, _| {});
+            assert_eq!(cache.files.len(), found.len());
+            assert!(cache.files.iter().any(|f| f.status == Status::Ok && f.format == "vst3"));
+            eprintln!("Full scan: {} entries, {} errors", cache.files.len(), cache.files.iter().filter(|f| f.status.failed()).count());
+            app.apply_scan(cache);
+        }
+    }
 
     #[test]
     fn scanner_lines_parse() {

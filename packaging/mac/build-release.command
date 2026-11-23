@@ -1,0 +1,41 @@
+#!/bin/bash
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+[[ "$(uname -s)" == Darwin ]] || { echo 'Build this package on the MacBook.'; exit 1; }
+[[ "$(sysctl -in sysctl.proc_translated 2>/dev/null || true)" != 1 ]] || { echo 'Use a native terminal, not Rosetta.'; exit 1; }
+export PATH="$HOME/.cargo/bin:$PATH"
+export OPENSTUDIO_NO_PLUGIN_BUILD=1
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$HOME/.cache/lemon-public-builds/mac-${LEMON_MAC_ARCH:-$(uname -m)}}"
+python3 "$ROOT/packaging/workflow/storage.py" --prepare-build "$CARGO_TARGET_DIR"
+unset CARGO_BUILD_TARGET
+xcode-select -p >/dev/null
+python3 "$ROOT/packaging/mac/distribution_signing.py"
+cd "$ROOT"
+# A stable, locked, pipeline-owned worktree preserves Cargo build-script paths.
+BUILD_SOURCE="$(python3 "$ROOT/packaging/workflow/mac-worktree.py" "$ROOT" "${LEMON_MAC_ARCH:-$(uname -m)}")"
+cd "$BUILD_SOURCE"
+export LEMON_RELEASE=1
+: "${LEMON_MASTER_BUNDLE:?Set LEMON_MASTER_BUNDLE to the native Mac engine archive}"
+case "${LEMON_MAC_ARCH:-$(uname -m)}" in
+ arm64) export LEMON_APP_TARGET=aarch64-apple-darwin ;;
+ x86_64) export LEMON_APP_TARGET=x86_64-apple-darwin ;;
+ *) echo 'Unsupported Mac architecture'; exit 1 ;;
+esac
+export MACOSX_DEPLOYMENT_TARGET=12.0
+mode="${1:-full}"
+case "$mode" in full|compile|bundle) ;; *) exit 2 ;; esac
+if [[ "$mode" != bundle ]]; then
+    cargo build --locked --release -p os-app --bin lemonstudio --target "$LEMON_APP_TARGET"
+fi
+# Guard the macOS 12 deployment target against direct imports of newer tap APIs.
+APP_IMPORTS="$(nm -u "$CARGO_TARGET_DIR/$LEMON_APP_TARGET/release/lemonstudio")"
+if grep -E '(^|[[:space:]])_AudioHardware(Create|Destroy)ProcessTap$' <<< "$APP_IMPORTS"; then
+    echo 'Core Audio process taps must be resolved at runtime for macOS 12 compatibility.' >&2
+    exit 1
+fi
+[[ "$mode" != compile ]] || exit 0
+cargo run --locked --release -p bundle-app -- --prebuilt
+APP="$CARGO_TARGET_DIR/bundled/ML Studio.app"
+codesign --verify --deep --strict "$APP"
+[[ "$mode" != bundle ]] || exit 0
+python3 "$ROOT/packaging/mac/package-release.py" "$APP"

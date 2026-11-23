@@ -10,6 +10,68 @@
 //!
 // spec: plugins/fruity-limiter-dsp.md, audio/conventions.md (single, double, Round)
 
+use super::{delay_line::DelayLine, peak_guard::PeakGuard};
+
+/// Keep the input history even at zero lookahead. An attack edit crossfades two
+/// read positions without interrupting the limiter detector or resetting a delay.
+struct Lookahead {
+    history: Vec<[f32; 2]>,
+    cursor: usize,
+    filled: usize,
+    from: usize,
+    to: usize,
+    requested: usize,
+    left: usize,
+    fade: usize,
+}
+
+impl Lookahead {
+    fn new(max: usize) -> Self {
+        Self { history: vec![[0.; 2]; max + 1], cursor: 0, filled: 0, from: 0, to: 0,
+            requested: 0, left: 0, fade: 1 }
+    }
+    fn prepare(&mut self, max: usize) {
+        if self.history.len() < max + 1 { self.history.resize(max + 1, [0.; 2]); }
+        self.clear();
+    }
+    fn clear(&mut self) {
+        self.filled = 0;
+        self.cursor = 0;
+        self.to = self.requested;
+        self.from = self.to;
+        self.left = 0;
+    }
+    fn set(&mut self, frames: usize, immediate: bool, fade: usize) {
+        self.requested = frames.min(self.history.len() - 1);
+        self.fade = fade;
+        if immediate { self.to = self.requested; self.from = self.to; self.left = 0; }
+    }
+    fn tap(&self, delay: usize) -> [f32; 2] {
+        if delay > self.filled { return [0.; 2]; }
+        let i = if delay <= self.cursor { self.cursor-delay } else { self.history.len()-(delay-self.cursor) };
+        self.history[i]
+    }
+    fn push(&mut self, input: [f32; 2]) -> [f32; 2] {
+        self.history[self.cursor] = input;
+        if self.left == 0 && self.to != self.requested {
+            self.from = self.to;
+            self.to = self.requested;
+            self.left = self.fade;
+        }
+        let mut out = self.tap(self.to);
+        if self.left != 0 {
+            let old = self.tap(self.from);
+            let blend = self.left as f32 / self.fade as f32;
+            for ch in 0..2 { out[ch] += blend * (old[ch] - out[ch]); }
+            self.left -= 1;
+        }
+        self.filled = (self.filled + 1).min(self.history.len() - 1);
+        self.cursor += 1;
+        if self.cursor == self.history.len() { self.cursor = 0; }
+        out
+    }
+}
+
 use std::collections::VecDeque;
 
 /// Parameters, in the original's order (state field k + 1).
@@ -60,6 +122,7 @@ pub const DEFAULTS: [i32; PARAMS] = [1000, 1000, 1000, 1115, 3, 5000, 3, 2882, 1
 
 /// Flags bit 0: the limiter aims at the ceiling itself instead of 0.975 of it.
 pub const FLAG_EXACT_CEILING: u8 = 1;
+pub const PEAK_GUARD_TAG: &[u8; 8] = b"MLLIMTP1";
 
 /// Silence: every sample's magnitude at or below this (bit pattern 0x358637BD).
 const SILENT: f32 = 1e-6;
@@ -107,7 +170,7 @@ struct Chain {
 
 impl Chain {
     fn new(start: f64) -> Self {
-        Chain { rise: 0.0, fall: 0.0, start, s: Vec::with_capacity(8) }
+        Chain { rise: 0.0, fall: 0.0, start, s: Vec::with_capacity(64) }
     }
 
     /// Sets the stage count (a changed count starts again at the starting value) and the times.
@@ -187,12 +250,12 @@ pub struct Dynamics {
     peaks: VecDeque<(u64, f32)>,
     pos: u64,
     /// RMS window: the last M squared sums and their running total.
-    rms_ring: Vec<f32>,
-    rms_at: usize,
+    rms_ring: DelayLine<f32>,
     rms_sum: f64,
     /// Look-ahead delay (stereo).
-    delay: Vec<[f32; 2]>,
-    delay_at: usize,
+    delay: Lookahead,
+    peak_guard: PeakGuard,
+    guard_enabled: bool,
     counter: i64,
     asleep: bool,
     peak: Vec<f32>,
@@ -230,13 +293,13 @@ impl Dynamics {
             compressor: Chain::new(0.0),
             attack: Chain::new(1.0),
             gate_state: 1.0,
-            peaks: VecDeque::new(),
+            peaks: VecDeque::with_capacity(rate.ceil() as usize + 1),
             pos: 0,
-            rms_ring: Vec::new(),
-            rms_at: 0,
+            rms_ring: DelayLine::new(rate.ceil() as usize),
             rms_sum: 0.0,
-            delay: Vec::new(),
-            delay_at: 0,
+            delay: Lookahead::new(rate.ceil() as usize),
+            peak_guard: PeakGuard::new(rate),
+            guard_enabled: false,
             counter: 0,
             asleep: true,
             peak: vec![0.0; CHUNK],
@@ -279,8 +342,15 @@ impl Dynamics {
     }
 
     /// The delay the plugin reports: the look-ahead, in samples.
+    pub fn set_peak_guard(&mut self, enabled: bool) {
+        if enabled != self.guard_enabled {
+            self.guard_enabled = enabled;
+            self.peak_guard.clear();
+        }
+    }
+
     pub fn latency(&self) -> usize {
-        self.w.look
+        self.w.look + if self.guard_enabled { super::peak_guard::LATENCY } else { 0 }
     }
 
     pub fn params(&self) -> &[i32; PARAMS] {
@@ -295,6 +365,11 @@ impl Dynamics {
     pub fn set_rate(&mut self, rate: f64) {
         if rate != self.rate {
             self.rate = rate;
+            let capacity = rate.ceil() as usize;
+            self.peak_guard.set_rate(rate);
+            self.delay.prepare(capacity);
+            self.rms_ring.prepare(capacity);
+            self.peaks.reserve((capacity + 1).saturating_sub(self.peaks.len()));
             self.work(true);
         }
     }
@@ -394,17 +469,13 @@ impl Dynamics {
         let old = std::mem::replace(&mut self.w, w);
         // A changed look-ahead clears the delay line; a changed window clears that window.
         if fresh || old.look != look {
-            self.delay.clear();
-            self.delay.resize(look, [0.0; 2]);
-            self.delay_at = 0;
+            self.delay.set(look, fresh || self.asleep, (self.rate * 0.004).max(1.) as usize);
         }
         if fresh || old.peak_n != self.w.peak_n {
             self.peaks.clear();
         }
         if fresh || old.rms_m != self.w.rms_m {
-            self.rms_ring.clear();
-            self.rms_ring.resize(self.w.rms_m, 0.0);
-            self.rms_at = 0;
+            self.rms_ring.set_length(self.w.rms_m);
             self.rms_sum = 0.0;
         }
     }
@@ -415,8 +486,8 @@ impl Dynamics {
         self.release.reset_to(0.0);
         self.compressor.reset_to(0.0);
         self.gate_state = 1.0;
-        self.delay.iter_mut().for_each(|s| *s = [0.0; 2]);
-        self.delay_at = 0;
+        self.delay.clear();
+        self.peak_guard.clear();
     }
 
     /// Processes one block in place. `key` = the sidechain input (left, right) the compressor reads instead of the
@@ -480,9 +551,7 @@ impl Dynamics {
                     None => (left[i], right[i]),
                 };
                 let x = l * l + r * r;
-                self.rms_sum = (self.rms_sum - f64::from(self.rms_ring[self.rms_at])) + f64::from(x);
-                self.rms_ring[self.rms_at] = x;
-                self.rms_at = (self.rms_at + 1) % m;
+                self.rms_sum = (self.rms_sum - f64::from(self.rms_ring.push(x))) + f64::from(x);
                 self.rms[i] = ((f64::from(inv) * self.rms_sum) as f32).max(0.0).sqrt();
             }
             self.compressor.run(&mut self.rms[..n]);
@@ -509,15 +578,8 @@ impl Dynamics {
         }
 
         // 3. Delay the audio by the look-ahead.
-        if w.look > 0 {
-            for i in 0..n {
-                let d = &mut self.delay[self.delay_at];
-                let out = *d;
-                *d = [left[i], right[i]];
-                left[i] = out[0];
-                right[i] = out[1];
-                self.delay_at = (self.delay_at + 1) % w.look;
-            }
+        for i in 0..n {
+            [left[i], right[i]] = self.delay.push([left[i], right[i]]);
         }
 
         // 4. Limiter and gate on the release-smoothed held peak.
@@ -553,6 +615,11 @@ impl Dynamics {
                 } else {
                     v
                 };
+            }
+        }
+        if self.guard_enabled {
+            for (l, r) in left.iter_mut().zip(right.iter_mut()) {
+                [*l, *r] = self.peak_guard.frame([*l, *r], ceiling);
             }
         }
         if self.meter_len > 0 {

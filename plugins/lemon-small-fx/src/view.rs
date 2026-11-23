@@ -59,8 +59,6 @@ pub enum Target {
     Fader(String, f32),
     /// One position of a selector (click picks it).
     Choice(String, i32),
-    /// A text field (a click types in its text).
-    Text(String),
     /// The wordmark (the About menu).
     Logo,
 }
@@ -69,7 +67,7 @@ impl Target {
     /// The setting's id ("" for the wordmark).
     pub fn id(&self) -> &str {
         match self {
-            Target::Knob(id) | Target::Fader(id, _) | Target::Choice(id, _) | Target::Text(id) => id,
+            Target::Knob(id) | Target::Fader(id, _) | Target::Choice(id, _) => id,
             Target::Logo => "",
         }
     }
@@ -84,10 +82,9 @@ pub struct Hit {
 /// The pointer and the pressed control.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ViewState {
+    pub advanced: bool,
     pub mouse: Option<(f32, f32)>,
     pub pressed: Option<Target>,
-    /// The saved state the text fields show ([`Control::Text`]).
-    pub raw: Vec<u8>,
 }
 
 struct Ui<'a> {
@@ -109,6 +106,43 @@ impl Ui<'_> {
     }
 }
 
+pub fn mode_tab(spec: &Spec) -> Option<Rect> {
+    match spec.name {
+        "ML Chorus" => Some(Rect::new(321.,251.,165.,26.)),
+        "ML Multiband Delay" => Some(Rect::new(14.,646.,165.,26.)),
+        _ => None,
+    }
+}
+pub fn draw_mode(c:&mut Canvas, rect:Rect, advanced:bool) {
+    for (i,label) in ["Normal","Advanced"].iter().enumerate() {
+        let r=Rect::new(rect.x+i as f32*rect.w*0.5,rect.y,rect.w*0.5,rect.h);
+        lemon::editor_mode_tab(c, r, label, (i == 1) == advanced);
+    }
+}
+pub fn normal(spec:&Spec,c:&mut Canvas,t:&Palette,m:&dyn Model,st:&ViewState)->Vec<Hit>{
+    c.begin_frame(None);
+    c.clear(plug::BG);
+    let mut ui=Ui{c,t,m,st,hits:Vec::new()};
+    let chorus=spec.name=="ML Chorus";
+    let groups:&[(&str,&[(&str,&str)])]=if chorus {
+        &[("CHORUS",&[("depth","Depth"),("speed1","Rate"),("stereo","Stereo"),("delay","Delay")])]
+    }else{
+        &[("BALANCE",&[("low_level","Low"),("mid_level","Mid"),("high_level","High"),("mix","Mix")]),
+          ("FEEDBACK",&[("low_feedback","Low"),("mid_feedback","Mid"),("high_feedback","High")])]
+    };
+    for (row,(name,knobs)) in groups.iter().enumerate(){
+        let y=32.+row as f32*225.;
+        let width=spec.size.0 as f32-24.;
+        lemon::plug_panel(ui.c,Rect::new(12.,y,width,if chorus{175.}else{200.}));
+        ui.c.text(Font::new(14).bold(),26.,y+12.,brand::MAIN,name);
+        for (i,(id,label)) in knobs.iter().enumerate() {
+            let x=12.+width*(i as f32+0.5)/knobs.len() as f32;
+            knob(&mut ui,id,x,y+92.,27.,label,false);
+            ui.c.text_center(VALUE,Rect::new(x-52.,y+144.,104.,20.),plug::DIM,&m.text(id));
+        }
+    }
+    ui.hits
+}
 /// The settings shown (the first `n` of `MAX`).
 pub fn values(spec: &Spec, m: &dyn Model) -> [i32; MAX] {
     std::array::from_fn(|k| spec.settings.get(k).map_or(0, |s| m.plain(s.id).round() as i32))
@@ -126,7 +160,11 @@ pub fn paint(spec: &Spec, c: &mut Canvas, t: &Palette, m: &dyn Model, st: &ViewS
             heading(&mut ui, card.x0, card.x1, card.y0 - 12.0, card.heading);
         }
     }
+    let studio_visible = spec.studio_settings != 0 && os_plugkit::visibility::stock_dsp_controls();
     for control in spec.controls {
+        if !studio_visible && spec.index(control.id()).is_some_and(|k| k >= spec.legacy_settings()) {
+            continue;
+        }
         match *control {
             Control::Knob { id, cx, cy, r, caption, bipolar } => knob(&mut ui, id, cx, cy, r, caption, bipolar),
             Control::Choice { id, x, top, names } => {
@@ -139,10 +177,6 @@ pub fn paint(spec: &Spec, c: &mut Canvas, t: &Palette, m: &dyn Model, st: &ViewS
                 shape(&mut ui, id, cx, cy, range);
             }
             Control::Tile { id, x0, y0, x1, y1, caption } => tile(&mut ui, id, Rect::span(x0, x1, y0, y1), caption),
-            Control::Text { id, x0, y0, x1, y1, show, .. } => {
-                let (text, status) = show(&st.raw);
-                text_field(&mut ui, id, Rect::span(x0, x1, y0, y1), &text, &status);
-            }
         }
     }
     if let Some(d) = &spec.display {
@@ -297,23 +331,11 @@ fn tile(ui: &mut Ui, id: &str, r: Rect, caption: &str) {
     ui.hit(hr, target);
 }
 
-/// A text field: the text in a field (clipped at its right end), the status under it in the caption's grey. A click
-/// types the text in.
-fn text_field(ui: &mut Ui, id: &str, r: Rect, text: &str, status: &str) {
-    let target = Target::Text(id.into());
-    let st = ui.state(r, &target);
-    lemon::field(ui.c, r, st);
-    let vh = ui.c.line_height(VALUE);
-    ui.c.text_clip(VALUE, r.x + 8.0, (r.cy() - vh / 2.0).round(), r.w - 16.0, brand::TEXT, text);
-    ui.c.text_clip(LABEL, r.x + 2.0, r.bottom() + 7.0, r.w - 4.0, plug::DIM, status);
-    ui.hit(r, target);
-}
-
-/// The wordmark (as Lemon Delay's): the lemon mark and "LEMON" in lemon beside the effect's name in large grey
+/// The wordmark (as Lemon Delay's): the lemon mark and "ML" in lemon beside the effect's name in large grey
 /// capitals, or LEMON over the name (`stacked`), placed by the spec's [`Mark`]; returns where it is.
 fn logo(ui: &mut Ui, spec: &Spec) -> Rect {
     let Mark { x, y, anchor, stacked } = spec.mark;
-    let ws = lemon::spaced_width(ui.c, MARK_SMALL, "LEMON", 2.5);
+    let ws = lemon::spaced_width(ui.c, MARK_SMALL, "ML", 2.5);
     let (lh_b, lh_s) = (ui.c.line_height(MARK_BIG), ui.c.line_height(MARK_SMALL));
     if stacked {
         // The mark and LEMON centred over the name.
@@ -322,7 +344,7 @@ fn logo(ui: &mut Ui, spec: &Spec) -> Rect {
         let left = (x - w * anchor).round();
         let lx = (left + (w - wl) / 2.0).round();
         lemon::lemon_mark(ui.c, lx + 5.0, y + lh_s / 2.0, 4.0, brand::MAIN);
-        lemon::spaced(ui.c, MARK_SMALL, lx + 14.0, y, brand::MAIN, "LEMON", 2.5);
+        lemon::spaced(ui.c, MARK_SMALL, lx + 14.0, y, brand::MAIN, "ML", 2.5);
         lemon::spaced(ui.c, MARK_BIG, (left + (w - wn) / 2.0).round(), y + lh_s - 2.0, plug::WORDMARK, spec.word, 2.0);
         let r = Rect::span(left - 2.0, left + w + 2.0, y - 2.0, y + lh_s + lh_b - 2.0);
         ui.hit(r, Target::Logo);
@@ -335,7 +357,7 @@ fn logo(ui: &mut Ui, spec: &Spec) -> Rect {
     let bx = (right - wb).round();
     lemon::spaced(ui.c, MARK_BIG, bx, (y - lh_b / 2.0).round(), plug::WORDMARK, spec.word, 2.0);
     let sx = (bx - 8.0 - ws).round();
-    lemon::spaced(ui.c, MARK_SMALL, sx, (y - lh_s / 2.0).round() + 1.0, brand::MAIN, "LEMON", 2.5);
+    lemon::spaced(ui.c, MARK_SMALL, sx, (y - lh_s / 2.0).round() + 1.0, brand::MAIN, "ML", 2.5);
     lemon::lemon_mark(ui.c, left + 5.0, y, 4.0, brand::MAIN);
     let r = Rect::span(left - 2.0, right, y - 12.0, y + 12.0);
     ui.hit(r, Target::Logo);

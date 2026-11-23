@@ -8,11 +8,15 @@
 //! Text uses the bundled Cuprum face (see `text`).
 // spec: ui/main-window.md §10 (typography)
 
+mod bloom;
+pub use stock_pixels::stock_pixels;
+mod stock_pixels;
 mod cache;
 mod glyph;
 pub mod kit;
 pub mod tabler;
 mod text;
+mod text_layer;
 
 use std::hash::Hasher;
 use std::rc::Rc;
@@ -21,7 +25,55 @@ use cache::{Fx, Lru};
 pub use os_theme::Color;
 pub use glyph::{path_data, Glyph};
 pub use text::{font_count, Face, Font};
+pub mod icon_packs;
 use tiny_skia::{FillRule, LineCap, Paint, PathBuilder, Pixmap, PremultipliedColorU8, Stroke, Transform};
+
+/// Transparent control art with a bounded device-size cache.
+pub struct Sprite {
+    source: Pixmap,
+    sizes: std::cell::RefCell<Vec<(Option<Color>, Pixmap)>>,
+}
+
+impl Sprite {
+    const PIXELS: usize = 1_048_576;
+
+    pub fn png(bytes: &[u8]) -> Option<Self> {
+        let header = bytes.get(..24)?;
+        if !header.starts_with(b"\x89PNG\r\n\x1a\n") || &header[12..16] != b"IHDR" { return None; }
+        let w = u32::from_be_bytes(header[16..20].try_into().ok()?);
+        let h = u32::from_be_bytes(header[20..24].try_into().ok()?);
+        if !(1..=512).contains(&w) || !(1..=512).contains(&h) { return None; }
+        let source = Pixmap::decode_png(bytes).ok()?;
+        Some(Self { source, sizes: Default::default() })
+    }
+
+    fn with_size(&self, w: u32, h: u32, matte: Option<Color>, paint: impl FnOnce(&Pixmap)) {
+        if matte.is_none() && (w, h) == (self.source.width(), self.source.height()) {
+            paint(&self.source);
+            return;
+        }
+        let mut sizes = self.sizes.borrow_mut();
+        if let Some(i) = sizes.iter().position(|(base, p)| *base == matte && (p.width(), p.height()) == (w, h)) {
+            let entry = sizes.remove(i);
+            paint(&entry.1);
+            sizes.push(entry);
+            return;
+        }
+        let Some(mut pixmap) = Pixmap::new(w, h) else { return };
+        if let Some(color) = matte {
+            pixmap.fill(tiny_skia::Color::from_rgba8(color.r, color.g, color.b, 255));
+        }
+        let filter = tiny_skia::PixmapPaint { quality: tiny_skia::FilterQuality::Bilinear, ..Default::default() };
+        pixmap.draw_pixmap(0, 0, self.source.as_ref(), &filter,
+            Transform::from_scale(w as f32 / self.source.width() as f32, h as f32 / self.source.height() as f32), None);
+        while sizes.len() >= 8 || sizes.iter().map(|(_, p)| p.data().len() / 4).sum::<usize>() + w as usize * h as usize > Self::PIXELS {
+            sizes.remove(0);
+        }
+        paint(&pixmap);
+        sizes.push((matte, pixmap));
+    }
+}
+
 
 /// An axis-aligned rectangle in logical pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -77,10 +129,31 @@ impl Rect {
 }
 
 /// The frame being painted.
+#[derive(Clone, Copy)]
+pub enum ChromeIcon { Left, Right, Up, Down, Check, Close }
+
+type ChromeArt = fn(&mut Canvas, ChromeIcon, Rect, Color) -> bool;
+
 pub struct Canvas {
     pub pixmap: Pixmap,
     pub scale: f32,
     text: text::TextEngine,
+    icon_pack: u8,
+    icon_color: Option<Color>,
+    icon_variants: [[u8; 16]; 5],
+    stock_editor: Option<os_theme::design::StockEditorLook>,
+    neon_text: text_layer::TextLayer,
+    pub neon_3036: bool,
+    /// Percentage of the original 3036 edge light and bloom.
+    pub neon_glow_percent: u8,
+    /// Diffusion around the core. Zero leaves the surrounding pixels clear.
+    pub neon_spread: u8,
+    pub neon_structure: Option<Color>,
+    pub neon_background: os_theme::design::NeonBackground,
+    icon_mixing: bool,
+    icon_colors: [[Option<Color>; 16]; 5],
+    cursor_glyphs: bool,
+    chrome_art: Option<ChromeArt>,
     clips: Vec<Rect>,
     /// The frame's damage region as disjoint device rects (x0, y0, x1, y1); empty = the whole canvas.
     region: Vec<(i32, i32, i32, i32)>,
@@ -151,6 +224,20 @@ impl Canvas {
             pixmap: Pixmap::new(width.max(1), height.max(1)).ok_or("bad canvas size")?,
             scale,
             text: text::TextEngine::new()?,
+            icon_pack: 0,
+            icon_color: None,
+            icon_variants: [[0; 16]; 5],
+            stock_editor: None,
+            neon_text: text_layer::TextLayer::default(),
+            neon_3036: false,
+            neon_glow_percent: 125,
+            neon_spread: 0,
+            neon_structure: None,
+            neon_background: Default::default(),
+            icon_mixing: false,
+            icon_colors: [[None; 16]; 5],
+            cursor_glyphs: false,
+            chrome_art: None,
             clips: Vec::new(),
             region: Vec::new(),
             cover: None,
@@ -164,6 +251,7 @@ impl Canvas {
     pub fn resize(&mut self, width: u32, height: u32, scale: f32) {
         if let Some(p) = Pixmap::new(width.max(1), height.max(1)) {
             self.pixmap = p;
+            self.neon_text.pixels.clear();
         }
         if scale != self.scale {
             // Cached coverage is per scale: entries for the old one would only wait to be evicted.
@@ -468,6 +556,7 @@ impl Canvas {
                 self.clips.clear();
                 self.region.clear();
                 self.cover = None;
+                self.neon_text.pixels.clear();
             }
         }
     }
@@ -539,6 +628,9 @@ impl Canvas {
         let area = shift_area(r, self.scale, size);
         let keep: Vec<_> = keep.iter().map(|k| keep_area(*k, self.scale, size)).collect();
         shift_pixels(self.pixmap.pixels_mut(), size.0 as usize, area, dx, dy, &keep);
+        if !self.neon_text.pixels.is_empty() {
+            shift_pixels(&mut self.neon_text.pixels, size.0 as usize, area, dx, dy, &keep);
+        }
     }
 
     /// Logical bounds of what drawing can reach now (the clip cut by the frame's region), or None: views cull work
@@ -626,6 +718,11 @@ impl Canvas {
         let span = (ry1 - ry0).max(1) as f32;
         let flat = top == bottom;
         let (x0, x1) = (x0 as usize, x1 as usize);
+        if top.a == 255 && bottom.a == 255 && !self.neon_text.pixels.is_empty() {
+            for y in y0 as usize..y1 as usize {
+                self.neon_text.pixels[y * pw + x0..y * pw + x1].fill(Default::default());
+            }
+        }
         let data = self.pixmap.data_mut();
         // SAFETY: a u32 view of whole RGBA pixels; `align_to_mut` hands back any unaligned head, and the pixmap's
         // allocation is aligned in practice (the byte path below covers it otherwise).
@@ -743,8 +840,39 @@ impl Canvas {
         }
     }
 
+    /// Pixel-aligned flat faces with identical antialiasing at mirrored corners.
+    /// Opt-in for adjacent track headers; other rounded controls retain their styling.
+    pub fn fill_rrect_matched(&mut self, r: Rect, radius: f32, c: Color) {
+        let Some(bounds)=tiny_skia::Rect::from_xywh(r.x,r.y,r.w,r.h)else{return;};
+        if self.outside(bounds,1.) {return;}
+        let k=self.scale;
+        let (x0,y0,x1,y1)=((r.x*k).round() as i32,(r.y*k).round() as i32,(r.right()*k).round() as i32,(r.bottom()*k).round() as i32);
+        let (w,h)=(x1-x0,y1-y0);
+        if w<=0||h<=0{return;}
+        let rad=(radius*k).max(0.).min(w as f32/2.).min(h as f32/2.);
+        if rad==0. {self.fill_px((x0,x1),(y0,y1),c,c);return;}
+        if i64::from(w)*i64::from(h)>BIG_SHAPE {self.fill_rect_gradient(r,c,c,radius);return;}
+        let mut hs=Fx::default();hs.f32(k);hs.write_u8(3);hs.write_i32(w);hs.write_i32(h);hs.f32(rad);
+        let key=hs.finish();
+        let cov=if let Some(cov)=self.shapes.get(key){cov.clone()}else{
+            let Some(path)=rrect_path(Rect::new(0.,0.,w as f32,h as f32),rad)else{return;};
+            let Some(mut pm)=Pixmap::new(w as u32,h as u32)else{return;};
+            pm.fill_path(&path,&paint(Color::rgb(0xffffff)),FillRule::Winding,Transform::identity(),None);
+            // A scan converter can give opposite curve directions slightly different
+            // coverage. Reuse the top-left quadrant for all four corners, once per
+            // size/radius in the existing bounded shape cache, independent of damage.
+            let mut a=vec![0;(w*h) as usize];
+            for y in 0..(h+1)/2 {for x in 0..(w+1)/2 {
+                let alpha=pm.pixels()[(y*w+x) as usize].alpha();
+                for (xx,yy) in [(x,y),(w-1-x,y),(x,h-1-y),(w-1-x,h-1-y)]{a[(yy*w+xx) as usize]=alpha;}
+            }}
+            let cov=Rc::new(Coverage{w,h,a});self.shapes.insert(key,cov.clone(),cov.a.len()+64);cov
+        };
+        self.blend(&Placed{x0,y0,cov},c,None);
+    }
+
     pub fn stroke_rrect(&mut self, r: Rect, radius: f32, width: f32, c: Color) {
-        if radius <= 2.5 && c.a == 255 && (r.w > 40.0 || r.h > 40.0) {
+        if radius <= 0.0 && c.a == 255 && (r.w > 40.0 || r.h > 40.0) {
             // Square-cornered outline from four native rects.
             self.fill_rect(Rect::new(r.x, r.y, r.w, width), c);
             self.fill_rect(Rect::new(r.x, r.bottom() - width, r.w, width), c);
@@ -753,7 +881,7 @@ impl Canvas {
             return;
         }
         let r = r.inset(width / 2.0);
-        if let Some(path) = rrect_path(r, radius) {
+        if let Some(path) = rrect_path(r, (radius - width / 2.0).max(0.0)) {
             self.stroke(&path, width, c);
         }
     }
@@ -771,6 +899,17 @@ impl Canvas {
     pub fn polyline(&mut self, pts: &[(f32, f32)], width: f32, c: Color) {
         if let Some(path) = poly_path(pts, false) {
             self.stroke(&path, width, c);
+        }
+    }
+
+    /// A continuous line with rounded ends and joins, including at steep bends.
+    pub fn rounded_polyline(&mut self, pts: &[(f32, f32)], width: f32, c: Color) {
+        if let Some(path) = poly_path(pts, false) {
+            let stroke = Stroke {
+                width, line_cap: tiny_skia::LineCap::Round, line_join: tiny_skia::LineJoin::Round,
+                ..Stroke::default()
+            };
+            self.stroke_with(&path, &stroke, c);
         }
     }
 
@@ -838,11 +977,14 @@ impl Canvas {
     }
 
     pub fn stroke(&mut self, path: &tiny_skia::Path, width: f32, c: Color) {
-        if self.outside(path.bounds(), width + 1.0) {
+        self.stroke_with(path, &Stroke { width, ..Stroke::default() }, c);
+    }
+
+    fn stroke_with(&mut self, path: &tiny_skia::Path, stroke: &Stroke, c: Color) {
+        if self.outside(path.bounds(), stroke.width + 1.0) {
             return;
         }
-        let s = Stroke { width, ..Stroke::default() };
-        if let Some(cov) = self.coverage(path, Some(&s)) {
+        if let Some(cov) = self.coverage(path, Some(stroke)) {
             self.blend(&cov, c, None);
         }
     }
@@ -862,6 +1004,26 @@ impl Canvas {
         self.text.metrics(f, self.scale).1 as f32 / self.scale
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn draw_text(&mut self, clip: text::ClipPx, f: Font, x: i32, y: i32, w: i32, h: i32, c: Color, s: &str, vertical: bool) {
+        let (x0, y0, x1, y1) = if vertical { (x - h, y - w - h, x + 2 * h, y + h) }
+            else { (x - h, y - h, x + w + h, y + 2 * h) };
+        let bounds = (x0.max(clip.0), y0.max(clip.1), x1.min(clip.2), y1.min(clip.3));
+        self.mark(bounds.0, bounds.1, bounds.2, bounds.3);
+        let track = self.neon_3036 && self.stock_editor.is_none() && !s.is_empty() && c.a != 0
+            && bounds.0 < bounds.2 && bounds.1 < bounds.3;
+        let stride = self.pixmap.width() as usize;
+        if track {
+            self.neon_text.capture(self.pixmap.data().as_chunks::<4>().0, stride, bounds);
+        }
+        #[cfg(windows)]
+        self.text.set_grayscale(self.neon_3036);
+        self.text.draw(&mut self.pixmap, clip, f, self.scale, x, y, c, s, vertical);
+        if track {
+            self.neon_text.record(self.pixmap.data().as_chunks::<4>().0, stride, bounds, c);
+        }
+    }
+
     /// Draw `s` with its text cell's top-left at (x, y). Returns the advance width.
     pub fn text(&mut self, f: Font, x: f32, y: f32, c: Color, s: &str) -> f32 {
         let k = self.scale;
@@ -872,9 +1034,7 @@ impl Canvas {
             if clip.0 >= clip.2 || clip.1 >= clip.3 || xi > clip.2 || yi > clip.3 || xi + w + 8 < clip.0 || yi + h + 4 < clip.1 {
                 continue;
             }
-            // Glyphs overhang their cell (italics, descenders, ClearType fringes): mark generously.
-            self.mark((xi - h).max(clip.0), (yi - h).max(clip.1), (xi + w + h).min(clip.2), (yi + 2 * h).min(clip.3));
-            self.text.draw(&mut self.pixmap, clip, f, k, xi, yi, c, s, false);
+            self.draw_text(clip, f, xi, yi, w, h, c, s, false);
         }
         w as f32 / k
     }
@@ -929,29 +1089,142 @@ impl Canvas {
             if clip.0 >= clip.2 || clip.1 >= clip.3 || xi > clip.2 || xi + h + 4 < clip.0 || yi + 4 < clip.1 || yi - w - 4 > clip.3 {
                 continue;
             }
-            self.mark((xi - h).max(clip.0), (yi - w - h).max(clip.1), (xi + 2 * h).min(clip.2), (yi + h).min(clip.3));
-            self.text.draw(&mut self.pixmap, clip, f, k, xi, yi, c, s, true);
+            self.draw_text(clip, f, xi, yi, w, h, c, s, true);
         }
         w as f32 / k
     }
+
+    pub fn icon_styling(&self, color: Color, width: f32) -> (Color, f32) {
+        (icon_packs::ink(self.icon_pack, color), width * icon_packs::get(self.icon_pack).weight)
+    }
+
+    pub fn icon_pack(&self) -> u8 { self.icon_pack }
+
+    pub fn set_chrome_art(&mut self, art: ChromeArt) {
+        self.chrome_art = Some(art);
+    }
+
+    pub fn chrome_icon(&mut self, icon: ChromeIcon, r: Rect, color: Color) -> bool {
+        let Some(lookup) = self.chrome_art else { return false };
+        lookup(self, icon, r, color)
+    }
+
+    /// Draw a pack's authored artwork using the same cache as other icons.
+    pub fn art_icon(&mut self, icon: &tabler::TablerIcon, r: Rect, color: Color) {
+        let weight = icon_packs::get(self.icon_pack).weight;
+        let stroke = (!icon.filled).then_some(((r.w.min(r.h) / 24.0) * 1.75 * weight).max(0.9));
+        let ink = if self.cursor_glyphs { color } else {
+            self.icon_color.map(|ink| ink.with_alpha(color.a)).unwrap_or_else(|| icon_packs::ink(self.icon_pack, color))
+        };
+        self.tabler(icon, r, ink, stroke);
+    }
+
+    pub fn set_icon_color(&mut self, color: Option<Color>) { self.icon_color = color; }
+    pub fn icon_color(&self) -> Option<Color> { self.icon_color }
+    pub fn set_icon_overrides(&mut self, appearance: os_theme::appearance::Appearance) {
+        self.icon_variants = appearance.icon_variants;
+        self.icon_mixing = appearance.icon_mixing;
+        self.icon_colors = appearance.icon_colors;
+    }
+    pub fn icon_override(&self, role: usize) -> (u8, Option<Color>) {
+        // Legacy themes sometimes retained hidden overrides when set to Default.
+        // Only a new explicit individual edit enables those on the Default base.
+        if self.icon_pack == 0 && !self.icon_mixing { return (0, None); }
+        (self.icon_variants[role / 16][role % 16], self.icon_colors[role / 16][role % 16])
+    }
+
+    pub fn set_icon_pack(&mut self, id: u8, cursor: bool) {
+        self.icon_pack = if usize::from(id) < icon_packs::PACKS.len() { id } else { 0 };
+        self.cursor_glyphs = cursor;
+    }
+
+    pub fn mute_theme_font(&mut self, muted: bool) { self.text.mute_theme_font(muted); }
+
+    pub fn set_theme_font(&mut self, id: u8, data: Option<std::sync::Arc<[u8]>>) {
+        self.text.set_theme_font(id, data);
+    }
+
+    pub fn valid_theme_font(bytes: &[u8]) -> bool { text::TextEngine::valid_theme_font(bytes) }
 
     /// Draw a Tabler icon (24-unit grid) centred in `r`, scaled to the shorter side, in color `c`.
     pub fn icon(&mut self, icon: &tabler::TablerIcon, r: Rect, c: Color) {
         let k = r.w.min(r.h) / 24.0;
         let stroke = if icon.filled { None } else { Some((2.0 * k).max(1.1)) };
-        self.tabler(icon, r, c, stroke);
+        self.packed_icon(icon, r, c, stroke);
     }
 
     /// An outline Tabler icon like `icon`, stroked `width` logical px wide whatever its size (small, bold glyphs).
     pub fn icon_stroke(&mut self, icon: &tabler::TablerIcon, r: Rect, c: Color, width: f32) {
-        self.tabler(icon, r, c, (!icon.filled).then_some(width));
+        self.packed_icon(icon, r, c, (!icon.filled).then_some(width));
+    }
+
+    fn packed_icon(&mut self, icon: &tabler::TablerIcon, r: Rect, c: Color, stroke: Option<f32>) {
+        if self.icon_pack == 0 {
+            return self.tabler(icon, r, c, stroke);
+        }
+        if !self.visible(r.outset(2.0)) { return; }
+        let pack = icon_packs::get(self.icon_pack);
+        let stroke = stroke.map(|w| w * pack.weight);
+        if self.cursor_glyphs {
+            return self.tabler(icon, r, c, stroke);
+        }
+        let side = r.w.min(r.h);
+        let box_ = Rect::new(r.cx() - side*0.5, r.cy() - side*0.5, side, side);
+        let ink = icon_packs::ink(self.icon_pack, c);
+        if side >= 10.0 {
+            let dim = ink.with_alpha((f32::from(c.a) * 0.28) as u8);
+            match pack.badge {
+                1 => self.stroke_rrect(box_.inset(1.0), 0.0, 0.7, dim),
+                2 => {
+                    self.fill_rrect(box_.inset(0.5), 2.0, dim.with_alpha(c.a / 8));
+                    self.stroke_rrect(box_.inset(0.5), 2.0, 1.0, dim);
+                }
+                3 => self.stroke_circle(r.cx(), r.cy(), side*0.46, 0.8, dim),
+                4 => self.fill_rect(Rect::new(box_.x + 2.0, box_.bottom() - 1.5, side - 4.0, 1.0), dim),
+                5 => {
+                    for (x,y,dx,dy) in [
+                        (box_.x,box_.y,1.0,1.0),(box_.right(),box_.y,-1.0,1.0),
+                        (box_.x,box_.bottom(),1.0,-1.0),(box_.right(),box_.bottom(),-1.0,-1.0),
+                    ] {
+                        self.line(x,y,x+dx*side*0.21,y,0.7,dim);
+                        self.line(x,y,x,y+dy*side*0.21,0.7,dim);
+                    }
+                }
+                6 => self.fill_circle(r.cx(), r.cy(), side*0.47, dim.with_alpha(c.a / 7)),
+                _ => {}
+            }
+        }
+        let size = side * pack.scale;
+        let glyph = Rect::new(r.cx()-size*0.5, r.cy()-size*0.5, size, size);
+        if pack.shadow && side >= 10.0 {
+            let shadow = Rect::new(glyph.x, glyph.y+0.85, glyph.w, glyph.h);
+            self.tabler(icon, shadow, Color::rgb(0).with_alpha(c.a/2), stroke);
+        }
+        self.tabler(icon, glyph, ink, stroke);
+    }
+
+    /// Additional light painted around individual controls follows the diffusion setting too.
+    pub fn neon_glow_alpha(&self, alpha:u8) -> u8 {
+        let strength = u32::from(self.neon_glow_percent.min(125));
+        let spread = u32::from(self.neon_spread.min(100));
+        (u32::from(alpha) * strength * spread / 25_000) as u8
     }
 
     /// A Tabler icon fitted into `r`; its coverage is cached by icon, box, stroke and scale (parsing and
     /// rasterizing it again every frame was most of the cost of drawing an icon).
     fn tabler(&mut self, icon: &tabler::TablerIcon, r: Rect, c: Color, stroke: Option<f32>) {
+        if self.neon_3036 && self.neon_spread > 0 && !self.cursor_glyphs && self.visible(r.outset(3.0)) {
+            let width = stroke.unwrap_or(1.);
+            self.tabler_layer(icon, r, c.with_alpha(self.neon_glow_alpha(c.a / 11)), Some(width + 3.));
+            self.tabler_layer(icon, r, c.with_alpha(self.neon_glow_alpha(c.a / 5)), Some(width + 1.4));
+        }
+        self.tabler_layer(icon, r, c, stroke);
+    }
+
+    fn tabler_layer(&mut self, icon: &tabler::TablerIcon, r: Rect, c: Color, stroke: Option<f32>) {
         let mut h = Fx::default();
         h.write_u8(4);
+        h.write_u8(self.icon_pack);
         h.write_usize(icon.d.as_ptr() as usize);
         h.write_usize(icon.d.len());
         for v in [r.x, r.y, r.w, r.h, self.scale, stroke.unwrap_or(-1.0)] {
@@ -969,7 +1242,7 @@ impl Canvas {
         let k = r.w.min(r.h) / 24.0;
         let (ox, oy) = (r.cx() - 12.0 * k, r.cy() - 12.0 * k);
         let mut g = Glyph::new();
-        g.round_caps = true;
+        g.round_caps = icon_packs::get(self.icon_pack).round;
         g.commands(icon.d, ox, oy, k, stroke);
         if let Some(cov) = self.glyph_coverage(&g) {
             self.glyphs.insert(key, cov.clone(), cov.cov.len() * 3 + 64);
@@ -979,6 +1252,7 @@ impl Canvas {
 
     /// Draw an icon glyph with subpixel (ClearType-style) coverage in color `c`.
     pub fn glyph(&mut self, c: Color, g: &Glyph) {
+        let c = if self.cursor_glyphs { c } else { icon_packs::ink(self.icon_pack, c) };
         let mut h = Fx::default();
         h.write_u8(3);
         h.f32(self.scale);
@@ -1043,8 +1317,15 @@ impl Canvas {
                 if *cv == [0, 0, 0] {
                     continue;
                 }
+                // Give small icon glyphs the same single coverage mask as stock editor text.
+                let coverage = if self.stock_editor.is_some() {
+                    let gray = (u16::from(cv[0]) + 2 * u16::from(cv[1]) + u16::from(cv[2]) + 2) / 4;
+                    [gray as u8; 3]
+                } else {
+                    *cv
+                };
                 for ch in 0..3 {
-                    let al = u32::from(cv[ch]) * a / 255;
+                    let al = u32::from(coverage[ch]) * a / 255;
                     d[ch] = ((fg[ch] * al + u32::from(d[ch]) * (255 - al)) / 255) as u8;
                 }
             }
@@ -1061,6 +1342,57 @@ impl Canvas {
         Some((pm.width() as usize, pm.height() as usize, px.collect()))
     }
 
+    /// Paint a cached PNG sprite using the canvas' damage and viewport clips.
+    pub fn sprite(&mut self, r: Rect, sprite: &Sprite) -> bool {
+        self.blit_sprite(r, sprite, None)
+    }
+
+    /// Composite transparent art against a fixed opaque color once per size and color.
+    pub fn sprite_on_solid(&mut self, r: Rect, sprite: &Sprite, fill: Color) -> bool {
+        self.blit_sprite(r, sprite, Some(fill))
+    }
+
+    fn blit_sprite(&mut self, r: Rect, sprite: &Sprite, matte: Option<Color>) -> bool {
+        if !self.visible(r) { return true; }
+        let (x, y) = ((r.x * self.scale).round() as i32, (r.y * self.scale).round() as i32);
+        let w = (r.right() * self.scale).round() as i32 - x;
+        let h = (r.bottom() * self.scale).round() as i32 - y;
+        if w <= 0 || h <= 0 || i64::from(w) * i64::from(h) > Sprite::PIXELS as i64 {
+            return false;
+        }
+        sprite.with_size(w as u32, h as u32, matte, |pixmap| {
+            let src = pixmap.data();
+            let stride = self.pixmap.width() as usize * 4;
+            for i in 0..self.clip_count() {
+                let (x0, y0, x1, y1) = self.clip_at(i);
+                let (x0, y0, x1, y1) = (x0.max(x), y0.max(y), x1.min(x + w), y1.min(y + h));
+                if x0 >= x1 || y0 >= y1 { continue; }
+                self.mark(x0, y0, x1, y1);
+                let width = (x1 - x0) as usize * 4;
+                let dst = self.pixmap.data_mut();
+                for row in y0..y1 {
+                    let si = ((row - y) as usize * w as usize + (x0 - x) as usize) * 4;
+                    let di = row as usize * stride + x0 as usize * 4;
+                    if matte.is_some() {
+                        dst[di..di + width].copy_from_slice(&src[si..si + width]);
+                        continue;
+                    }
+                    for (from, to) in src[si..si + width].chunks_exact(4).zip(dst[di..di + width].chunks_exact_mut(4)) {
+                        let a = u16::from(from[3]);
+                        if a == 255 {
+                            to.copy_from_slice(from);
+                        } else if a != 0 {
+                            for k in 0..4 {
+                                to[k] = (u16::from(from[k]) + (u16::from(to[k]) * (255 - a) + 127) / 255).min(255) as u8;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        true
+    }
+
     /// Draws a `w` x `h` image of `0x00RRGGBB` pixels stretched over `r` (clipped). Filtered, so a picture stays smooth
     /// at any display scale: each device pixel averages the source pixels it covers when shrinking, and blends the
     /// nearest four when enlarging. Pixel for pixel, the image is copied as it is. Spec: ui/ui-scaling.md §5.
@@ -1071,6 +1403,65 @@ impl Canvas {
         for i in 0..self.clip_count() {
             let clip = self.clip_at(i);
             self.image_in(clip, r, w, h, px);
+        }
+    }
+
+    /// Accumulates an opaque, device-size image over a black destination. Callers keep total
+    /// weights at or below one. The original damage and clip boundaries still apply.
+    pub fn add_opaque_pixmap(&mut self, at: (i32, i32), pixels: &Pixmap, weight: f32) {
+        let factor = (weight.clamp(0., 1.) * 256.).round() as u16;
+        if factor == 0 { return; }
+        let width = pixels.width() as i32;
+        let height = pixels.height() as i32;
+        let dst_width = self.pixmap.width() as usize;
+        for index in 0..self.clip_count() {
+            let (left, top, right, bottom) = self.clip_at(index);
+            let (x0, y0) = (left.max(at.0), top.max(at.1));
+            let (x1, y1) = (right.min(at.0 + width), bottom.min(at.1 + height));
+            if x0 >= x1 || y0 >= y1 { continue; }
+            self.mark(x0, y0, x1, y1);
+            let dest = self.pixmap.data_mut();
+            let src = pixels.data();
+            let count = (x1 - x0) as usize * 4;
+            for y in y0..y1 {
+                let i = (y as usize * dst_width + x0 as usize) * 4;
+                let j = ((y - at.1) as usize * width as usize + (x0 - at.0) as usize) * 4;
+                for (dst, src) in dest[i..i + count].chunks_exact_mut(4).zip(src[j..j + count].chunks_exact(4)) {
+                    for channel in 0..3 { dst[channel] = dst[channel].saturating_add(((u16::from(src[channel]) * factor + 128) >> 8) as u8); }
+                }
+            }
+        }
+    }
+
+    /// Filter a straight-alpha material sprite over the current clipped surface.
+    /// Used for cached mixer materials; does not bypass damage or viewport clipping.
+    pub fn image_rgba(&mut self, r: Rect, w: usize, h: usize, px: &[u8]) {
+        if w==0 || h==0 || px.len()<w*h*4 {return;}
+        let k=self.scale;
+        for ci in 0..self.clip_count() {
+            let (cx0,cy0,cx1,cy1)=self.clip_at(ci);
+            let x0=((r.x*k).round() as i32).max(cx0);
+            let x1=((r.right()*k).round() as i32).min(cx1);
+            let y0=((r.y*k).round() as i32).max(cy0);
+            let y1=((r.bottom()*k).round() as i32).min(cy1);
+            if x0>=x1 || y0>=y1 {continue;}
+            self.mark(x0,y0,x1,y1);
+            let fx=w as f32/(r.w*k).max(1.);let fy=h as f32/(r.h*k).max(1.);
+            let xs:Vec<_>=(x0..x1).map(|x|taps(x as f32+0.5-r.x*k,fx,w)).collect();
+            let ys:Vec<_>=(y0..y1).map(|y|taps(y as f32+0.5-r.y*k,fy,h)).collect();
+            let pw=self.pixmap.width() as usize;
+            let data=self.pixmap.data_mut();
+            for (iy,ty) in ys.iter().enumerate() {for (ix,tx) in xs.iter().enumerate() {
+                let mut rgba=[0f32;4];
+                for &(sy,wy) in ty {for &(sx,wx) in tx {
+                    let off=(sy*w+sx)*4;let a=px[off+3] as f32/255.;let weight=wx*wy;
+                    for j in 0..3 {rgba[j]+=px[off+j] as f32*a*weight;}
+                    rgba[3]+=a*weight;
+                }}
+                let dest=((y0 as usize+iy)*pw+x0 as usize+ix)*4;
+                for j in 0..3 {data[dest+j]=(rgba[j]+data[dest+j] as f32*(1.-rgba[3])).round().clamp(0.,255.) as u8;}
+                data[dest+3]=(255.*rgba[3]+data[dest+3] as f32*(1.-rgba[3])).round().clamp(0.,255.) as u8;
+            }}
         }
     }
 
@@ -1132,6 +1523,10 @@ impl Canvas {
     /// Copy a device-pixel region into a larger `0x00RRGGBB` buffer (row length `out_stride`),
     /// with the canvas placed at `(ox, oy)` in it (the main window's border surrounds the canvas).
     pub fn copy_region_to_xrgb_at(&self, out: &mut [u32], out_stride: usize, (x, y, w, h): (usize, usize, usize, usize), (ox, oy): (usize, usize)) {
+        if self.neon_3036 {
+            bloom::present(self,out,out_stride,(x,y,w,h),(ox,oy));
+            return;
+        }
         let stride = self.pixmap.width() as usize;
         let data = self.pixmap.data();
         // SAFETY: a u32 view of whole RGBA pixels; an unaligned head (not expected) takes the per-byte path.
@@ -1152,11 +1547,57 @@ impl Canvas {
         }
     }
 
+    pub fn light_damage(&self, area:(usize,usize,usize,usize)) -> (usize,usize,usize,usize) {
+        bloom::influence(self,area)
+    }
+
+    /// The displayed color of a solid UI surface, for choosing a readable foreground.
+    /// Lighting from nearby controls depends on position and is excluded.
+    pub fn presented_flat_surface(&self, color: Color) -> Color {
+        if self.neon_3036 && self.stock_editor.is_none() {
+            bloom::flat_surface(self, color)
+        } else {
+            color
+        }
+    }
+
+    /// Capture the same displayed pixels as a native window.
+    pub fn save_presented_png(&self,path:impl AsRef<std::path::Path>) -> std::io::Result<()> {
+        if !self.neon_3036 {return self.pixmap.save_png(path).map_err(std::io::Error::other);}
+        let mut image=self.pixmap.clone();
+        let mut rgb=vec![0;image.pixels().len()];
+        self.copy_to_xrgb(&mut rgb);
+        for (p,v) in image.data_mut().as_chunks_mut::<4>().0.iter_mut().zip(rgb) {
+            *p=[(v>>16) as u8,(v>>8) as u8,v as u8,255];
+        }
+        image.save_png(path).map_err(std::io::Error::other)
+    }
+
+    /// Called only by stock editor windows, including their menus. Return true when an idle
+    /// or cached editor must repaint. The authored pixels and hit rectangles stay intact.
+    pub fn sync_stock_editor_theme(&mut self) -> bool {
+        self.set_stock_editor_look(os_theme::stock_editor_look())
+    }
+
+    fn set_stock_editor_look(&mut self, look: Option<os_theme::design::StockEditorLook>) -> bool {
+        if self.stock_editor == look {
+            return false;
+        }
+        self.stock_editor = look;
+        self.neon_3036 = look.is_some();
+        if let Some(look) = look {
+            self.neon_glow_percent = look.glow;
+            self.neon_spread = look.spread;
+            self.neon_structure = Some(look.inks[1]);
+            self.neon_background = look.background;
+        }
+        true
+    }
+
+
     /// Copy the frame into a `0x00RRGGBB` buffer (softbuffer's format).
     pub fn copy_to_xrgb(&self, out: &mut [u32]) {
-        for (o, p) in out.iter_mut().zip(self.pixmap.data().chunks_exact(4)) {
-            *o = (u32::from(p[0]) << 16) | (u32::from(p[1]) << 8) | u32::from(p[2]);
-        }
+        self.copy_region_to_xrgb(out,(0,0,self.pixmap.width() as usize,self.pixmap.height() as usize));
     }
 }
 
@@ -1771,6 +2212,25 @@ mod tests {
         assert!(c.pixmap.pixels().iter().any(|p| p.red() > 20 && p.red() < 235), "linear when enlarging");
     }
 
+    #[test]
+    fn material_alpha_filter_preserves_background_and_damage_clip() {
+        let mut c=Canvas::new(4,2,1.).unwrap();
+        c.clear(Color::rgb(0x0000ff));
+        let rgba=[255,0,0,0, 255,255,255,255];
+        c.push_clip(Rect::new(1.,0.,2.,2.));
+        c.image_rgba(Rect::new(0.,0.,4.,2.),2,1,&rgba);
+        c.pop_clip();
+        let px=c.pixmap.pixels();
+        assert_eq!((px[0].red(),px[0].blue()),(0,255));
+        assert_eq!((px[3].red(),px[3].blue()),(0,255));
+        assert!(px[1].red()>0 && px[1].red()<255);
+        assert_eq!(px[1].blue(),255,"transparent red must not fringe the white material");
+        c.clear(Color::rgb(0x0000ff));
+        c.image_rgba(Rect::new(0.,0.,1.,1.),2,1,&rgba);
+        let p=c.pixmap.pixels()[0];
+        assert!((127..=128).contains(&p.red()) && p.blue()==255,"downsampling composites alpha before filtering");
+    }
+
     /// `resample` is `image`'s filter into a buffer: the same size copies, half size averages pairs.
     #[test]
     fn resample_filters_like_image() {
@@ -1782,6 +2242,32 @@ mod tests {
     }
 
     #[test]
+    fn rounded_outlines_keep_their_corners_and_stay_inside_bounds() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let mut c = Canvas::new(240, 100, scale).unwrap();
+            c.clear(Color::rgb(0));
+            // Widths on both sides of the old square-corner fast path threshold.
+            for w in [30.0, 64.0] {
+                let r = Rect::new(8.0, 8.0, w, 24.0);
+                c.clear(Color::rgb(0));
+                c.stroke_rrect(r, 2.5, 1.0, Color::rgb(0xffffff));
+                let x = (r.x * scale) as usize;
+                let y = (r.y * scale) as usize;
+                let px = c.pixmap.pixels();
+                assert!(px[y * 240 + x].red() < 128, "rounded outer corner at {scale}, {w}");
+                assert!(px[y * 240 + x + (10.0 * scale) as usize].red() > 200);
+                for yy in 0..100usize {
+                    for xx in 0..240usize {
+                        if xx < x || yy < y || xx >= (r.right()*scale).ceil() as usize || yy >= (r.bottom()*scale).ceil() as usize {
+                            assert_eq!(px[yy*240+xx].red(), 0, "outline escapes at {scale}, {xx}, {yy}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn paints_text_and_shapes() {
         let Ok(mut c) = Canvas::new(200, 50, 1.0) else { return }; // no system font: skip
         c.clear(Color::rgb(0x000000));
@@ -1789,5 +2275,78 @@ mod tests {
         let w = c.text(Font::new(14), 40.0, 10.0, Color::rgb(0xffffff), "Lemon Studio");
         assert!(w > 40.0);
         assert!(c.pixmap.data().chunks_exact(4).any(|p| p[0] > 200 && p[1] > 200));
+    }
+
+    #[test]
+    fn neon_lettering_keeps_coverage_and_never_emits_light() {
+        let w = 420;
+        let h = 104;
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let mut canvas = Canvas::new(w, h, scale).unwrap();
+            canvas.neon_3036 = true;
+            canvas.set_theme_font(2, None);
+            canvas.clear(Color::rgb(0x190a21));
+            let track = Rect::new(102.0, 6.0, 87.0, 39.0);
+            canvas.fill_rect(track, Color::rgb(0xbb615e));
+            canvas.fill_rect(Rect::new(7.0, 5.0, 83.0, 1.0), Color::rgb(0x37ffea));
+            let gray = Color::rgb(0x787878);
+            canvas.fill_rect(Rect::new(99.0, 47.0, 22.0, 17.0), gray);
+            let present = |c: &Canvas| {
+                let mut out = vec![0; (w * h) as usize];
+                c.copy_to_xrgb(&mut out);
+                out
+            };
+            let plain = canvas.pixmap.clone();
+            let unlit_background = present(&canvas);
+            let [x, y] = [110.0f32, 49.0].map(|p| (p * scale).round() as usize);
+            let displayed = canvas.presented_flat_surface(gray);
+            assert_ne!(displayed, gray);
+            assert_eq!(unlit_background[y * w as usize + x], u32::from_be_bytes([0, displayed.r, displayed.g, displayed.b]));
+            canvas.neon_spread = 46;
+            let lit_background = present(&canvas);
+
+            let labels = |c: &mut Canvas| {
+                c.text(Font::new(11), 9.0, 12.0, Color::rgb(0x37ffea), "Attach to Playlist");
+                c.text(Font::new(10), 9.0, 27.0, Color::rgb(0x37ffea), "PAT SONG");
+                c.text(Font::new(16), 110.0, 13.0, Color::rgb(0), "12 Snap/Clap");
+                c.text_vertical(Font::new(13), 74.0, 45.0, Color::rgb(0xfac8ff), "21");
+            };
+            labels(&mut canvas);
+            let full = present(&canvas);
+            canvas.neon_spread = 0;
+            let unlit = present(&canvas);
+            canvas.neon_spread = 46;
+            let mut glyphs = 0;
+            for (i, (plain, drawn)) in plain.pixels().iter().zip(canvas.pixmap.pixels()).enumerate() {
+                if plain == drawn {
+                    assert_eq!(full[i], lit_background[i], "text lit its surroundings at {scale}, {i}");
+                } else {
+                    glyphs += 1;
+                    if unlit_background[i] == u32::from_be_bytes([0, plain.red(), plain.green(), plain.blue()]) {
+                        assert_eq!(unlit[i], u32::from_be_bytes([0, drawn.red(), drawn.green(), drawn.blue()]),
+                            "edge light altered ink at {scale}, {i}");
+                    }
+                }
+            }
+            assert!(glyphs > 250, "missing labels at {scale}");
+            assert_ne!(unlit, full, "the decorative line should still light the background");
+
+            let damage = Rect::new(30.0, 17.0, 110.0, 16.0);
+            canvas.begin_frame(Some(damage));
+            canvas.clear(Color::rgb(0x190a21));
+            canvas.fill_rect(track, Color::rgb(0xbb615e));
+            labels(&mut canvas);
+            let mut partial = full.clone();
+            canvas.copy_region_to_xrgb(&mut partial, canvas.light_damage(canvas.device_rect(damage)));
+            assert_eq!(partial, full, "partial redraw changed the glyphs at {scale}");
+
+            canvas.begin_frame(None);
+            canvas.clear(Color::rgb(0x190a21));
+            canvas.text(Font::new(13), 9.0, 12.0, Color::rgb(0x37ffea), "PAT SONG");
+            canvas.fill_rect(Rect::new(0.0, 0.0, 100.0, 50.0), Color::rgb(0x37ffea));
+            let covered = present(&canvas);
+            canvas.neon_text.pixels.clear();
+            assert_eq!(covered, present(&canvas), "covered glyphs lit through an opaque fill");
+        }
     }
 }

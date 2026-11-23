@@ -17,7 +17,7 @@ use nih_plug::prelude::*;
 use os_engine::effects::delay as dsp;
 use os_plugkit::vals::Vals;
 use os_plugkit::MenuDef;
-use os_ui::kit::menu::{MenuItem, MenuStyle};
+use os_ui::kit::menu::{Mark, MenuItem, MenuStyle};
 
 use crate::params::{self, DelayParams, DEFS};
 use crate::view::{self, Target, ViewState};
@@ -120,6 +120,7 @@ pub enum Cmd {
     PasteValue(String),
     TypeIn(String),
     Automate(String),
+    CleanEcho,
     About,
 }
 
@@ -247,6 +248,9 @@ impl Logic {
     }
 
     pub fn down(&mut self, x: f32, y: f32, btn: Btn, m: Mods, _dbl: bool) -> Vec<Act> {
+        if btn==Btn::Left && view::MODE_TAB.contains(x,y){
+            self.view.advanced=x>=view::MODE_TAB.cx();return vec![Act::Repaint]
+        }
         self.view.mouse = Some((x, y));
         let Some((t, _)) = self.hit(x, y) else { return vec![] };
         let id = t.id().to_string();
@@ -338,19 +342,22 @@ impl Logic {
                 m.sep(Cmd::None);
                 m.add(MenuItem::item("Copy value"), Cmd::CopyValue(id.clone()));
                 m.add(MenuItem::item("Paste value").enabled(self.copied.is_some()), Cmd::PasteValue(id.clone()));
-                m.add(MenuItem::item("Enter value..."), Cmd::TypeIn(id.clone()));
+                m.add(MenuItem::item("Type in value..."), Cmd::TypeIn(id.clone()));
                 // Automation belongs to the host: offered when Lemon Studio hosts the editor (host link).
                 m.sep(Cmd::None);
                 m.add(MenuItem::item("Create automation clip").enabled(self.hosted), Cmd::Automate(id.clone()));
                 m.sep(Cmd::None);
-                m.add(MenuItem::item("About Lemon Delay..."), Cmd::About);
+                if os_plugkit::visibility::stock_dsp_controls() {
+                    m.add(MenuItem::item("Clean echoes (HQ)").mark(Mark::Check(self.params.clean_echo())), Cmd::CleanEcho);
+                }
+                m.add(MenuItem::item("About ML Delay..."), Cmd::About);
                 m
             }
             MenuReq::About => {
                 let mut m = MenuDef::new(MenuStyle::Context);
-                m.head("Lemon Delay", Cmd::None);
+                m.head("ML Delay", Cmd::None);
                 m.add(MenuItem::item(&format!("Version {}", env!("CARGO_PKG_VERSION"))).enabled(false), Cmd::None);
-                m.add(MenuItem::item("Lemon Studio's recreation of Fruity Delay 3").enabled(false), Cmd::None);
+                m.add(MenuItem::item("ML Studio's recreation of Fruity Delay 3").enabled(false), Cmd::None);
                 m
             }
         }
@@ -368,6 +375,7 @@ impl Logic {
             }
             Cmd::TypeIn(id) => return vec![Act::TypeIn(id, x, y)],
             Cmd::Automate(id) => return ids().position(|i| i == id).map(Act::Automate).into_iter().collect(),
+            Cmd::CleanEcho => self.params.toggle_clean_echo(),
             Cmd::About => return vec![Act::Menu(MenuReq::About, x, y)],
         }
         vec![Act::Repaint]
@@ -482,7 +490,7 @@ mod win32 {
                 tracking: false,
                 slot: slot.clone(),
             });
-            let title = pw::wide("Lemon Delay");
+            let title = pw::wide("ML Delay");
             let hwnd = CreateWindowExW(
                 0,
                 class.as_ptr(),
@@ -635,6 +643,7 @@ mod win32 {
 
         /// Timer / parameter change: expire confirmed overlay values and repaint.
         fn poll(&mut self) {
+            if self.canvas.sync_stock_editor_theme() { self.invalidate(); }
             self.logic.vals.expire();
             self.invalidate();
             if self.logic.hint != self.last_hint {
@@ -699,11 +708,12 @@ mod win32 {
                     }
                     1
                 }
-                Cmd::Changed | Cmd::Note | Cmd::Automate | Cmd::Audio | Cmd::Resizable | Cmd::SetSize | Cmd::Notes => 0,
+                Cmd::StateEdit | Cmd::SampleFit | Cmd::BrowseSample | Cmd::Changed | Cmd::Note | Cmd::Automate | Cmd::Audio | Cmd::Resizable | Cmd::SetSize => 0,
             }
         }
 
         fn paint(&mut self) {
+            self.canvas.sync_stock_editor_theme();
             let (hdc, ps) = pw::begin_paint(self.hwnd);
             self.logic.paint(&mut self.canvas, &self.palette);
             self.buf.resize((self.size.0 * self.size.1) as usize, 0);
@@ -844,6 +854,7 @@ mod gui {
 
         /// Timer / parameter change: expire confirmed overlay values and repaint.
         fn poll(&mut self) {
+            if self.canvas.sync_stock_editor_theme() { self.dirty = true; }
             self.logic.vals.expire();
             self.dirty = true;
             if self.logic.hint != self.last_hint {
@@ -887,6 +898,7 @@ mod gui {
         }
 
         fn paint(&mut self) {
+            self.canvas.sync_stock_editor_theme();
             self.dirty = false;
             self.logic.paint(&mut self.canvas, &self.palette);
             self.buf.resize((self.size.0 * self.size.1) as usize, 0);
@@ -903,6 +915,12 @@ mod tests {
 
     fn logic() -> Logic {
         let mut l = Logic::new(Arc::new(DelayParams::default()), Arc::new(Shared::default()), None);
+        assert!(!l.view.advanced);
+        if let Some(tab) = Some(view::MODE_TAB) {
+            paint(&mut l);
+            l.down(tab.cx()+10., tab.cy(), Btn::Left, Mods::default(), false);
+            assert!(l.view.advanced);
+        }
         paint(&mut l);
         l
     }
@@ -1022,7 +1040,7 @@ mod tests {
         let mut l = logic();
         let m = l.menu(&MenuReq::Param("bits".into()));
         assert_eq!(m.find("Reset"), Some(Cmd::Reset("bits".into())));
-        assert_eq!(m.find("Enter value..."), Some(Cmd::TypeIn("bits".into())));
+        assert_eq!(m.find("Type in value..."), Some(Cmd::TypeIn("bits".into())));
         l.vals.edit_plain("bits", 100.0);
         l.pick(&MenuReq::Param("bits".into()), Cmd::Reset("bits".into()), 0.0, 0.0);
         assert_eq!(l.vals.plain("bits"), 6000.0);
@@ -1030,7 +1048,7 @@ mod tests {
         assert!(matches!(l.pick(&MenuReq::Param("dry".into()), Cmd::About, 1.0, 2.0).last(), Some(Act::Menu(MenuReq::About, _, _))));
         let (x, y) = centre(&l, &Target::Logo);
         assert!(matches!(l.down(x, y, Btn::Left, Mods::default(), false).last(), Some(Act::Menu(MenuReq::About, _, _))));
-        assert_eq!(l.hint, "Lemon Delay");
+        assert_eq!(l.hint, "ML Delay");
         assert!(l.wheel(x, y, 1.0, Mods::default()).is_empty());
     }
 

@@ -49,6 +49,7 @@ pub fn clean_name(name: &str) -> Option<String> {
 pub enum NameTarget {
     /// Save preset...: the applied theme under a new name.
     Save,
+    SaveNew,
     /// Rename the user theme at Themes tile `.0`.
     Rename(usize),
     /// Delete the user theme at Themes tile `.0` (no text box: a question).
@@ -84,7 +85,7 @@ impl NameTarget {
     pub fn title(self, s: &State) -> String {
         let name = |i: usize| s.settings.themes.get(i).map_or("", |(n, _)| n.as_str()).to_string();
         match self {
-            NameTarget::Save => "Save the theme as".into(),
+            NameTarget::Save | NameTarget::SaveNew => "Save the theme as".into(),
             NameTarget::Rename(i) => format!("Rename \"{}\" to", name(i)),
             NameTarget::Delete(i) => format!("Delete \"{}\"?", name(i)),
         }
@@ -92,7 +93,7 @@ impl NameTarget {
 
     pub fn ok(self) -> &'static str {
         match self {
-            NameTarget::Save => "Save",
+            NameTarget::Save | NameTarget::SaveNew => "Save",
             NameTarget::Rename(_) => "Rename",
             NameTarget::Delete(_) => "Delete",
         }
@@ -109,6 +110,9 @@ impl NameTarget {
 pub struct Snap {
     pub text: Option<String>,
     pub base: Option<String>,
+    pub design: os_theme::Design,
+    pub(crate) profile: Vec<(&'static str, Option<String>)>,
+    native: Option<os_theme::Theme>,
 }
 
 /// What a change was, so a run of wheel notches on one knob is one undo step.
@@ -161,6 +165,16 @@ pub const READABLE: f32 = 2.5;
 /// The ratio the fix aims for.
 const FIX_TARGET: f32 = 4.5;
 
+/// Keep the preferred label ink whenever it is readable on the painted track.
+pub(crate) fn track_label_ink(preferred: Color, face: Color) -> Color {
+    if contrast(preferred, face) >= FIX_TARGET {
+        return preferred;
+    }
+    let black = Color::rgb(0x000000);
+    let white = Color::rgb(0xffffff);
+    if contrast(black, face) >= contrast(white, face) { black } else { white }
+}
+
 /// The theme text `text` with its text colour (TextColor) changed so the text reads on skin `d` with it: the colour's
 /// hue kept and its lightness moved away from the surfaces, else white or black; `None` when nothing reaches
 /// `READABLE`.
@@ -189,15 +203,26 @@ pub fn fix_text(text: &str, d: os_theme::Design) -> Option<String> {
 impl App {
     // ---- Undo / redo ----
 
-    fn snap(&self) -> Snap {
-        Snap { text: self.state.fl_text.clone(), base: self.state.theme_base.clone() }
+    pub(crate) fn snap_theme(&self) -> Snap {
+        let design = self.design();
+        let native = self.state.fl_text.is_none() && self.theme.colors != os_theme::design::palette(design, None);
+        Snap {
+            text: self.state.fl_text.clone(),
+            base: self.state.theme_base.clone(),
+            design,
+            profile: crate::advanced_theme::appearance_profile(),
+            native: native.then(|| self.theme.clone()),
+        }
     }
 
     /// Before a theme change: the state now goes on the undo list (one step for a run of wheel notches on one knob) and
     /// the redo list empties.
     pub(crate) fn theme_mark(&mut self, step: Step) {
+        self.theme_mark_snapshot(step, self.snap_theme());
+    }
+
+    pub(crate) fn theme_mark_snapshot(&mut self, step: Step, snap: Snap) {
         let now = Instant::now();
-        let snap = self.snap();
         let h = &mut self.state.settings.history;
         let run = matches!((h.last, step), (Some((Step::Wheel(a), t)), Step::Wheel(b)) if a == b && now.duration_since(t) < WHEEL_RUN);
         h.last = Some((step, now));
@@ -214,7 +239,7 @@ impl App {
     /// Theme undo (`redo` = redo): goes back to the last state that differs from now. Returns the message.
     pub(crate) fn theme_undo(&mut self, redo: bool) -> String {
         self.picker_close();
-        let now = self.snap();
+        let now = self.snap_theme();
         let h = &mut self.state.settings.history;
         h.last = None;
         let (from, to) = if redo { (&mut h.redo, &mut h.undo) } else { (&mut h.undo, &mut h.redo) };
@@ -243,9 +268,20 @@ impl App {
 
     /// Applies a theme state: the window, the skin and theme tiles, and `current.flstheme` (removed for none).
     pub(crate) fn theme_restore(&mut self, s: Snap) {
-        self.theme = crate::app::skin_theme(self.design(), &self.theme.name.clone(), s.text.as_deref());
-        os_theme::set_current(&self.theme.colors);
-        if let Some(d) = crate::app::theme_dir() {
+        let previous_design = self.design();
+        self.theme = self.state.settings.advanced_theme.as_ref().and_then(|edit| edit.original_for(&s))
+            .or(s.native)
+            .unwrap_or_else(|| crate::app::skin_theme(s.design, &self.theme.name.clone(), s.text.as_deref()));
+        if previous_design != s.design && self.state.settings.advanced_theme.is_none() {
+            crate::app::save_design(s.design);
+        }
+        if s.profile != crate::advanced_theme::appearance_profile() {
+            crate::settings_file::restore_appearance(&s.profile);
+            self.reload_appearance_profile();
+        } else {
+            os_theme::set_current(self.state.featured_palette().unwrap_or(&self.theme.colors));
+        }
+        if self.state.settings.advanced_theme.is_none() && let Some(d) = crate::app::theme_dir() {
             match &s.text {
                 Some(t) => {
                     let _ = std::fs::create_dir_all(&d);
@@ -258,7 +294,11 @@ impl App {
         }
         self.state.fl_text = s.text;
         self.state.theme_base = s.base;
-        self.sync_preset();
+        if self.state.settings.advanced_theme.is_some() {
+            self.check_readable();
+        } else {
+            self.sync_preset();
+        }
         self.invalidate();
     }
 
@@ -307,12 +347,20 @@ impl App {
 
     /// Save preset...: the name panel above the button, with a free name.
     pub(crate) fn theme_save_open(&mut self) {
+        self.open_theme_name(NameTarget::Save, crate::views::settings::SAVE_PRESET);
+    }
+
+    pub(crate) fn theme_save_new_open(&mut self, label: &'static str) {
+        self.open_theme_name(NameTarget::SaveNew, label);
+    }
+
+    fn open_theme_name(&mut self, target: NameTarget, label: &'static str) {
         let st = &self.state.settings;
         let base = st.themes.get(st.preset).map_or("My theme".to_string(), |(n, _)| format!("{n} custom"));
         let taken: Vec<String> = st.themes.iter().map(|(n, _)| n.to_lowercase()).collect();
         let name = std::iter::once(base.clone()).chain((2..).map(|k| format!("{base} {k}"))).find(|n| !taken.contains(&n.to_lowercase())).unwrap_or(base);
-        let at = self.button_at("Save preset...").map_or((self.mouse.0, self.mouse.1 - NAME_H), |r| (r.x, r.y - NAME_H - 6.0));
-        self.name_open(NameTarget::Save, &name, at);
+        let at = self.button_at(label).map_or((self.mouse.0, self.mouse.1 - NAME_H), |r| (r.x, r.y - NAME_H - 6.0));
+        self.name_open(target, &name, at);
     }
 
     /// The right-click menu of Themes tile `i`: Duplicate for any theme; Rename..., Delete... and Show in folder for the
@@ -328,7 +376,7 @@ impl App {
             items.push(PItem::new("Delete...", Cmd::Theme(ThemeCmd::Delete(i))));
             items.push(PItem::new("Show in folder", Cmd::Theme(ThemeCmd::Show(i))));
         }
-        self.state.playlist.popup = Some(Popup { x, y, items, sub: None, scroll: [0; 2] });
+        self.state.playlist.popup = Some(Popup { x, y, items, sub: None, scroll: [0; 2], cascade: Vec::new() });
         self.invalidate();
     }
 
@@ -339,6 +387,10 @@ impl App {
             app.hits.iter().rev().find(|h| h.action == crate::app::Action::Settings(SAct::Preset(i))).map_or(app.mouse, |h| (h.rect.x, h.rect.bottom() + 4.0))
         };
         match c {
+            ThemeCmd::Appearance(target) => {
+                self.open_appearance_target(target);
+                None
+            }
             ThemeCmd::Duplicate(i) => {
                 let (name, text) = self.state.settings.themes.get(i).cloned()?;
                 let taken: Vec<String> = self.state.settings.themes.iter().map(|(n, _)| n.to_lowercase()).collect();
@@ -399,7 +451,7 @@ impl App {
                     None => "No user folder".into(),
                 }
             }
-            NameTarget::Save | NameTarget::Rename(_) => {
+            NameTarget::Save | NameTarget::SaveNew | NameTarget::Rename(_) => {
                 let Some(name) = clean_name(&e.text.text) else {
                     self.state.message = Some("Type a name for the theme".into());
                     return self.invalidate();
@@ -410,6 +462,25 @@ impl App {
                     return self.invalidate();
                 }
                 match e.target {
+                    NameTarget::SaveNew => {
+                        if themes.iter().any(|(n, _)| n.eq_ignore_ascii_case(&name)) {
+                            self.state.message = Some(format!("You have a theme called \"{name}\" already"));
+                            return self.invalidate();
+                        }
+                        let text = crate::theme_adjust::applied_text(&self.state, self.design());
+                        let text = fl::set_key(&text, crate::advanced_theme::VERSION_KEY, "1");
+                        if let Err(error) = self.create_user_theme(&name, &text) {
+                            self.state.message = Some(format!("Could not save the theme: {error}"));
+                            return self.invalidate();
+                        }
+                        self.finish_theme_editor(true);
+                        self.state.fl_text = Some(text.clone());
+                        self.state.theme_base = Some(text);
+                        self.theme_store();
+                        self.state.settings.name_edit = None;
+                        self.reload_themes();
+                        format!("Theme saved: {name}")
+                    }
                     NameTarget::Rename(i) => {
                         let Some((old, _)) = themes.get(i).filter(|_| i >= user_from) else { return self.name_close() };
                         let clash = !old.eq_ignore_ascii_case(&name) && themes[user_from..].iter().any(|(n, _)| n.eq_ignore_ascii_case(&name));
@@ -465,7 +536,7 @@ impl App {
             Key::Named(NamedKey::Escape) => self.name_close(),
             Key::Named(NamedKey::Enter) => self.name_ok(),
             _ if e.target.typed() => {
-                e.text.key(key, ctrl, alt);
+                e.text.key_mod(key, ctrl, alt, self.shift);
                 self.invalidate();
             }
             _ => {}
@@ -482,6 +553,20 @@ impl App {
         let d = user_dir().ok_or_else(|| std::io::Error::other("no user folder"))?;
         std::fs::create_dir_all(&d)?;
         std::fs::write(d.join(format!("{name}.flstheme")), text)
+    }
+
+    fn create_user_theme(&self, name: &str, text: &str) -> std::io::Result<()> {
+        use std::io::Write;
+        let dir = user_dir().ok_or_else(|| std::io::Error::other("no user folder"))?;
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join(format!("{name}.flstheme"));
+        let mut file = std::fs::File::create_new(&path)?;
+        if let Err(error) = file.write_all(text.as_bytes()) {
+            drop(file);
+            let _ = std::fs::remove_file(path);
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// The Themes list again (the user's themes may have changed), with the chosen tile and previews.
@@ -522,6 +607,19 @@ pub(crate) fn show_in_folder(path: &std::path::Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn assigned_track_labels_keep_contrast_and_readable_theme_ink() {
+        let preferred = Color::rgb(0xdce8f0);
+        for face in [0xffee00, 0x00ff00, 0x808080, 0x30343a, 0x0000ff] {
+            let face = Color::rgb(face);
+            let ink = track_label_ink(preferred, face);
+            assert!(contrast(ink, face) >= FIX_TARGET);
+            if contrast(preferred, face) >= FIX_TARGET {
+                assert_eq!(ink, preferred);
+            }
+        }
+    }
 
     #[test]
     fn names_are_cleaned_for_files() {

@@ -75,16 +75,65 @@ pub fn face(base: Color, st: State) -> Color {
     if st.disabled { c.mix(base, 0.5).shade(-0.1) } else { c }
 }
 
+/// Preserve black ink on bright yellow control faces, including themed hover/selected states.
+pub fn button_ink_on(face: Color, requested: Color) -> Color {
+    let (hue, saturation, lightness) = face.hsl();
+    if (42.0..=70.0).contains(&hue) && saturation > 0.32 && lightness >= 0.42 {
+        Color::rgb(0x000000)
+    } else {
+        requested
+    }
+}
+
+/// Preserve assigned hues on the dark 3036 glass. Uncoloured controls follow the theme ink.
+pub fn neon_track_ink(assigned: Option<Color>, fallback: Color) -> Color {
+    let Some(color) = assigned else { return fallback };
+    let (h, s, _) = color.hsl();
+    if s < 0.035 { return fallback; }
+    Color::from_hsl_pub(h, s.max(0.84), 0.64, 255)
+}
+
+/// Unselected 3036 control edge, shared by toolbar keys and readout panels.
+pub const NEON_IDLE_RIM: f32 = 0.44;
+
+pub fn neon_rim(c: &mut Canvas, t: &Palette, rect: Rect, radius: f32, ink: Color, strength: f32) {
+    c.stroke_rrect(rect.inset(0.5), radius, 1.0, t.mixer_panel.mix(ink, strength));
+}
+
+/// Opaque glass and a narrow emitter use the same lighting pass as the mixer action buttons.
+pub fn neon_face(c: &mut Canvas, t: &Palette, r: Rect, radius: f32, ink: Color, st: State) -> Color {
+    let lit = st.on || st.pressed;
+    let (fill, rim) = if st.disabled { (0.025, 0.16) } else if st.pressed { (0.21, 0.88) }
+        else if lit { (0.14, 0.80) } else if st.hover { (0.12, 0.65) } else { (0.065, NEON_IDLE_RIM) };
+    c.fill_rrect(r, radius, t.mixer_panel.mix(ink, fill));
+    neon_rim(c, t, r, radius, ink, rim);
+    if st.disabled { t.text_faint } else { ink }
+}
+
 /// Glyph / label colour for a state on a neutral face.
 pub fn ink(t: &Palette, st: State) -> Color {
     if st.disabled {
         t.text_faint
+    } else if t.style.neon_3036 {
+        if st.on || st.pressed { t.accent } else { t.note_top }
     } else if st.on || st.pressed {
-        t.on_glyph
+        use os_theme::chrome::Chrome;
+        let background = Chrome::ActiveButton.or(t, t.on_bottom);
+        button_ink_on(background, Chrome::ActiveInk.or(t, t.on_glyph))
     } else if st.hover {
         t.tx(0xffffff)
     } else {
         t.glyph
+    }
+}
+
+pub fn title_font(t: &Palette, base: Font) -> Font {
+    use os_theme::appearance::Lettering;
+    match t.appearance.title_text {
+        Some(Lettering::Bold) => base.bold(),
+        Some(Lettering::Italic) => base.italic(),
+        Some(Lettering::Light) => Font::light(base.size, 0).natural(),
+        None => base,
     }
 }
 
@@ -97,6 +146,7 @@ pub fn raised(c: &mut Canvas, r: Rect, base: Color, radius: f32) {
 
 /// `raised` in the palette's design (Lemon: a flat rounded fill).
 pub fn raised_in(c: &mut Canvas, t: &Palette, r: Rect, base: Color, radius: f32) {
+    if panel_finish(c, t, r, base) { return; }
     if lemon::on(t) {
         return lemon::raised(c, r, base, radius);
     }
@@ -105,11 +155,57 @@ pub fn raised_in(c: &mut Canvas, t: &Palette, r: Rect, base: Color, radius: f32)
 
 /// Sunken panel (hint bar, monitors, value displays): flat fill inside a 1 px dark border.
 pub fn sunken(c: &mut Canvas, t: &Palette, r: Rect, fill: Color) {
+    if t.style.vintage_2005 {
+        styled_surface(c, t, r, 0.0, t.window_border, fill, fill,
+            os_theme::appearance::Finish::Recessed);
+        return;
+    }
+    if panel_finish(c, t, r, fill) { return; }
     if lemon::on(t) {
         return lemon::well(c, t, r, fill);
     }
     c.fill_rect(r, t.s(0x1d2022));
     c.fill_rect(r.inset(1.0), fill);
+}
+
+/// Optional skin finish. Paints inside the original control bounds.
+pub fn styled_surface(c: &mut Canvas, t: &Palette, r: Rect, radius: f32, border: Color, top: Color, bottom: Color, finish: os_theme::appearance::Finish) {
+    use os_theme::appearance::Finish;
+    let radius = radius.min(r.w.min(r.h).max(0.0) / 2.0);
+    let width = t.appearance.border.unwrap_or(1.0).min(r.w.min(r.h).max(0.0) / 3.0);
+    // Large vintage panels stay quiet; the single-pixel edges carry the relief.
+    let depth = t.appearance.bevel.unwrap_or(0.14)
+        * if t.style.vintage_2005 && r.h > 48.0 { 0.3 } else { 1.0 };
+    if width > 0.0 {
+        c.fill_rrect(r, radius, border);
+    }
+    let inner = r.inset(width);
+    let radius = (radius - width).max(0.0);
+    match finish {
+        Finish::Flat => c.fill_rrect(inner, radius, top),
+        Finish::Beveled => {
+            c.fill_rect_gradient(inner, top.shade(depth), bottom.shade(-depth), radius);
+            if t.style.vintage_2005 && inner.w > 4.0 && inner.h > 4.0 {
+                c.fill_rect(Rect::new(inner.x + 1.0, inner.y, inner.w - 2.0, 1.0), top.shade(0.27));
+                c.fill_rect(Rect::new(inner.x, inner.y + 1.0, 1.0, inner.h - 2.0), top.shade(0.12));
+                c.fill_rect(Rect::new(inner.x + 1.0, inner.bottom() - 1.0, inner.w - 2.0, 1.0), bottom.shade(-0.25));
+            }
+        }
+        Finish::Recessed => {
+            c.fill_rect_gradient(inner, top.shade(-depth), bottom.shade(depth * if t.style.vintage_2005 { 0.5 } else { 1.0 }), radius);
+            if t.style.vintage_2005 && inner.w > 4.0 && inner.h > 4.0 {
+                c.fill_rect(Rect::new(inner.x, inner.y, inner.w, 1.0), border);
+                c.fill_rect(Rect::new(inner.x, inner.y, 1.0, inner.h), border);
+                c.fill_rect(Rect::new(inner.x + 1.0, inner.bottom() - 1.0, inner.w - 1.0, 1.0), bottom.shade(0.12));
+            }
+        }
+    }
+}
+
+pub fn panel_finish(c: &mut Canvas, t: &Palette, r: Rect, fill: Color) -> bool {
+    let Some(finish) = t.appearance.panels else { return false };
+    styled_surface(c, t, r, t.style.radius_panel, t.window_border, fill, fill, finish);
+    true
 }
 
 /// A 1 px outline with a fill (rounded).
@@ -130,6 +226,7 @@ pub fn grip(c: &mut Canvas, t: &Palette, x: f32, y: f32) {
 /// The FL-style raised button face (spec §1): 1 px border with softened corners, an elliptical radial face
 /// (light centre, darker edges) and a darker 1 px inner rim. `on`/pressed light it orange (Highlight role).
 pub fn button(c: &mut Canvas, t: &Palette, r: Rect, st: State) {
+    if custom_button(c, t, r, st) { return; }
     if lemon::on(t) {
         return lemon::button(c, t, r, st);
     }
@@ -163,6 +260,44 @@ pub fn button(c: &mut Canvas, t: &Palette, r: Rect, st: State) {
     c.fill_rect(Rect::new(f.right() - 1.0, f.y + 1.0, 1.0, f.h - 2.0), rim);
 }
 
+/// Shared custom face, used where a view normally supplies its own skin-specific button.
+pub fn custom_button(c: &mut Canvas, t: &Palette, r: Rect, st: State) -> bool {
+    custom_button_in(c, t, r, st, None)
+}
+
+pub fn custom_button_in(c: &mut Canvas, t: &Palette, r: Rect, st: State, local: Option<os_theme::appearance::Finish>) -> bool {
+    use os_theme::appearance::Finish;
+    let a = t.appearance;
+    if t.style.neon_3036 {
+        neon_face(c, t, r, a.button_radius.unwrap_or(3.0), ink(t, st), st);
+        return true;
+    }
+    let finish = local.or(a.buttons);
+    use os_theme::chrome::Chrome;
+    let active = (!st.disabled && (st.on || st.pressed)).then(|| Chrome::ActiveButton.get(t)).flatten();
+    if active.is_none() && finish.is_none() && !a.themed_buttons
+        && a.button_radius.is_none() && a.bevel.is_none() && a.border.is_none()
+    {
+        return false;
+    }
+    let (top, bottom) = if let Some(face) = active {
+        let face = if st.pressed { face.shade(-0.12) } else if st.hover { face.shade(0.08) } else { face };
+        (face, face)
+    } else if st.disabled {
+        (t.button_disabled, t.button_disabled)
+    } else if st.pressed {
+        (t.button_pressed, t.button_pressed)
+    } else if st.on {
+        (t.on_top, t.on_bottom)
+    } else {
+        let color = if st.hover { t.button_hi } else { t.button };
+        (color, color)
+    };
+    let finish = finish.unwrap_or(if lemon::on(t) { Finish::Flat } else { Finish::Beveled });
+    styled_surface(c, t, r, t.style.radius, t.button_border, top, bottom, finish);
+    true
+}
+
 /// A button with an icon (glyph drawn by the caller-supplied painter so app and plugin icon sets both work).
 pub fn icon_button(c: &mut Canvas, t: &Palette, r: Rect, st: State, icon: &crate::tabler::TablerIcon, pad: f32) {
     button(c, t, r, st);
@@ -188,8 +323,17 @@ pub enum Dir {
     Down,
 }
 
+fn direction_art(dir: Dir) -> crate::ChromeIcon {
+    match dir {
+        Dir::Left => crate::ChromeIcon::Left, Dir::Right => crate::ChromeIcon::Right,
+        Dir::Up => crate::ChromeIcon::Up, Dir::Down => crate::ChromeIcon::Down,
+    }
+}
+
 /// Open chevron (stroke) centred at (cx, cy), `size` = half height.
 pub fn chevron(c: &mut Canvas, cx: f32, cy: f32, size: f32, dir: Dir, col: Color) {
+    let extent = (size * 2.8).max(6.0);
+    if c.chrome_icon(direction_art(dir), Rect::new(cx-extent*0.5, cy-extent*0.5, extent, extent), col) { return; }
     let (s, h) = (size, size * 0.55);
     let pts = match dir {
         Dir::Left => [(cx + h, cy - s), (cx - h, cy), (cx + h, cy + s)],
@@ -197,11 +341,18 @@ pub fn chevron(c: &mut Canvas, cx: f32, cy: f32, size: f32, dir: Dir, col: Color
         Dir::Up => [(cx - s, cy + h), (cx, cy - h), (cx + s, cy + h)],
         Dir::Down => [(cx - s, cy - h), (cx, cy + h), (cx + s, cy - h)],
     };
-    c.polyline(&pts, 1.2, col);
+    let (ink, width) = c.icon_styling(col, 1.2);
+    c.polyline(&pts, width, ink);
 }
 
 /// Solid triangle (menu arrows, combo arrows) centred at (cx, cy).
 pub fn triangle(c: &mut Canvas, cx: f32, cy: f32, size: f32, dir: Dir, col: Color) {
+    let extent = (size * 2.8).max(6.0);
+    if c.chrome_icon(direction_art(dir), Rect::new(cx-extent*0.5, cy-extent*0.5, extent, extent), col) { return; }
+    triangle_shape(c, cx, cy, size, dir, col);
+}
+
+fn triangle_shape(c: &mut Canvas, cx: f32, cy: f32, size: f32, dir: Dir, col: Color) {
     let (s, h) = (size, size * 0.55);
     let pts = match dir {
         Dir::Left => [(cx + h, cy - s), (cx - h, cy), (cx + h, cy + s)],
@@ -216,6 +367,15 @@ pub fn triangle(c: &mut Canvas, cx: f32, cy: f32, size: f32, dir: Dir, col: Colo
 
 /// Scroll-bar end / stepper button with an arrow.
 pub fn arrow_button(c: &mut Canvas, t: &Palette, r: Rect, dir: Dir, st: State) {
+    if t.style.vintage_2005 {
+        let steel = face(Color::rgb(0x59656c), st);
+        c.fill_rect(r, Color::rgb(0x293339));
+        c.fill_rect_gradient(r.inset(1.0), steel.shade(0.17), steel.shade(-0.13), 0.0);
+        c.fill_rect(Rect::new(r.x + 1.0, r.y + 1.0, (r.w - 2.0).max(0.0), 1.0), steel.shade(0.30));
+        let ink = scroll_arrow(t, st, high_visibility()).unwrap_or(Color::rgb(0xe0e8e9));
+        triangle_shape(c, r.cx().round(), r.cy().round(), (r.w.min(r.h) * 0.21).min(4.0), dir, ink);
+        return;
+    }
     if lemon::on(t) {
         return lemon::arrow_button(c, t, r, dir, st);
     }
@@ -227,6 +387,7 @@ pub fn arrow_button(c: &mut Canvas, t: &Palette, r: Rect, dir: Dir, st: State) {
 /// A scroll bar's end button: `arrow_button`, with the light arrow of high visibility while it is on
 /// (`scroll_arrow`).
 pub fn scroll_arrow_button(c: &mut Canvas, t: &Palette, r: Rect, dir: Dir, st: State) {
+    if t.style.vintage_2005 { return arrow_button(c, t, r, dir, st); }
     let Some(col) = scroll_arrow(t, st, high_visibility()) else { return arrow_button(c, t, r, dir, st) };
     flat_button(c, t, r, st);
     chevron(c, r.cx().round(), r.cy().round(), if lemon::on(t) { 4.0 } else { 5.0 }, dir, col);
@@ -281,6 +442,24 @@ pub fn pill(c: &mut Canvas, t: &Palette, r: Rect, label: &str, font: Font, st: S
 
 /// Round LED (enable switches). `radius` 5 (rack) or 6 (mixer, playlist). Uses the Mute role (green).
 pub fn led(c: &mut Canvas, t: &Palette, cx: f32, cy: f32, radius: f32, st: State) {
+    if let Some(shape) = t.appearance.indicator {
+        use os_theme::appearance::Indicator;
+        let color = if st.on { t.indicator_on } else { t.indicator_off };
+        let r = radius * 0.76;
+        match shape {
+            Indicator::Round => {
+                c.fill_circle(cx, cy, radius, t.button_border);
+                c.fill_circle(cx, cy, r, color);
+            }
+            Indicator::Square | Indicator::Bar => {
+                let h = if shape == Indicator::Bar { r * 0.55 } else { r };
+                let rect = Rect::new(cx - r, cy - h, 2.0 * r, 2.0 * h);
+                c.fill_rrect(rect.outset(1.0), t.style.radius_small.min(h), t.button_border);
+                c.fill_rrect(rect, t.style.radius_small.min(h), color);
+            }
+        }
+        return;
+    }
     if lemon::on(t) {
         return lemon::led(c, t, cx, cy, radius, st);
     }
@@ -298,11 +477,14 @@ pub fn led(c: &mut Canvas, t: &Palette, cx: f32, cy: f32, radius: f32, st: State
 
 /// Square check mark / tick (menus).
 pub fn tick(c: &mut Canvas, r: Rect, col: Color) {
-    c.polyline(&[(r.x + 3.0, r.cy()), (r.x + r.w * 0.42, r.bottom() - 3.0), (r.right() - 3.0, r.y + 3.0)], 1.8, col);
+    if c.chrome_icon(crate::ChromeIcon::Check, r, col) { return; }
+    let (ink, width) = c.icon_styling(col, 1.8);
+    c.polyline(&[(r.x + 3.0, r.cy()), (r.x + r.w * 0.42, r.bottom() - 3.0), (r.right() - 3.0, r.y + 3.0)], width, ink);
 }
 
 /// Cross (close glyph drawn without an icon).
 pub fn cross(c: &mut Canvas, r: Rect, col: Color) {
+    if c.chrome_icon(crate::ChromeIcon::Close, r, col) { return; }
     c.line(r.x + 4.0, r.y + 4.0, r.right() - 4.0, r.bottom() - 4.0, 1.5, col);
     c.line(r.right() - 4.0, r.y + 4.0, r.x + 4.0, r.bottom() - 4.0, 1.5, col);
 }
@@ -320,6 +502,36 @@ pub fn focus_frame(c: &mut Canvas, t: &Palette, r: Rect, width: f32) {
 
 // ---------------------------------------------------------------- knobs and faders
 
+pub fn styled_knob(c: &mut Canvas, t: &Palette, x: f32, y: f32, r: f32, value: f32, bipolar: bool, hover: bool, style: os_theme::appearance::Knob) {
+    styled_knob_appearance(c, t, x, y, r, value, bipolar, hover, style, &t.appearance);
+}
+
+pub fn styled_knob_appearance(c: &mut Canvas, t: &Palette, x: f32, y: f32, r: f32, value: f32, bipolar: bool, hover: bool, style: os_theme::appearance::Knob, appearance: &os_theme::appearance::Appearance) {
+    let start = 0.75 * PI;
+    let sweep = 1.5 * PI;
+    let angle = start + sweep * value.clamp(0.0, 1.0);
+    let cap = if hover { t.knob_cap.shade(0.1) } else { t.knob_cap };
+    let rim = !appearance.knob_body_only && appearance.knob_rim_visible != Some(false);
+    if rim { c.fill_circle(x, y, r, if appearance.knob_rim_custom { t.knob_rim } else { t.button_border }); }
+    c.fill_circle(x, y, (r - if rim { 1.0 } else { 0.0 }).max(0.0), cap);
+    if style == os_theme::appearance::Knob::Ring && !appearance.knob_body_only {
+        let track = (r - 1.5).max(0.0);
+        let neutral = if bipolar { start + sweep * 0.5 } else { start };
+        let width = appearance.knob_ring_width.unwrap_or(1.4);
+        if appearance.knob_track_visible != Some(false) && width > 0.0 { c.arc(x, y, track, start, sweep, width, if appearance.knob_track_custom { t.knob_track } else { t.sunken_dark }); }
+        if appearance.knob_ring_visible != Some(false) && width > 0.0 && (angle - neutral).abs() > 0.01 {
+            if t.style.neon_3036 { c.arc(x,y,track,angle.min(neutral),(angle-neutral).abs(),width+2.4,t.knob_ring.with_alpha(c.neon_glow_alpha(54))); }
+            c.arc(x, y, track, angle.min(neutral), (angle - neutral).abs(), width, t.knob_ring);
+            if t.style.neon_3036 && r>=5. {
+                c.fill_circle(x+track*angle.cos(),y+track*angle.sin(),0.85,t.knob_pointer);
+            }
+        }
+    }
+    let pointer_width = appearance.knob_pointer_width.unwrap_or(1.4);
+    if pointer_width > 0.0 { c.line(x + r * 0.3 * angle.cos(), y + r * 0.3 * angle.sin(),
+        x + r * 0.72 * angle.cos(), y + r * 0.72 * angle.sin(), pointer_width, t.knob_pointer); }
+}
+
 /// Knob looks. All share the same value mapping: 270° sweep from bottom-left, `bipolar` arcs from the top.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum KnobLook {
@@ -334,8 +546,27 @@ pub enum KnobLook {
 }
 
 pub fn knob(c: &mut Canvas, t: &Palette, cx: f32, cy: f32, r: f32, value: f32, bipolar: bool, look: KnobLook, st: State) {
+    knob_appearance(c, t, cx, cy, r, value, bipolar, look, st, &t.appearance);
+}
+
+pub fn knob_appearance(c: &mut Canvas, t: &Palette, cx: f32, cy: f32, r: f32, value: f32, bipolar: bool, look: KnobLook, st: State, appearance: &os_theme::appearance::Appearance) {
+    if t.style.vintage_2005 {
+        // Machined cap and a readable pointer, with no glossy ball or animated effects.
+        let angle = (0.75 + 1.5 * value.clamp(0.0, 1.0)) * PI;
+        let cap = if st.hover || st.pressed { t.button_hi } else { t.button };
+        c.fill_circle(cx, cy, r, t.window_border);
+        c.fill_circle(cx, cy - 0.4, (r - 1.0).max(0.0), cap.shade(0.18));
+        c.fill_circle(cx, cy + 0.3, (r - 2.0).max(0.0), cap.shade(-0.12));
+        c.line(cx + r * 0.22 * angle.cos(), cy + r * 0.22 * angle.sin(),
+            cx + r * 0.76 * angle.cos(), cy + r * 0.76 * angle.sin(),
+            if r < 8.0 { 1.0 } else { 1.5 }, t.glyph);
+        return;
+    }
+    if let Some(style) = appearance.knob {
+        return styled_knob_appearance(c, t, cx, cy, r, value, bipolar, st.hover, style, appearance);
+    }
     if lemon::on(t) {
-        return lemon::knob(c, t, cx, cy, r, value, bipolar, look, st);
+        return lemon::knob_appearance(c, t, cx, cy, r, value, bipolar, look, st, appearance);
     }
     let v = value.clamp(0.0, 1.0);
     let start = 0.75 * PI;
@@ -369,24 +600,48 @@ pub fn knob(c: &mut Canvas, t: &Palette, cx: f32, cy: f32, r: f32, value: f32, b
             c.line(cx + 1.2 * a.cos(), cy + 1.2 * a.sin(), cx + (r - 1.9) * a.cos(), cy + (r - 1.9) * a.sin(), 2.0, pc);
         }
         KnobLook::Mixer { halo, arc } => {
+            if !appearance.knob_body_only {
             c.fill_circle(cx, cy, halo, t.s(0x1b1d20));
             c.stroke_circle(cx, cy, halo - 0.5, 1.0, t.s(0x16181a));
+            }
             c.fill_circle(cx, cy, r + 0.6, t.s(0x16181b));
             c.fill_rect_gradient(Rect::new(cx - r, cy - r, 2.0 * r, 2.0 * r), lift(t.s(0x3c3e41)), t.s(0x17191c), r);
             c.arc(cx, cy, r - 0.6, 1.15 * PI, 0.7 * PI, 1.2, t.s(0x55575a));
-            if arc && (a1 - a0).abs() > 0.02 {
+            if arc && !appearance.knob_body_only && (a1 - a0).abs() > 0.02 {
                 c.arc(cx, cy, halo - 2.0, a0.min(a1), (a1 - a0).abs(), (halo * 0.22).max(2.0), t.h(0xce2900));
             }
         }
     }
 }
 
+/// Luminous cap shared by the full-size console and narrow mixer strips.
+pub fn neon_fader(c: &mut Canvas, t: &Palette, cap: Rect, selected: bool, hover: bool) {
+    let ink = if hover || selected { t.accent } else { t.note_top };
+    c.fill_rect_gradient(cap, t.mixer_panel.mix(ink,0.12), t.mixer_panel, 2.);
+    c.stroke_rrect(cap.inset(0.6), 2., 1., ink);
+    c.line(cap.x+2., cap.cy(), cap.right()-2., cap.cy(), 3., ink.with_alpha(c.neon_glow_alpha(50)));
+    c.line(cap.x+2., cap.cy(), cap.right()-2., cap.cy(), 1., ink);
+}
+
 /// Fader handle centred at (cx, cy): grey cap, accent green when selected.
 pub fn fader_handle(c: &mut Canvas, t: &Palette, cx: f32, cy: f32, selected: bool, st: State) {
+    if t.style.neon_3036 { return neon_fader(c,t,Rect::new(cx-7.,cy-11.,14.,23.),selected,st.hover); }
     if lemon::on(t) {
         return lemon::fader_handle(c, t, cx, cy, selected, st);
     }
     let h = Rect::new(cx - 7.0, cy - 11.0, 14.0, 23.0);
+    if t.style.vintage_2005 {
+        let steel = if st.hover || st.pressed { t.fader_handle.shade(0.14) } else { t.fader_handle };
+        styled_surface(c, t, h, 0.0, t.window_border, steel, steel.shade(-0.15),
+            os_theme::appearance::Finish::Beveled);
+        for dy in [-6.0, 5.0] {
+            c.fill_rect(Rect::new(h.x + 2.0, cy + dy, h.w - 4.0, 1.0), steel.shade(-0.2));
+            c.fill_rect(Rect::new(h.x + 2.0, cy + dy + 1.0, h.w - 4.0, 1.0), steel.shade(0.14));
+        }
+        c.fill_rect(Rect::new(h.x + 2.0, cy, h.w - 4.0, 1.0),
+            if selected { t.record } else { t.record.shade(-0.22) });
+        return;
+    }
     c.fill_rrect(h.outset(1.0), 3.0, t.s(0x121416));
     let (top, mid, low) = if selected {
         (t.a(0xc8f56e), t.a(0x8fd236), t.a(0x3f7a10))
@@ -445,6 +700,27 @@ pub fn scroll_arrow(t: &Palette, st: State, high: bool) -> Option<Color> {
     high.then(|| if st.hover || st.pressed { t.glyph } else { t.s(0xadb3b7) })
 }
 
+pub fn scroll_thumb_face(c: &mut Canvas, t: &Palette, r: Rect, vertical: bool, st: State) {
+    if r.is_empty() { return; }
+    if !t.style.vintage_2005 {
+        c.fill_rrect(r, 2.0_f32.min(r.w / 2.0).min(r.h / 2.0), scroll_thumb(t, st, high_visibility()));
+        return;
+    }
+    let steel = if high_visibility() { scroll_thumb(t, st, true) } else { face(Color::rgb(0x647278), st) };
+    c.fill_rect(r, Color::rgb(0x202a2f));
+    c.fill_rect_gradient(r.inset(1.0), steel.shade(0.18), steel.shade(-0.12), 0.0);
+    if r.w >= 7.0 && r.h >= 7.0 {
+        for offset in [-2.0, 0.0, 2.0] {
+            let grip = if vertical {
+                Rect::new(r.cx() - 2.5, r.cy() + offset, 5.0, 1.0)
+            } else {
+                Rect::new(r.cx() + offset, r.cy() - 2.5, 1.0, 5.0)
+            };
+            c.fill_rect(grip, steel.shade(-0.32));
+        }
+    }
+}
+
 /// Scroll bar: flat track, rounded thumb that lifts on hover / drag (`scroll_thumb`).
 pub fn scrollbar(c: &mut Canvas, t: &Palette, track: Rect, vertical: bool, pos: f32, view: f32, total: f32, st: State) {
     if lemon::on(t) {
@@ -458,7 +734,7 @@ pub fn scrollbar(c: &mut Canvas, t: &Palette, track: Rect, vertical: bool, pos: 
     } else {
         Rect::new(track.x + off, track.y + 2.0, tl, track.h - 4.0)
     };
-    c.fill_rrect(r, 2.0_f32.min(r.w / 2.0).min(r.h / 2.0), scroll_thumb(t, st, high_visibility()));
+    scroll_thumb_face(c, t, r, vertical, st);
 }
 
 // ---------------------------------------------------------------- windows and popups
@@ -527,31 +803,18 @@ pub fn tooltip(c: &mut Canvas, t: &Palette, at: (f32, f32), name: &str, caption:
     b
 }
 
-/// The back of a title bar button (minimize / maximize / close, or a window's own close ✕) under its glyph: a rounded
-/// fill while the mouse is over it (red for `close`), darker while it is held down; nothing otherwise.
-pub fn title_button_back(c: &mut Canvas, t: &Palette, b: Rect, close: bool, hover: bool, down: bool) {
-    if !hover && !down {
-        return;
-    }
-    if lemon::on(t) {
-        lemon::window_button_hover(c, t, b, close);
-    } else {
-        c.fill_rrect(b, 3.0, if close { t.record.with_alpha(170) } else { t.button_hi });
-    }
-    if down {
-        c.fill_rrect(b, if lemon::on(t) { 4.0 } else { 3.0 }, Color::rgb(0).with_alpha(70));
-    }
-}
-
-/// Minimize / maximize / close glyphs (drawn with Tabler icons) in a row from `x0`; `hovered` = index under the mouse,
-/// `down` = index held down with the mouse still over it.
-pub fn window_buttons(c: &mut Canvas, t: &Palette, x0: f32, y: f32, hovered: Option<usize>, down: Option<usize>) -> [Rect; 3] {
+/// Minimize / maximize / close glyphs (drawn with Tabler icons) in a row from `x0`; `hovered` = index under the mouse.
+pub fn window_buttons(c: &mut Canvas, t: &Palette, x0: f32, y: f32, hovered: Option<usize>) -> [Rect; 3] {
     use crate::tabler as tb;
     let mut out = [Rect::default(); 3];
     for (i, icon) in [&tb::MINUS, &tb::SQUARES, &tb::X].into_iter().enumerate() {
         let b = Rect::new(x0 + i as f32 * 19.5, y + 3.0, 17.0, 17.0);
-        let hov = hovered == Some(i) || down == Some(i);
-        title_button_back(c, t, b, i == 2, hov, down == Some(i));
+        let hov = hovered == Some(i);
+        if hov && lemon::on(t) {
+            lemon::window_button_hover(c, t, b, i == 2);
+        } else if hov {
+            c.fill_rrect(b, 3.0, if i == 2 { t.record.with_alpha(170) } else { t.button_hi });
+        }
         c.icon(icon, b.inset(2.0), if hov { t.tx(0xffffff) } else { t.text_dim.mix(t.glyph, 0.6) });
         out[i] = b;
     }
@@ -561,6 +824,27 @@ pub fn window_buttons(c: &mut Canvas, t: &Palette, x0: f32, y: f32, hovered: Opt
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn themed_dial_layers_hide_independently_and_keep_a_pointer() {
+        let base = "LemonStudioStyle.knob=Ring\nLemonStudioColor.knob_ring=#F205C7\nLemonStudioColor.knob_track=#05F2B7\nLemonStudioColor.knob_rim=#F2A105\nLemonStudioStyle.knob-ring-width=3\nLemonStudioStyle.knob-pointer-width=3\n";
+        for design in os_theme::Design::ALL {
+            for (ring, track, rim) in [("Show","Show","Show"), ("Hide","Show","Show"), ("Show","Hide","Show"), ("Show","Show","Hide"), ("Hide","Hide","Hide")] {
+                let mut text = base.to_owned();
+                for (key, value) in [("knob-ring-visible",ring), ("knob-track-visible",track), ("knob-rim-visible",rim)] {
+                    text = os_theme::fl::set_key(&text, &format!("LemonStudioStyle.{key}"), value);
+                }
+                let p = os_theme::design::palette(design, Some(&os_theme::FlTheme::parse(&text)));
+                let mut c = Canvas::new(80,80,1.0).unwrap();
+                knob(&mut c, &p, 40.0, 40.0, 26.0, 0.5, false, KnobLook::Ring, State::NORMAL);
+                let count = |color: Color| c.pixmap.data().chunks_exact(4).filter(|pixel| pixel[..3] == [color.r,color.g,color.b]).count();
+                assert_eq!(count(p.knob_ring) > 0, ring == "Show");
+                assert_eq!(count(p.knob_track) > 0, track == "Show");
+                assert_eq!(count(p.knob_rim) > 0, rim == "Show");
+                assert!(count(p.knob_pointer) > 0);
+            }
+        }
+    }
 
     #[test]
     fn thumb_geometry() {
@@ -593,30 +877,6 @@ mod tests {
         let arrow = scroll_arrow(&l, State::NORMAL, true).unwrap();
         assert!(arrow.r > 0xa0 && arrow.r == arrow.b, "{arrow:?}");
         assert!(!high_visibility(), "off unless the app turns it on");
-    }
-
-    /// Every title bar button shows the mouse over it and a press on it (feedback 2026-10-17: the Settings window's
-    /// close button did not change on hover): nothing at rest, a fill on hover, a darker one held down; in both looks.
-    /// Painted over an opaque title bar, as in a window (the blends assume an opaque canvas).
-    #[test]
-    fn title_buttons_show_hover_and_press() {
-        let bar = Color::rgb(0x202020);
-        for t in [Palette::default(), os_theme::design::palette(os_theme::Design::Lemon, None)] {
-            let paint = |close: bool, hover: bool, down: bool| {
-                let mut c = Canvas::new(20, 20, 1.0).unwrap();
-                c.clear(bar);
-                title_button_back(&mut c, &t, Rect::new(0.0, 0.0, 20.0, 20.0), close, hover, down);
-                let p = c.pixmap.pixel(10, 10).unwrap();
-                [p.red(), p.green(), p.blue()]
-            };
-            let sum = |p: [u8; 3]| p.iter().map(|&v| i32::from(v)).sum::<i32>();
-            for close in [false, true] {
-                let (rest, hover, down) = (paint(close, false, false), paint(close, true, false), paint(close, true, true));
-                assert_eq!(rest, [0x20; 3], "nothing at rest");
-                assert_ne!(hover, rest, "a fill on hover (close {close})");
-                assert!(sum(down) < sum(hover), "darker held down (close {close}): {down:?} vs {hover:?}");
-            }
-        }
     }
 
     #[test]

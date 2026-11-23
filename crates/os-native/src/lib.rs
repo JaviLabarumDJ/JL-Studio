@@ -36,7 +36,14 @@ use stream::MemStream;
 pub fn default_fl_dir() -> PathBuf {
     std::env::var_os("OPENSTUDIO_FACTORY")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"C:\Program Files\Image-Line\FL Studio 2026"))
+        .unwrap_or_else(|| {
+            let root=std::env::var_os("ProgramFiles").map(PathBuf::from).unwrap_or_else(||PathBuf::from(r"C:\Program Files")).join("Image-Line");
+            std::fs::read_dir(&root).into_iter().flatten().flatten().map(|entry|entry.path())
+                .filter(|p|p.join("Plugins/Fruity").is_dir())
+                .filter_map(|p|{let name=p.file_name()?.to_str()?.strip_prefix("FL Studio")?.trim();
+                    let version:Vec<u32>=name.split('.').filter_map(|part|part.parse().ok()).collect();Some((version,p))})
+                .max().map(|(_,p)|p).unwrap_or_else(||root.join("FL Studio 2026"))
+        })
 }
 
 /// Whether the experimental native-plugin host is opted into for this process, via the
@@ -184,6 +191,33 @@ impl Drop for DataDir {
     }
 }
 
+/// Resolve runtime libraries from the user's FL installation for this load.
+#[cfg(windows)]
+fn load_native_library(dll: &Path, fl_dir: &Path) -> Result<libloading::Library, libloading::Error> {
+    use libloading::os::windows::Library;
+    use windows_sys::Win32::System::LibraryLoader::{LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR, LOAD_LIBRARY_SEARCH_DEFAULT_DIRS};
+    let shared = fl_dir.join("Shared");
+    // These generators load the FL graphics/audio helpers by basename from
+    // their DLL initialization code. Preload the installed copies by full path
+    // so the process-wide library search path can stay as configured.
+    if dll.is_absolute() && shared.is_dir() && dll.file_stem().and_then(|n| n.to_str()).is_some_and(|n|
+        n.eq_ignore_ascii_case("Slicex_x64") || n.eq_ignore_ascii_case("Fruity Slicer 2_x64")) {
+        let flags = LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS;
+        let _helpers: Vec<_> = ["freetype_x64.dll", "Blend2D.dll", "ILTools_x64.dll",
+            "QuickFontCache_x64.dll", "dsp_ippv2_x64.dll"].iter().filter_map(|name| {
+                let path = shared.join(name);
+                unsafe { Library::load_with_flags(path, flags) }.ok()
+            }).collect();
+        return unsafe { Library::load_with_flags(dll, flags) }.map(Into::into);
+    }
+    unsafe { libloading::Library::new(dll) }
+}
+
+#[cfg(not(windows))]
+fn load_native_library(dll: &Path, _fl_dir: &Path) -> Result<libloading::Library, libloading::Error> {
+    unsafe { libloading::Library::new(dll) }
+}
+
 /// A plugin instance. Not thread-safe: call from one thread.
 ///
 /// Every call into the plugin goes through `guard` (spec: "Crash containment"). When the plugin raises an error it does
@@ -212,7 +246,7 @@ impl Plugin {
         };
         let _one = LIFECYCLE.lock().unwrap_or_else(|e| e.into_inner());
         trace("LoadLibrary");
-        let lib = unsafe { libloading::Library::new(dll) }.map_err(|e| err(e.to_string()))?;
+        let lib = load_native_library(dll, fl_dir).map_err(|e| err(e.to_string()))?;
         let create: abi::CreatePlugInstance =
             *unsafe { lib.get::<abi::CreatePlugInstance>(b"CreatePlugInstance\0") }.map_err(|e| err(e.to_string()))?;
         trace("got CreatePlugInstance");

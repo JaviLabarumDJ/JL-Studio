@@ -132,6 +132,7 @@ pub enum Cmd {
     Automate(String),
     /// Display menu: "0.2 dB limiter safety".
     Safety,
+    PeakGuard,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -461,7 +462,7 @@ impl Logic {
                 m.sep(Cmd::None);
                 m.add(MenuItem::item("Copy value"), Cmd::CopyValue(id.clone()));
                 m.add(MenuItem::item("Paste value").enabled(self.copied.is_some()), Cmd::PasteValue(id.clone()));
-                m.add(MenuItem::item("Enter value..."), Cmd::TypeIn(id.clone()));
+                m.add(MenuItem::item("Type in value..."), Cmd::TypeIn(id.clone()));
                 // Automation belongs to the host: offered when Lemon Studio hosts the editor (host link).
                 m.sep(Cmd::None);
                 m.add(MenuItem::item("Create automation clip").enabled(self.hosted), Cmd::Automate(id.clone()));
@@ -470,10 +471,14 @@ impl Logic {
             MenuReq::Display => {
                 let mut m = MenuDef::new(MenuStyle::Context);
                 m.add(MenuItem::item("0.2 dB limiter safety").mark(Mark::Check(self.safety())), Cmd::Safety);
+                if os_plugkit::visibility::stock_dsp_controls() {
+                    let active = self.params.raw_copy().ends_with(os_engine::effects::dynamics::PEAK_GUARD_TAG);
+                    m.add(MenuItem::item("True-peak guard (4x)").mark(Mark::Check(active)), Cmd::PeakGuard);
+                }
                 let mut about = MenuDef::new(MenuStyle::Context);
-                about.head("Lemon Limiter", Cmd::None);
+                about.head("ML Limiter", Cmd::None);
                 about.add(MenuItem::item(&format!("Version {}", env!("CARGO_PKG_VERSION"))).enabled(false), Cmd::None);
-                about.add(MenuItem::item("Lemon Studio's recreation of Fruity Limiter").enabled(false), Cmd::None);
+                about.add(MenuItem::item("ML Studio's recreation of Fruity Limiter").enabled(false), Cmd::None);
                 m.submenu("About", about, Cmd::None);
                 m
             }
@@ -493,6 +498,14 @@ impl Logic {
             Cmd::TypeIn(id) => return vec![Act::TypeIn(id, x, y)],
             Cmd::Automate(id) => return params::index(&id).map(Act::Automate).into_iter().collect(),
             Cmd::Safety => self.params.edit_raw(|b| b[params::FLAGS_BYTE] ^= FLAG_EXACT_CEILING),
+            Cmd::PeakGuard => self.params.edit_raw(|b| {
+                let tag = os_engine::effects::dynamics::PEAK_GUARD_TAG;
+                if b.ends_with(tag) {
+                    b.truncate(b.len() - tag.len());
+                } else {
+                    b.extend_from_slice(tag);
+                }
+            }),
         }
         vec![Act::Repaint]
     }
@@ -622,7 +635,7 @@ mod win32 {
                 tracking: false,
                 slot: slot.clone(),
             });
-            let title = pw::wide("Lemon Limiter");
+            let title = pw::wide("ML Limiter");
             let hwnd = CreateWindowExW(
                 0,
                 class.as_ptr(),
@@ -775,6 +788,7 @@ mod win32 {
         /// Timer / parameter change: expire confirmed overlay values, repaint when anything shown changed (the display
         /// scrolls with each new column).
         fn poll(&mut self) {
+            if self.canvas.sync_stock_editor_theme() { self.invalidate(); }
             let dirty = self.logic.vals.expire();
             let sig = self.logic.vals.signature();
             let rv = self.params.raw_version.load(Ordering::Acquire);
@@ -844,11 +858,12 @@ mod win32 {
                     }
                     1
                 }
-                Cmd::Changed | Cmd::Note | Cmd::Automate | Cmd::Audio | Cmd::Resizable | Cmd::SetSize | Cmd::Notes => 0,
+                Cmd::StateEdit | Cmd::SampleFit | Cmd::BrowseSample | Cmd::Changed | Cmd::Note | Cmd::Automate | Cmd::Audio | Cmd::Resizable | Cmd::SetSize => 0,
             }
         }
 
         fn paint(&mut self) {
+            self.canvas.sync_stock_editor_theme();
             let (hdc, ps) = pw::begin_paint(self.hwnd);
             self.last_written = self.logic.written();
             self.logic.paint(&mut self.canvas, &self.palette);
@@ -1015,6 +1030,7 @@ mod gui {
 
         /// Timer / parameter change: expire confirmed overlay values, repaint when anything shown changed.
         fn poll(&mut self) {
+            if self.canvas.sync_stock_editor_theme() { self.dirty = true; }
             let dirty = self.logic.vals.expire();
             let sig = self.logic.vals.signature();
             let rv = self.params.raw_version.load(Ordering::Acquire);
@@ -1063,6 +1079,7 @@ mod gui {
         }
 
         fn paint(&mut self) {
+            self.canvas.sync_stock_editor_theme();
             self.dirty = false;
             self.last_written = self.logic.written();
             self.logic.paint(&mut self.canvas, &self.palette);
@@ -1242,7 +1259,7 @@ mod tests {
             (Target::Knob("gain".into()), "Gain: 0.0dB  1.00"),
             (Target::Knob("g_thres".into()), "Noise threshold: -INFdB  0.00"),
             (Target::Knob("rel".into()), "Limiter release time: 85.53ms"),
-            (Target::Store, "Copy to B"),
+            (Target::Store, "Store in spare state"),
             (Target::Speed, "Scrolling speed"),
         ] {
             let (x, y) = centre(&l, &t);

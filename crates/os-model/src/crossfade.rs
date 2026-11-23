@@ -1,5 +1,4 @@
 // Copyright (C) 2026 ItsAlphaNeon
-// Copyright (C) 2026 thacer13
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
@@ -252,7 +251,6 @@ mod tests {
 
     fn channel(index: u16, kind: ChannelKind) -> Channel {
         Channel {
-            id: crate::Id::NONE,
             index,
             kind,
             name: None,
@@ -309,7 +307,7 @@ mod tests {
         assert!((l[0].1 - XF).abs() < 1e-3 && (l[1].0 - XF).abs() < 1e-3, "{l:?}");
         assert_eq!((l[0].0, l[1].1), (0.0, 0.0), "the outer edges overlap nothing");
         // Written without the bits, at tension 0 (+0, not -0).
-        let (a, b) = (clips(&p)[0], clips(&p)[1]);
+        let (a, b) = (clips(&p)[0].clone(), clips(&p)[1].clone());
         assert_eq!(a.raw[56] & 3, 0);
         assert_eq!(b.raw[56] & 3, 0);
         assert_eq!((a.fade_out(), b.fade_in()), (None, None), "not fades set by hand");

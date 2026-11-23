@@ -187,13 +187,12 @@ fn encode(x: f32, format: Format, out: &mut [u8]) {
     }
 }
 
-/// Writes the interleaved stereo `mix` into a device buffer of `channels` channels: left and right on the first two (a
-/// mono device gets the left), silence on the others.
-fn write(out: &mut [u8], mix: &[f32], channels: usize, format: Format) {
+/// Writes each output to its channel of the interleaved device buffer.
+fn write(out: &mut [u8], mix: super::DeviceBlock<'_>, channels: usize, format: Format) {
     let n = format.bytes();
-    for (frame, s) in out.chunks_exact_mut(n * channels).zip(mix.chunks_exact(2)) {
+    for (i, frame) in out.chunks_exact_mut(n * channels).enumerate() {
         for (c, slot) in frame.chunks_exact_mut(n).enumerate() {
-            encode(if c < 2 { s[c] } else { 0.0 }, format, slot);
+            encode(mix.sample(i, c), format, slot);
         }
     }
 }
@@ -423,6 +422,8 @@ fn render(name: Option<&str>, mode: Mode, rate: Option<u32>, buffer: Option<u32>
             return;
         }
     };
+    mix.headphones.set_rate(s.info.rate);
+    mix.prepare_outputs(s.channels);
     if let Err(e) = unsafe { s.client.Start() } {
         let _ = tx.send(Err(Refused::of(&e)));
         return;
@@ -490,7 +491,11 @@ impl Started {
             let p = self.render.GetBuffer(frames)?;
             // Safety: Windows lends `frames` frames of the stream's format at `p` until `ReleaseBuffer`.
             let out = std::slice::from_raw_parts_mut(p, frames as usize * self.channels * self.format.bytes());
-            write(out, mix.block(frames as usize), self.channels, self.format);
+            // Native WASAPI provides the stream's estimated playback latency rather than a CPAL callback timestamp.
+            let playback_at = self.info.latency.map(|frames| Duration::from_secs_f64(f64::from(frames) / f64::from(self.info.rate)))
+                .filter(|&delay| delay <= Duration::from_secs(1))
+                .and_then(|delay| Instant::now().checked_add(delay));
+            write(out, mix.block_at(frames as usize, self.channels, playback_at), self.channels, self.format);
             self.render.ReleaseBuffer(frames, 0)
         }
     }
@@ -549,7 +554,7 @@ fn exclusive(
         // A rate the device does not run at itself: its own.
         None => match pick(m.rate)? {
             Some(f) => (m.rate, f),
-            None => return Err(Refused::Other("it takes none of the sample formats Lemon Studio writes".into())),
+            None => return Err(Refused::Other("it takes none of the sample formats ML Studio writes".into())),
         },
     };
     let w = wave(format, rate, m.channels, m.mask);
@@ -588,7 +593,7 @@ fn small(d: &IMMDevice, m: &MixFormat, rate: Option<u32>, buffer: Option<u32>) -
         if rate.is_some_and(|r| r != m.rate) {
             return Err(Refused::OwnRate(m.rate));
         }
-        let format = m.format.ok_or_else(|| Refused::Other("the system mixer's sample format is not one Lemon Studio writes".into()))?;
+        let format = m.format.ok_or_else(|| Refused::Other("the system mixer's sample format is not one ML Studio writes".into()))?;
         c3.InitializeSharedAudioStream(AUDCLNT_STREAMFLAGS_EVENTCALLBACK, period, &m.wave.Format, None).map_err(|e| Refused::of(&e))?;
         let client: IAudioClient = c3.cast().map_err(|e| Refused::Other(text(&e)))?;
         Ok((client, format, m.rate, (min, def)))
@@ -620,16 +625,18 @@ mod tests {
         assert_eq!(bytes(-4.0, Format::I16), [0x01, 0x80], "clipped");
     }
 
-    /// Left and right on the first two channels, silence on the others; a mono device gets the left.
+    /// Primary and additional outputs retain their channel order; a mono device gets the left.
     #[test]
     fn channels_get_their_side() {
-        let mix = [0.5, -0.5, 0.25, 0.75];
+        let mix = || super::super::DeviceBlock {
+            stereo: &[0.5, -0.5, 0.25, 0.75], extra: &[0.125, 0.25, -0.125, -0.25], extra_channels: 2,
+        };
         let mut out = [0u8; 2 * 4 * 4];
-        write(&mut out, &mix, 4, Format::F32);
+        write(&mut out, mix(), 4, Format::F32);
         let at = |i: usize| f32::from_le_bytes(out[4 * i..4 * i + 4].try_into().unwrap());
-        assert_eq!((0..8).map(at).collect::<Vec<_>>(), [0.5, -0.5, 0.0, 0.0, 0.25, 0.75, 0.0, 0.0]);
+        assert_eq!((0..8).map(at).collect::<Vec<_>>(), [0.5, -0.5, 0.125, 0.25, 0.25, 0.75, -0.125, -0.25]);
         let mut mono = [0u8; 2 * 2];
-        write(&mut mono, &mix, 1, Format::I16);
+        write(&mut mono, mix(), 1, Format::I16);
         assert_eq!(mono, [0x00, 0x40, 0x00, 0x20]);
     }
 

@@ -2,11 +2,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! ASIO output (Windows): the chosen driver plays the mix on its first outputs, in pairs (the master on the pair it is
-//! set to, a mixer track on its own: spec audio/track-io.md §2.1), at the buffer length chosen on the Audio page when it
-//! takes it, else the one set in its own panel (`control_panel`). Its first inputs open with the outputs (full duplex):
-//! the same callback hands them to the mixer tracks that hear them (`super::input_ring`) and to the capture while One-click
-//! audio recording records (`crate::capture`; spec: ui/one-click-recording.md §2).
+//! ASIO output (Windows): the chosen driver plays the mix and additional interface sends at the buffer length chosen on the
+//! Audio page when it takes it, else the one set in its own panel (`control_panel`). Its first inputs open with the
+//! outputs (full duplex): the same callback hands them to the capture while One-click audio recording records
+//! (`crate::capture`; spec: ui/one-click-recording.md §2).
 //!
 //! The driver is loaded by name through asio-sys, which builds the ASIO SDK's host files (`asiosdk`). cpal's ASIO host
 //! is not used: it finds a driver by loading every driver listed before it, and one whose hardware is missing may
@@ -14,12 +13,12 @@
 //! reads the registry and loads none.
 // spec: audio/devices.md
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use asio_sys as sys;
 
-use super::{input_ring, Errors, Mix};
+use super::{Errors, Mix};
 
 static ASIO: OnceLock<sys::Asio> = OnceLock::new();
 
@@ -37,6 +36,32 @@ pub(crate) struct AsioOut {
     driver: sys::Driver,
     callback: sys::BufferCallbackId,
     events: sys::DriverEventCallbackId,
+    preferred_buffer: u32,
+    buffer_event: Arc<AtomicU32>,
+}
+
+impl AsioOut {
+    /// An explicit size from a notification takes effect even if the driver has not updated its preferred size yet.
+    pub(crate) fn buffer_change(&self, reset_in_panel: bool) -> Option<Option<u32>> {
+        let event = self.buffer_event.swap(0, Ordering::AcqRel);
+        let preferred = self.driver.buffersize_range().ok().map(|range| preferred_size(range.preferred));
+        driver_buffer_change(self.preferred_buffer, preferred, event, reset_in_panel)
+    }
+}
+
+fn preferred_size(preference: sys::BufferPreference) -> u32 {
+    match preference {
+        sys::BufferPreference::Only(size) | sys::BufferPreference::Preferred(size)
+        | sys::BufferPreference::Stepped { preferred: size, .. } => size,
+    }
+}
+
+fn driver_buffer_change(before: u32, preferred: Option<u32>, event: u32, reset_in_panel: bool) -> Option<Option<u32>> {
+    // Zero means no notification; one means the driver signaled a change without naming a size.
+    if let Some(size) = event.checked_sub(1) {
+        return Some((size > 0 && preferred != Some(size)).then_some(size));
+    }
+    (preferred.is_some_and(|size| size != before) || reset_in_panel).then_some(None)
 }
 
 impl Drop for AsioOut {
@@ -44,7 +69,6 @@ impl Drop for AsioOut {
         let _ = self.driver.stop();
         // The mix, and the sources in it, go with the callback (on this thread: the driver no longer calls it).
         self.driver.remove_callback(self.callback);
-        input_ring().open(0, 0);
         self.driver.remove_event_callback(self.events);
         let _ = self.driver.dispose_buffers();
         // Then `driver` itself: the driver exits and is unloaded.
@@ -61,9 +85,6 @@ pub(crate) struct Opened {
     pub(crate) channels: u16,
     /// Inputs open (0: none, or the driver refused them).
     pub(crate) inputs: u16,
-    /// The driver's names for the outputs and inputs open.
-    pub(crate) out_names: Vec<String>,
-    pub(crate) in_names: Vec<String>,
     /// The rates of `audio_cfg::RATES` and the lengths of `audio_cfg::BUFFERS` it takes.
     pub(crate) rates: Vec<u32>,
     pub(crate) sizes: Vec<u32>,
@@ -72,10 +93,8 @@ pub(crate) struct Opened {
     pub(crate) input_latency: Option<u32>,
 }
 
-/// The inputs opened at most: the ones the menus list.
+/// The inputs opened at most: the ones the menu lists.
 const MAX_INPUTS: i32 = 8;
-/// The outputs opened at most, in pairs (spec: audio/track-io.md §2.1).
-const MAX_OUTPUTS: i32 = 16;
 
 /// Loads driver `name` and plays `mix` on it: at `rate` when the driver takes it (else its own), at `buffer` frames
 /// when it takes that (else its own, the length set in its panel). Overloads and requests to be reset (a buffer length
@@ -105,36 +124,42 @@ pub(crate) fn open(name: &str, rate: Option<u32>, buffer: Option<u32>, mut mix: 
     if now < 1.0 {
         return Err("the driver has no sample rate".into());
     }
+    mix.headphones.set_rate(now.round() as u32);
     let counts = driver.channels().map_err(|e| e.to_string())?;
     let outs = counts.outs;
     if outs < 1 {
         return Err("the driver has no outputs".into());
     }
-    // Its outputs in pairs (one alone when it has one: both sides summed there).
-    let channels = if outs == 1 { 1 } else { (outs.min(MAX_OUTPUTS) / 2 * 2) as usize };
-    mix.set_width((channels / 2).max(1));
+    let wanted = (outs as usize).min(super::MAX_OUTPUT_CHANNELS);
     let ty = driver.output_data_type().map_err(|e| e.to_string())?;
-    let (format, big) = Format::of(&ty).ok_or_else(|| format!("the driver's sample format ({ty:?}) is not one Lemon Studio writes"))?;
+    let (format, big) = Format::of(&ty).ok_or_else(|| format!("the driver's sample format ({ty:?}) is not one ML Studio writes"))?;
     let range = driver.buffersize_range().map_err(|e| e.to_string())?;
     let sizes = sizes(&range);
     // A length it refuses after all: its own.
-    let ask = buffer.filter(|b| sizes.contains(b)).map(|b| b as i32);
+    let ask = buffer.filter(|&b| accepts_override(&range, b)).map(|b| b as i32);
     // Its inputs with its outputs, else its outputs alone (a driver that refuses its inputs, or has none, plays on).
     let ins = counts.ins.clamp(0, MAX_INPUTS) as usize;
     let in_format = driver.input_data_type().ok().and_then(|t| Format::of(&t));
-    let prepare = |ins: usize, ask: Option<i32>| {
+    let prepare = |channels: usize, ins: usize, ask: Option<i32>| {
         if ins == 0 {
             return driver.prepare_output_stream(None, channels, ask);
         }
         let s = driver.prepare_input_stream(None, ins, ask)?;
         driver.prepare_output_stream(s.input, channels, ask)
     };
-    let tries = [(ins, ask), (ins, None), (0, ask), (0, None)];
+    let inputs = [if in_format.is_some() { ins } else { 0 }, 0];
+    let outputs = [wanted, wanted.min(2)];
     let mut streams = Err(sys::AsioError::NoDrivers);
-    for (i, a) in tries.into_iter().filter(|&(i, _)| i == 0 || in_format.is_some()) {
-        streams = prepare(i, a);
-        if streams.is_ok() {
-            break;
+    // Keep existing recording inputs if the driver only accepts them with a stereo output.
+    'open: for (i, ins) in inputs.into_iter().enumerate() {
+        if i > 0 && ins == inputs[0] { break; }
+        for (j, channels) in outputs.into_iter().enumerate() {
+            if j > 0 && channels == outputs[0] { break; }
+            streams = prepare(channels, ins, ask);
+            if streams.is_err() && ask.is_some() {
+                streams = prepare(channels, ins, None);
+            }
+            if streams.is_ok() { break 'open; }
         }
     }
     let streams = streams.map_err(|e| e.to_string())?;
@@ -146,13 +171,13 @@ pub(crate) fn open(name: &str, rate: Option<u32>, buffer: Option<u32>, mut mix: 
     let frames = stream.buffer_size.max(1) as usize;
     // Each channel's two halves (the driver plays one while the callback fills the other).
     let halves = Halves(stream.buffer_infos.iter().map(|b| b.buffers.map(|p| p as usize)).collect());
-    let width = 2 * (channels / 2).max(1);
-    input_ring().open(in_halves.0.len(), frames);
+    let channels = halves.0.len();
+    mix.prepare_outputs(channels);
     let callback = driver.add_callback(move |info| {
         let half = (info.buffer_index & 1) as usize;
-        // The block's inputs first, so the streams rendering the next one hear them; the capture's too, while One-click
-        // audio recording records.
-        if !in_halves.0.is_empty() {
+        // Publish input before the output wakes its feeder, for live monitoring and disk recording.
+        let cap = crate::capture::capture();
+        if (cap.on() || crate::input_monitor::monitor().on()) && !in_halves.0.is_empty() {
             let last = in_halves.0.len() - 1;
             let n = in_format.bytes();
             let at = |ch: usize, f: usize| {
@@ -161,32 +186,37 @@ pub(crate) fn open(name: &str, rate: Option<u32>, buffer: Option<u32>, mut mix: 
                 let b = unsafe { std::slice::from_raw_parts(p.add(f * n), n) };
                 decode(b, in_format, in_big)
             };
-            input_ring().push(frames, at);
-            let cap = crate::capture::capture();
-            if cap.on() {
-                cap.push(frames, at);
-            }
+            crate::capture::push_inputs(true, frames, at);
+            crate::input_monitor::push_all(true, now.round() as u32, frames, at);
         }
-        let sum = mix.block(frames);
+        let sum = mix.block_at(frames, channels, None);
         // One output: both sides (`Side::Both`).
         let mono = halves.0.len() == 1;
         for (ch, b) in halves.0.iter().enumerate() {
             let side = if mono { Side::Both } else { Side::One(ch) };
             // Safety: the driver's buffer holds `frames` samples of `format` until the buffers are disposed of, which
             // only happens after this callback is removed (`AsioOut::drop`).
-            unsafe { write(b[half] as *mut u8, sum, width, side, frames, format, big) };
+            unsafe { write(b[half] as *mut u8, &sum, side, frames, format, big) };
         }
+
     });
     // Drivers may ask to be reset while they start; that is not a reason to open them anew.
     let started = Arc::new(AtomicBool::new(false));
+    let buffer_event = Arc::new(AtomicU32::new(0));
     let events = driver.add_event_callback({
         let started = started.clone();
+        let buffer_event = buffer_event.clone();
         move |e| {
             use sys::AsioMessageSelectors::*;
             let on = started.load(Ordering::Acquire);
             match e {
                 // The messages this host takes besides the ones asio-sys answers for itself.
-                sys::AsioDriverEvent::Message { selector: kAsioSelectorSupported, value } => value == kAsioOverload as i32,
+                sys::AsioDriverEvent::Message { selector: kAsioSelectorSupported, value } => value == kAsioOverload as i32 || value == kAsioBufferSizeChange as i32,
+                sys::AsioDriverEvent::Message { selector: kAsioBufferSizeChange, value } if on => {
+                    buffer_event.store(value.max(0) as u32 + 1, Ordering::Release);
+                    errors.fail("the driver changed its buffer length".into());
+                    true
+                }
                 sys::AsioDriverEvent::Message { selector: kAsioResetRequest, .. } if on => {
                     errors.fail("the driver asked to be reset".into());
                     true
@@ -207,32 +237,42 @@ pub(crate) fn open(name: &str, rate: Option<u32>, buffer: Option<u32>, mut mix: 
             }
         }
     });
-    let out = AsioOut { driver, callback, events };
+    let mut out = AsioOut { driver, callback, events, preferred_buffer: preferred_size(range.preferred), buffer_event };
     out.driver.start().map_err(|e| e.to_string())?;
+    if let Ok(range) = out.driver.buffersize_range() {
+        out.preferred_buffer = preferred_size(range.preferred);
+    }
     started.store(true, Ordering::Release);
     let buffers = (range.min.max(1) as u32, range.max.max(1) as u32);
     let lat = out.driver.latencies().ok();
     let latency = lat.as_ref().map(|l| l.output).filter(|&l| l > 0).map(|l| l as u32);
     let input_latency = lat.map(|l| l.input).filter(|&l| l > 0 && inputs > 0).map(|l| l as u32);
-    let out_names = (0..channels).map(|c| channel_name(c as i32, false).unwrap_or_else(|| format!("Out {}", c + 1))).collect();
-    let in_names = (0..usize::from(inputs)).map(|c| channel_name(c as i32, true).unwrap_or_else(|| format!("In {}", c + 1))).collect();
-    Ok(Opened { out, rate: now.round() as u32, frames: frames as u32, buffers, channels: channels as u16, inputs, out_names, in_names, rates, sizes, latency, input_latency })
+    Ok(Opened { out, rate: now.round() as u32, frames: frames as u32, buffers, channels: channels as u16, inputs, rates, sizes, latency, input_latency })
 }
 
-/// The lengths of `audio_cfg::BUFFERS` a driver takes: within its range, and a power of two or a whole number of steps
+fn accepts_override(range: &sys::BufferSizeRange, frames: u32) -> bool {
+    let (min, max) = (range.min.max(1) as u32, range.max.max(1) as u32);
+    (min..=max).contains(&frames) && match range.preferred {
+        sys::BufferPreference::Only(_) => frames.is_power_of_two(),
+        sys::BufferPreference::Preferred(_) => false,
+        sys::BufferPreference::Stepped { step, .. } => (frames - min) % step.max(1) == 0,
+    }
+}
+
+/// The supported sizes to offer: within its range, and a power of two or a whole number of steps
 /// past its smallest as it says (`ASIOGetBufferSize`'s granularity; asio-sys gives -1, powers of two, as `Only`). A
 /// driver with one length (its smallest is its largest, or no granularity): none, its own being the one.
 fn sizes(r: &sys::BufferSizeRange) -> Vec<u32> {
     let (min, max) = (r.min.max(1) as u32, r.max.max(1) as u32);
-    let takes = |b: u32| match r.preferred {
-        sys::BufferPreference::Only(_) => b.is_power_of_two(),
-        sys::BufferPreference::Preferred(_) => false,
-        sys::BufferPreference::Stepped { step, .. } => (b - min) % step.max(1) == 0,
-    };
     if min >= max {
         return Vec::new();
     }
-    crate::audio_cfg::BUFFERS.into_iter().filter(|&b| (min..=max).contains(&b) && takes(b)).collect()
+    match r.preferred {
+        sys::BufferPreference::Stepped { step, .. } if (max - min) / step.max(1) <= 64 => {
+            (min..=max).step_by(step.max(1) as usize).collect()
+        }
+        _ => crate::audio_cfg::BUFFERS.into_iter().filter(|&b| accepts_override(r, b)).collect(),
+    }
 }
 
 /// Opens the open driver's own settings window (the driver's panel: its buffer length, its device). A buffer length
@@ -253,33 +293,6 @@ pub(crate) fn control_panel() -> Result<(), String> {
         -1000 => Err("the driver has no panel".into()),
         e => Err(format!("the driver's panel did not open (error {e})")),
     }
-}
-
-/// The loaded driver's name for its output (or input) `channel` (`ASIOGetChannelInfo`); `None` when it gives none.
-fn channel_name(channel: i32, input: bool) -> Option<String> {
-    #[repr(C)]
-    struct ChannelInfo {
-        channel: std::ffi::c_long,
-        is_input: std::ffi::c_long,
-        is_active: std::ffi::c_long,
-        channel_group: std::ffi::c_long,
-        sample_type: std::ffi::c_long,
-        name: [std::ffi::c_char; 32],
-    }
-    unsafe extern "C" {
-        // `ASIOError ASIOGetChannelInfo(ASIOChannelInfo *info)` in the SDK's common/asio.cpp, as `control_panel`'s.
-        #[link_name = "\u{1}?ASIOGetChannelInfo@@YAJPEAUASIOChannelInfo@@@Z"]
-        fn asio_get_channel_info(info: *mut ChannelInfo) -> std::ffi::c_long;
-    }
-    asio().loaded_driver()?;
-    let mut info = ChannelInfo { channel, is_input: input.into(), is_active: 0, channel_group: 0, sample_type: 0, name: [0; 32] };
-    // Safety: a driver is loaded (on this thread), and `info` is laid out as the SDK's struct.
-    if unsafe { asio_get_channel_info(&mut info) } != 0 {
-        return None;
-    }
-    let bytes: Vec<u8> = info.name.iter().take_while(|&&c| c != 0).map(|&c| c as u8).collect();
-    let name = String::from_utf8_lossy(&bytes).trim().to_string();
-    (!name.is_empty()).then_some(name)
 }
 
 /// The driver's buffer halves per channel, as addresses: only the callback writes to them.
@@ -370,24 +383,23 @@ fn decode(b: &[u8], format: Format, big: bool) -> f32 {
     }
 }
 
-/// Which of the mix an output gets: its own channel, or the first pair's sides summed and halved (a driver with one
-/// output).
+/// Which of the stereo mix an output gets: one side, or both summed and halved (a driver with one output).
 #[derive(Clone, Copy)]
 enum Side {
     One(usize),
     Both,
 }
 
-/// Writes `side` of `mix` (interleaved, `width` channels) into a driver buffer of `frames` samples.
+/// Writes `side` of the interleaved stereo `mix` into a driver buffer of `frames` samples.
 ///
 /// Safety: `dst` holds `frames` samples of `format`, and nothing else uses it meanwhile.
-unsafe fn write(dst: *mut u8, mix: &[f32], width: usize, side: Side, frames: usize, format: Format, big: bool) {
+unsafe fn write(dst: *mut u8, mix: &super::DeviceBlock<'_>, side: Side, frames: usize, format: Format, big: bool) {
     let n = format.bytes();
     let out = unsafe { std::slice::from_raw_parts_mut(dst, frames * n) };
     for (i, s) in out.chunks_exact_mut(n).enumerate() {
         let x = match side {
-            Side::One(ch) => mix[width * i + ch],
-            Side::Both => 0.5 * (mix[width * i] + mix[width * i + 1]),
+            Side::One(ch) => mix.sample(i, ch),
+            Side::Both => 0.5 * (mix.sample(i, 0) + mix.sample(i, 1)),
         };
         encode(x, format, big, s);
     }
@@ -438,22 +450,38 @@ mod tests {
         }
     }
 
-    /// A buffer gets its channel of the mix; a driver's only output gets both sides, halved.
+    /// A buffer gets one side of the stereo mix; a driver's only output gets both, halved.
     #[test]
     fn a_buffer_gets_its_side() {
-        let mix = [0.5, -0.5, 0.25, 0.75];
+        let mix = super::super::DeviceBlock {
+            stereo: &[0.5, -0.5, 0.25, 0.75], extra: &[0.125, 0.25, -0.125, -0.25], extra_channels: 2,
+        };
         let mut buf = [0u8; 8];
-        unsafe { write(buf.as_mut_ptr(), &mix, 2, Side::One(1), 2, Format::F32, false) };
+        unsafe { write(buf.as_mut_ptr(), &mix, Side::One(1), 2, Format::F32, false) };
         assert_eq!(buf[..4], (-0.5f32).to_le_bytes());
         assert_eq!(buf[4..], 0.75f32.to_le_bytes());
-        unsafe { write(buf.as_mut_ptr(), &mix, 2, Side::Both, 2, Format::F32, false) };
+        unsafe { write(buf.as_mut_ptr(), &mix, Side::One(3), 2, Format::F32, false) };
+        assert_eq!(buf[..4], 0.25f32.to_le_bytes());
+        assert_eq!(buf[4..], (-0.25f32).to_le_bytes());
+        unsafe { write(buf.as_mut_ptr(), &mix, Side::Both, 2, Format::F32, false) };
         assert_eq!(buf[..4], 0.0f32.to_le_bytes());
         assert_eq!(buf[4..], 0.5f32.to_le_bytes());
-        // Two pairs: output 3 is the second pair's left.
-        let wide = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8];
-        unsafe { write(buf.as_mut_ptr(), &wide, 4, Side::One(2), 2, Format::F32, false) };
-        assert_eq!(buf[..4], 0.3f32.to_le_bytes());
-        assert_eq!(buf[4..], 0.7f32.to_le_bytes());
+    }
+
+    #[test]
+    fn asio_panel_buffer_change_uses_the_drivers_new_choice() {
+        assert_eq!(driver_buffer_change(128, Some(128), 0, false), None, "viewing the panel keeps the preset");
+        assert_eq!(driver_buffer_change(128, Some(64), 0, false), Some(None), "modal edit with no notification");
+        assert_eq!(driver_buffer_change(128, Some(64), 65, false), Some(None), "follow the saved driver preference");
+        assert_eq!(driver_buffer_change(128, Some(128), 65, false), Some(Some(64)), "keep the notified choice");
+        assert_eq!(driver_buffer_change(128, None, 1, false), Some(None), "a change with no size");
+        assert_eq!(driver_buffer_change(128, Some(128), 0, true), Some(None), "a reset signaled while the panel was open");
+        let range = sys::BufferSizeRange {
+            min: 32, max: 2048, preferred: sys::BufferPreference::Stepped { preferred: 128, step: 8 },
+        };
+        assert!(accepts_override(&range, 48));
+        assert!(!accepts_override(&range, 49));
+        assert!(!accepts_override(&range, 8));
     }
 
     /// The buffer lengths offered for a driver: those of the usual list it takes.
@@ -462,7 +490,7 @@ mod tests {
         use sys::BufferPreference::*;
         let range = |min, max, preferred| sys::BufferSizeRange { min, max, preferred };
         assert_eq!(sizes(&range(64, 2048, Stepped { preferred: 512, step: 8 })), [64, 128, 256, 512, 1024, 2048]);
-        assert_eq!(sizes(&range(96, 2048, Stepped { preferred: 512, step: 32 })), [128, 256, 512, 1024, 2048]);
+        assert_eq!(sizes(&range(96, 2048, Stepped { preferred: 512, step: 32 })), (96..=2048).step_by(32).collect::<Vec<_>>());
         assert_eq!(sizes(&range(100, 1000, Only(256))), [128, 256, 512], "powers of two");
         assert_eq!(sizes(&range(512, 512, Preferred(512))), [] as [u32; 0], "its own only");
         assert_eq!(sizes(&range(256, 2048, Preferred(512))), [] as [u32; 0], "no granularity: its own only");

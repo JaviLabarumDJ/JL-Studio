@@ -1,5 +1,4 @@
 // Copyright (C) 2026 ItsAlphaNeon
-// Copyright (C) 2026 thacer13
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
@@ -10,6 +9,7 @@
 // spec: plugins/plugin-parameters.md §2 (automation playback), §3 (targets)
 
 use os_model::target::Target;
+use std::collections::{HashMap, HashSet};
 
 use super::{Engine, Fx, FxSlot};
 
@@ -40,12 +40,14 @@ pub(super) struct ParamEvent {
 /// Engine state for parameter automation.
 #[derive(Debug, Default)]
 pub(super) struct ParamAuto {
+    /// Tick-relative frame interval being mixed into the device queue.
+    pub slot_window: Option<(usize, usize)>,
     /// This block's events, in frame order.
     pub events: Vec<ParamEvent>,
     /// Last value sent per target (a value is only sent again when it changes).
-    last: Vec<(Target, f64)>,
+    last: HashMap<Target, f64>,
     /// Scratch: targets already handled at the current step.
-    done: Vec<Target>,
+    done: HashSet<Target>,
     /// The playlist has clips on plugin parameters at all.
     pub any: bool,
     /// This tick's values for plugins that take one value per tick (`Instrument::tick_params`): the walked value the
@@ -53,55 +55,29 @@ pub(super) struct ParamAuto {
     /// "Parameters", audio/automation.md "When a clip acts").
     pub ticks: Vec<ParamEvent>,
     /// Last per-tick value handed on per target (`Round(level * 2^30)`).
-    last_tick: Vec<(Target, i64)>,
-    /// Pattern control points on plugin parameters due on the tick starting now: target, level 0..1. They act before
-    /// the clips of the same tick (spec: audio/automation.md "Pattern control points").
-    pub points: Vec<(Target, f64)>,
+    last_tick: HashMap<Target, i64>,
 }
 
 impl ParamAuto {
     pub fn new(any: bool) -> Self {
         ParamAuto {
+            slot_window: None,
             events: Vec::with_capacity(256),
-            last: Vec::with_capacity(16),
-            done: Vec::with_capacity(16),
+            last: HashMap::with_capacity(256),
+            done: HashSet::with_capacity(256),
             any,
             ticks: Vec::with_capacity(16),
-            last_tick: Vec::with_capacity(16),
-            points: Vec::with_capacity(16),
+            last_tick: HashMap::with_capacity(256),
         }
     }
 
-    /// A control point on a plugin parameter, handed on with this tick's values (`point_ticks`, `point_events`).
-    pub fn point(&mut self, target: Target, level: f64) {
-        self.points.retain(|p| p.0 != target);
-        self.points.push((target, level));
+    /// Readback for paced UI feedback; no plugin writes or gesture events.
+    pub(super) fn values(&self,out:&mut Vec<(Target,f64)>) {
+        out.extend(self.last_tick.iter().map(|(&t,&v)|(t,v as f64/1_073_741_824.)));
+        out.extend(self.last.iter().map(|(&t,&v)|(t,v)));
     }
-
-    /// This tick's points for the plugins that take one value per tick.
-    pub fn point_ticks(&mut self) {
-        for i in 0..self.points.len() {
-            let (target, level) = self.points[i];
-            self.tick_value(target, (level * 1_073_741_824.0).round() as i64);
-        }
-    }
-
-    /// This tick's points for the other plugins, at the tick's first frame; then they are done.
-    fn point_events(&mut self) {
-        for (target, level) in std::mem::take(&mut self.points) {
-            let (dest, index) = match target {
-                Target::ChannelParam(c, k) => (Dest::Channel(usize::from(c)), k),
-                Target::SlotParam(t, s, k) => (Dest::Slot(usize::from(t), usize::from(s)), k),
-                _ => continue,
-            };
-            match self.last.iter_mut().find(|(t, _)| *t == target) {
-                Some((_, last)) => *last = level,
-                None => self.last.push((target, level)),
-            }
-            self.events.push(ParamEvent { dest, offset: 0, index: u32::from(index), value: level });
-        }
-    }
-
+    /// Releasing Touch must resend even an unchanged, flat automation value.
+    pub fn forget_target(&mut self,target:Target) {self.last.remove(&target);self.last_tick.remove(&target);}
     /// Values are sent again from scratch (after a seek: the plugin gets the value at the new position).
     pub fn forget(&mut self) {
         self.last.clear();
@@ -116,10 +92,10 @@ impl ParamAuto {
             Target::SlotParam(t, s, k) => (Dest::Slot(usize::from(t), usize::from(s)), k),
             _ => return,
         };
-        match self.last_tick.iter_mut().find(|(t, _)| *t == target) {
-            Some((_, last)) if *last == n => return,
-            Some((_, last)) => *last = n,
-            None => self.last_tick.push((target, n)),
+        match self.last_tick.get_mut(&target) {
+            Some(last) if *last == n => return,
+            Some(last) => *last = n,
+            None => { self.last_tick.insert(target, n); },
         }
         self.ticks.push(ParamEvent { dest, offset: 0, index: u32::from(index), value: n as f64 / 1_073_741_824.0 });
     }
@@ -143,16 +119,15 @@ impl ParamAuto {
             // A busy instance misses these values: they are sent again at the next step.
             let Ok(mut h) = h.try_lock() else {
                 let mine = |tg: &Target| matches!(*tg, Target::SlotParam(a, b, _) if usize::from(a) == t && usize::from(b) == fx.slot);
-                self.last.retain(|(tg, _)| !mine(tg));
-                self.last_tick.retain(|(tg, _)| !mine(tg));
+                self.last.retain(|tg, _| !mine(tg));
+                self.last_tick.retain(|tg, _| !mine(tg));
                 continue;
             };
-            // Each parameter from the list its plugin takes (a container's members may differ: `tick_params_at`).
-            for (list, ticks) in [(&self.events, false), (&self.ticks, true)] {
-                for e in list.iter().filter(|e| e.dest == dest) {
-                    if h.tick_params_at(e.index) == ticks {
-                        h.param_fx(e.offset, e.index, e.value);
-                    }
+            let list = if h.tick_params_fx() { &self.ticks } else { &self.events };
+            for e in list.iter().filter(|e| e.dest == dest) {
+                let (start, end) = self.slot_window.unwrap_or((0, usize::MAX));
+                if (start..end).contains(&(e.offset as usize)) {
+                    h.param_fx(e.offset - start as u32, e.index, e.value);
                 }
             }
         }
@@ -167,11 +142,17 @@ impl ParamAuto {
             .map(move |e| (e.offset - a, e.index, e.value))
     }
 
+    pub fn resend_slot(&mut self, track: usize, slot: usize) {
+        let mine = |tg: &Target| matches!(*tg, Target::SlotParam(t, s, _) if usize::from(t) == track && usize::from(s) == slot);
+        self.last.retain(|tg, _| !mine(tg));
+        self.last_tick.retain(|tg, _| !mine(tg));
+    }
+
     /// A busy instrument missed channel `c`'s values: send them again at the next step.
     pub fn resend_channel(&mut self, c: usize) {
         let mine = |tg: &Target| matches!(*tg, Target::ChannelParam(ch, _) if usize::from(ch) == c);
-        self.last.retain(|(tg, _)| !mine(tg));
-        self.last_tick.retain(|(tg, _)| !mine(tg));
+        self.last.retain(|tg, _| !mine(tg));
+        self.last_tick.retain(|tg, _| !mine(tg));
     }
 }
 
@@ -183,7 +164,16 @@ impl Engine {
     /// Samples every plugin-parameter clip over the `frames` frames of the tick starting now into `self.params.events`.
     pub(super) fn run_param_automation(&mut self, frames: usize) {
         self.params.events.clear();
-        self.params.point_events();
+        for &(target,value) in &self.automation_writing {
+            let (dest,index)=match target {
+                Target::ChannelParam(c,k)=>(Dest::Channel(usize::from(c)),k),
+                Target::SlotParam(t,s,k)=>(Dest::Slot(usize::from(t),usize::from(s)),k),
+                _=>continue,
+            };
+            if self.params.last.get(&target)==Some(&value) {continue;}
+            self.params.last.insert(target,value);
+            self.params.events.push(ParamEvent{dest,offset:0,index:u32::from(index),value});
+        }
         if !self.params.any {
             return;
         }
@@ -202,7 +192,7 @@ impl Engine {
                 // The curve's value at the position last read, for the clip's targets that wait alike.
                 let mut value: Option<(f64, Option<f64>)> = None;
                 for &target in &a.targets {
-                    if !is_param(target) || pa.done.contains(&target) {
+                    if !is_param(target) || self.automation_writing.iter().any(|w|w.0==target) || pa.done.contains(&target) {
                         continue;
                     }
                     let wait = if first { 0 } else { pdc.wait(target, tick_len) };
@@ -210,26 +200,21 @@ impl Engine {
                     if g < a.start as f64 || g >= a.end as f64 {
                         continue;
                     }
-                    pa.done.push(target);
+                    pa.done.insert(target);
                     // One tick ahead, as every automation target (spec: audio/automation.md "When a clip acts").
                     let v = match value {
                         Some((at, v)) if at == g => v,
                         _ => {
-                            // Put into the clip's range and moved by its LFO (spec: audio/automation.md "What a clip
-                            // hands on"), between ticks at the share of the tick reached.
-                            let ticks = g + 1.0 - a.start as f64;
-                            let v = self.curves[a.curve]
-                                .value_at(a.from_beat + ticks / ppq)
-                                .map(|v| f64::from(a.out.out_between(v as f32, ticks, self.ppq)).clamp(0.0, 1.0));
+                            let v = self.curves[a.curve].value_at(a.from_beat + (g + 1.0 - a.start as f64) / ppq).map(|v| v.clamp(0.0, 1.0));
                             value = Some((g, v));
                             v
                         }
                     };
                     let Some(v) = v else { continue };
-                    match pa.last.iter_mut().find(|(t, _)| *t == target) {
-                        Some((_, last)) if (*last - v).abs() < 1e-7 => continue,
-                        Some((_, last)) => *last = v,
-                        None => pa.last.push((target, v)),
+                    match pa.last.get_mut(&target) {
+                        Some(last) if (*last - v).abs() < 1e-7 => continue,
+                        Some(last) => *last = v,
+                        None => { pa.last.insert(target, v); },
                     }
                     let (dest, index) = match target {
                         Target::ChannelParam(c, k) => (Dest::Channel(usize::from(c)), k),
@@ -296,48 +281,18 @@ mod tests {
         fn tick_params_fx(&self) -> bool {
             self.ticks
         }
-        fn param_range_fx(&self, index: usize) -> Option<(f64, f64)> {
-            // Parameter 0 in a whole range, as FL's own plugins state theirs; the others 0..1.
-            Some(if index == 0 { (-64.0, 64.0) } else { (0.0, 1.0) })
-        }
-    }
-
-    /// Pattern control points on a slot plugin's parameters reach it on their tick's first frame, at the level the value
-    /// stands for in the parameter's stated range (spec: audio/automation.md "Pattern control points").
-    #[test]
-    fn control_points_drive_a_slot_plugin() {
-        use os_model::{target, ControlPoint, Pattern};
-        let mut p = project(0);
-        p.automations.clear();
-        p.arrangements.clear();
-        let point = |position: u32, kind: u32, value: i32| ControlPoint { position, kind, value };
-        let controls = vec![
-            point(0, target::slot_param(1, 3, 0), 32),
-            point(96, target::slot_param(1, 3, 0), -64),
-            point(96, target::slot_param(1, 3, 5), 16384),
-        ];
-        p.patterns = vec![Pattern { number: 1, controls, ..Pattern::default() }];
-        let mut lib = SampleLibrary::new(None);
-        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Pattern(1));
-        let probe = Arc::new(Mutex::new(Probe::default()));
-        e.set_effect(1, 3, probe.clone());
-        run(&mut e, 48000, 1000);
-        // 96 ticks at 120 BPM, PPQ 96: one beat, 24000 frames.
-        assert_eq!(probe.lock().unwrap().seen, vec![(0, 0, 0.75), (24000, 0, 0.0), (24000, 5, 0.25)]);
     }
 
     fn channel(index: u16, kind: ChannelKind) -> Channel {
         Channel {
-            id: os_model::Id::NONE,
             index,
             kind,
             name: None,
             plugin: None,
             color: None,
             enabled: true,
-            // An automation clip's channel at its range 0..1 (stored pan 0, volume 12800).
-            volume: if kind == ChannelKind::Automation { 1.0 } else { 0.78125 },
-            pan: if kind == ChannelKind::Automation { -1.0 } else { 0.0 },
+            volume: 0.78125,
+            pan: 0.0,
             pitch_cents: 0,
             mixer_track: 0,
             sample_path: None,
@@ -349,6 +304,49 @@ mod tests {
         }
     }
 
+    #[test]
+    fn touch_override_filters_plugin_curves_and_resends_on_release() {
+        use os_model::target;
+        let target=target::Target::ChannelParam(0,0);
+        let mut p=project(target::channel_param(0,0));
+        p.automations[0].points=vec![AutoPoint::new(0.,0.2),AutoPoint::new(4.,0.2)];
+        let mut lib=SampleLibrary::new(None);let mut e=Engine::new(&p,&mut lib,48000,PlayMode::Song);
+        e.run_param_automation(256);assert!((e.params.events[0].value-0.2).abs()<1e-6);
+        e.set_automation_writing(&[(target,0.8)]);e.run_automation(256);e.run_param_automation(256);
+        assert_eq!(e.params.events.len(),1);assert!((e.params.events[0].value-0.8).abs()<1e-6);
+        assert!(e.params.ticks.iter().all(|v|(v.value-0.8).abs()<1e-6));
+        e.set_automation_writing(&[]);e.run_automation(256);e.run_param_automation(256);
+        assert_eq!(e.params.events.len(),1);assert!((e.params.events[0].value-0.2).abs()<1e-6);
+        assert!(e.params.ticks.iter().all(|v|(v.value-0.2).abs()<1e-6));
+    }
+    #[test]
+    #[ignore = "synthetic dense automation benchmark"]
+    fn dense_parameter_lookup_benchmark() {
+        use super::{ParamAuto, Target};
+        use std::{hint::black_box, time::Instant};
+        let targets: Vec<_> = (0..1024).map(|i| Target::ChannelParam(0, i)).collect();
+        let mut reference = Vec::new();
+        let start = Instant::now();
+        for tick in 0..1000 {
+            for &target in &targets {
+                match reference.iter_mut().find(|(t, _)| *t == target) {
+                    Some((_, value)) => *value = black_box(tick),
+                    None => reference.push((target, black_box(tick))),
+                }
+            }
+        }
+        let linear = start.elapsed();
+        let mut indexed = ParamAuto::new(true);
+        let start = Instant::now();
+        for tick in 0..1000 {
+            indexed.ticks.clear();
+            for &target in &targets { indexed.tick_value(target, black_box(tick)); }
+        }
+        let hashed = start.elapsed();
+        for (target, value) in reference { assert_eq!(indexed.last_tick[&target], value); }
+        eprintln!("1024 targets x 1000 ticks: linear lookup {:?}, indexed dispatch {:?}", linear, hashed);
+    }
+
     /// A ramp 0 -> 1 over 4 beats on `target`, its clip at tick 0 for 4 beats (PPQ 96, 120 BPM at 48 kHz = 24000
     /// frames per beat).
     fn project(target: u32) -> Project {
@@ -358,7 +356,6 @@ mod tests {
             points: vec![AutoPoint::new(0.0, 0.0), AutoPoint::new(4.0, 1.0)],
             header: vec![0; 21],
             tail: vec![],
-            lfo: Default::default(),
         };
         Project {
             ppq: 96,
@@ -403,6 +400,28 @@ mod tests {
         assert!(seen.windows(2).all(|w| w[1].0 - w[0].0 <= 64), "a value at least every 64 frames");
     }
 
+    #[test]
+    fn preset_handoff_resends_unchanged_automation_and_keeps_effect_routing() {
+        for effect in [false, true] {
+            let mut p = project(if effect { os_model::target::slot_param(1,3,7) } else { os_model::target::channel_param(0,7) });
+            for point in &mut p.automations[0].points { point.value = 0.625; }
+            let mut e = Engine::new(&p, &mut SampleLibrary::default(), 48000, PlayMode::Song);
+            let old = Arc::new(Mutex::new(Probe::default()));
+            let new = Arc::new(Mutex::new(Probe::default()));
+            if effect { e.set_effect(1,3,old.clone()); e.set_effect_ports(1,3,2,3); }
+            else { e.set_instrument(0,old.clone()); }
+            run(&mut e, 4096, 256);
+            assert!(!old.lock().unwrap().seen.is_empty());
+            if effect {
+                e.replace_effect_preset(1,3,new.clone());
+                let fx = e.tracks[1].effects.iter().find(|f|f.slot==3).unwrap();
+                assert_eq!(fx.ports, [2,3]);
+            } else { e.replace_instrument_preset(0,new.clone()); }
+            run(&mut e, 4096, 256);
+            assert!(new.lock().unwrap().seen.iter().any(|&(_, i, v)| i==7 && (v-0.625).abs()<0.00001));
+        }
+    }
+
     /// A slot plugin parameter target drives the hosted effect of that slot; a seek resends the value there.
     #[test]
     fn slot_parameter_clip_drives_the_effect() {
@@ -428,35 +447,6 @@ mod tests {
         let seen = probe.lock().unwrap().seen.clone();
         assert_eq!(seen.len(), 1, "{seen:?}");
         assert!((seen[0].2 - 0.25).abs() < 1e-9);
-    }
-
-    /// A clip on a container slot's parameters (Lemon Studio's member targets: spec plugins/patcher/README.md §4.2)
-    /// drives the member it names: a parameter of its effect as that effect takes values (events, or one per tick), its
-    /// wet level in the chain; another member hears nothing of it.
-    #[test]
-    fn a_container_slot_clip_drives_its_members() {
-        use os_model::target::{member_item, slot_param, MEMBER_WET};
-        let param = |id: u32, item: u16| slot_param(1, 3, member_item(id, item).unwrap());
-        let mut p = project(param(2, 12));
-        p.automations[0].targets.extend([param(5, 3), param(2, MEMBER_WET)]);
-        let mut e = Engine::new(&p, &mut SampleLibrary::new(None), 48000, PlayMode::Song);
-        let (events, ticks, quiet) = (Arc::new(Mutex::new(Probe::default())), Arc::new(Mutex::new(Probe { ticks: true, ..Probe::default() })), Arc::new(Mutex::new(Probe::default())));
-        let member = |id: u32, fx: &Arc<Mutex<Probe>>| crate::chain::Member::new(id, fx.clone(), 1.0, 0.0);
-        let chain = Arc::new(Mutex::new(crate::chain::Chain::new(vec![member(5, &ticks), member(7, &quiet), member(2, &events)])));
-        e.set_effect(1, 3, chain.clone());
-        run(&mut e, 24000, 1000);
-        let seen = events.lock().unwrap().seen.clone();
-        assert!(seen.len() > 300 && seen.iter().all(|&(_, i, _)| i == 12), "{}", seen.len());
-        let &(f, _, v) = seen.last().unwrap();
-        assert!((v - (f + 250) as f64 / 96000.0).abs() < 1e-6);
-        // One value per tick, at the tick start: one beat of 96 ticks.
-        let seen = ticks.lock().unwrap().seen.clone();
-        assert_eq!(seen.len(), 96);
-        assert!(seen.iter().enumerate().all(|(t, &(f, i, _))| (f, i) == (250 * t as u64, 3)));
-        assert!(quiet.lock().unwrap().seen.is_empty());
-        let wet = chain.lock().unwrap().members[2].wet;
-        assert!((0.24..0.26).contains(&wet), "the wet level follows the clip: {wet}");
-        assert_eq!(chain.lock().unwrap().members[0].wet, 1.0);
     }
 
     /// Passes the sound through and reports a delay.

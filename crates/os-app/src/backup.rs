@@ -4,9 +4,9 @@
 
 //! Project backups (settings window, File ▸ Backup). While a project is open the interval of the Autosave choice runs;
 //! when it ends and the project changed since the last backup or save, the project is written to
-//! `<user folder>/Projects/Backup` as `<name> (autosaved on M-D-YYYY at HhMM).flp`, and the oldest autosaves of that
+//! `<user folder>/Projects/Backup` as `<name> (autosaved on M-D-YYYY at HhMM).lmn`, and the oldest autosaves of that
 //! name beyond Maximum are deleted. Saving over a file first copies the old file there as
-//! `<name> (overwritten on M-D-YYYY at HhMM).flp`. With Location's "project data folder" (the default), a project with a
+//! `<name> (overwritten on M-D-YYYY at HhMM).lmn`. With Location's "project data folder" (the default), a project with a
 //! data folder backs up to `<data folder>/Backup` instead (`crate::data_folder::backup_folder`). Not yet: Never's
 //! reminder and the backups "before risky operations".
 // spec: ui/settings-choices.md "Backup files", ui/data-folder.md §3
@@ -20,6 +20,8 @@ use os_model::Project; // This code is a part of L e m o n S t u d i o.
 use crate::app::App;
 use crate::prefs;
 
+pub(crate) type Snapshot = (Project, f64, u64);
+
 /// The Autosave timer and what the last backup wrote.
 #[derive(Debug, Default)]
 pub struct Backup {
@@ -27,7 +29,40 @@ pub struct Backup {
     every: Option<Duration>,
     due: Option<Instant>,
     /// The project and tempo of the last backup.
-    last: Option<(Project, f64)>,
+    last: Option<Snapshot>,
+    pub(crate) preparing: bool,
+    pub(crate) model_only: bool,
+    partial: Option<(PathBuf, std::sync::Arc<()>)>,
+    pending: Option<Pending>,
+    registered_recovery: Option<(PathBuf, std::sync::Arc<()>)>,
+    discarded_on_exit: bool,
+}
+
+#[derive(Debug)]
+struct Pending {
+    rx: std::sync::mpsc::Receiver<Result<(), String>>,
+    snapshot: Snapshot,
+    epoch: std::sync::Arc<()>,
+    worker: Option<std::thread::JoinHandle<()>>,
+    model_only: bool,
+    recovery: Option<(PathBuf, Option<PathBuf>)>,
+}
+impl Backup {
+    pub(crate) fn enqueue(&mut self, snapshot: Snapshot, epoch: std::sync::Arc<()>,
+        write: impl FnOnce() -> Result<(), String> + Send + 'static) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || { let _ = tx.send(write()); });
+        self.pending = Some(Pending { rx, snapshot, epoch, worker: Some(worker), model_only: self.model_only, recovery: None });
+    }
+}
+
+impl Drop for Backup {
+    fn drop(&mut self) {
+        // Finish an already captured backup when the application closes.
+        if let Some(mut pending) = self.pending.take() {
+            if let Some(worker) = pending.worker.take() { let _ = worker.join(); }
+        }
+    }
 }
 
 /// The interval of Autosave entry `i`: Never none, Rarely 15, Occasionally 10, Regularly 5, Frequently 5, Very
@@ -57,10 +92,9 @@ pub fn stamp(t: NaiveDateTime) -> String {
     format!("{}-{}-{} at {}h{:02}", t.month(), t.day(), t.year(), t.hour(), t.minute())
 }
 
-/// A backup's file name: `<name> (<what> on <stamp>).lemon`; `what` is "autosaved" or "overwritten" (FL's names,
-/// Lemon Studio's file: spec flp/lemon-format.md "Backups").
+/// A backup's file name: `<name> (<what> on <stamp>).lmn`; `what` is "autosaved" or "overwritten".
 pub fn file_name(name: &str, what: &str, t: NaiveDateTime) -> String {
-    format!("{name} ({what} on {}).{}", stamp(t), crate::project_files::EXT)
+    format!("{name} ({what} on {}).lmn", stamp(t))
 }
 
 /// The name backups give the project: its file's, or `untitled` for a project never saved.
@@ -76,9 +110,8 @@ fn autosaved_at(file: &str, name: &str) -> Option<(u32, u32, u32, u32, u32)> {
 /// When backup `file` of `name` was written, if it is one of kind `what` ("autosaved" or "overwritten"): (year,
 /// month, day, hour, minute).
 pub(crate) fn saved_at(file: &str, name: &str, what: &str) -> Option<(u32, u32, u32, u32, u32)> {
-    // Older backups are FLPs.
-    let rest = file.strip_prefix(name)?.strip_prefix(" (")?.strip_prefix(what)?.strip_prefix(" on ")?;
-    let rest = rest.strip_suffix(").lemon").or_else(|| rest.strip_suffix(").flp"))?;
+    let file = file.strip_suffix(".flp").map(|s|format!("{s}.lmn")).unwrap_or_else(||file.to_string());
+    let rest = file.strip_prefix(name)?.strip_prefix(" (")?.strip_prefix(what)?.strip_prefix(" on ")?.strip_suffix(").lmn")?;
     let (date, time) = rest.split_once(" at ")?;
     let mut d = date.split('-').map(str::parse::<u32>);
     let (Some(Ok(m)), Some(Ok(day)), Some(Ok(y)), None) = (d.next(), d.next(), d.next(), d.next()) else { return None };
@@ -100,36 +133,148 @@ pub fn prune(dir: &Path, name: &str, max: usize) {
     if found.len() > max {
         found.sort();
         for (_, p) in &found[..found.len() - max] {
-            let _ = std::fs::remove_file(p);
+            if std::fs::remove_file(p).is_ok() {
+                let _ = std::fs::remove_file(crate::playlist_controls::reference_path(p));
+            }
         }
     }
 }
 
 /// Before the project is saved over `target`: an existing file there is copied to the backup folder `dir` as
-/// `<name> (overwritten on ...).flp` (a copy of that name made earlier in the same minute is kept).
-pub fn keep_overwritten(target: &Path, dir: Option<PathBuf>) {
-    let Some(dir) = dir.filter(|_| target.is_file()) else { return };
+/// `<name> (overwritten on ...).lmn` (a copy of that name made earlier in the same minute is kept).
+pub fn keep_overwritten(target: &Path, dir: Option<PathBuf>) -> std::io::Result<()> {
+    let Some(dir) = dir.filter(|_| target.is_file()) else { return Ok(()) };
     let to = dir.join(file_name(&project_name(Some(target)), "overwritten", chrono::Local::now().naive_local()));
-    if !to.exists() && std::fs::create_dir_all(&dir).is_ok() {
-        let _ = std::fs::copy(target, to);
+    if !to.exists() {
+        std::fs::create_dir_all(&dir)?;
+        crate::safe_save::write(&to, &std::fs::read(target)?)?;
+    }
+    Ok(())
+}
+
+fn record_recovery(target: PathBuf, source: Option<PathBuf>) {
+    if let Ok(record) = serde_json::to_string(&(target, source)) {
+        prefs::set_text("project_recovery_candidate", &record);
     }
 }
 
+/// A completed autosave newer than its source, acknowledged once per revision.
+pub(crate) fn recovery_candidate() -> Option<(PathBuf, String)> {
+    let text = prefs::text("project_recovery_candidate")?;
+    let (backup, original): (PathBuf, Option<PathBuf>) = serde_json::from_str(&text).ok()?;
+    let modified = std::fs::metadata(&backup).ok()?.modified().ok()?;
+    if original.as_ref().and_then(|p|std::fs::metadata(p).ok()).and_then(|m|m.modified().ok()).is_some_and(|t|t >= modified) {
+        return None;
+    }
+    let revision = format!("{}|{:?}", backup.display(), modified);
+    if prefs::text("project_recovery_acknowledged").as_deref() == Some(&revision) { return None; }
+    Some((backup, revision))
+}
+
 impl App {
+    pub(crate) fn backup_snapshot(&self) -> Snapshot {
+        (self.state.project.clone(), self.state.tempo, self.plugins.edit_revision)
+    }
+
+    fn register_recovery(&mut self, target: &Path, source: Option<PathBuf>) {
+        record_recovery(target.to_owned(), source);
+        self.backup.registered_recovery =
+            Some((target.to_owned(), self.state.playlist.vocal.epoch.clone()));
+    }
+
+    /// Keep the autosave on disk, but honour a decision to exit without restoring these edits.
+    pub(crate) fn dismiss_recovery_on_exit(&mut self) {
+        self.backup.discarded_on_exit = true;
+        if let Some((registered, epoch)) = &self.backup.registered_recovery
+            && std::sync::Arc::ptr_eq(epoch, &self.state.playlist.vocal.epoch)
+            && let Some((path, revision)) = recovery_candidate()
+            && &path == registered
+        {
+            prefs::set_text("project_recovery_acknowledged", &revision);
+        }
+    }
+
+    pub(crate) fn offer_recovery(&mut self) -> bool {
+        let Some((path, revision)) = recovery_candidate() else { return false; };
+        use crate::dialog::{Answer, Kind, Msg, Then, spans};
+        let message = format!("A newer autosave is available: {}. Open it as a recovered copy? Choose No to continue with your usual startup project.", path.file_name().unwrap_or_default().to_string_lossy());
+        self.show_msg(Msg::new(Kind::Question, "Recover project", spans(&[&message]), &[Answer::Yes, Answer::No], Then::RecoverProject(path, revision)));
+        true
+    }
+
+    pub(crate) fn recover_project(&mut self, path: PathBuf, revision: String, accept: bool) {
+        if accept {
+            let last = crate::templates::last_kept();
+            let recent = crate::recent::list();
+            self.open(path.clone());
+            crate::templates::restore_last(last);
+            crate::recent::restore(&recent);
+            if self.state.path.as_deref() != Some(path.as_path()) { return; }
+            self.state.path = None;
+            self.saved.1 = f64::NAN;
+            self.state.message = Some("Recovered autosave. Use Save As to choose a project filename.".into());
+        }
+        prefs::set_text("project_recovery_acknowledged", &revision);
+        if !accept { self.startup_project(); }
+        self.invalidate();
+    }
+
     /// The Autosave timer (`App::tick`): when its interval ends and the project changed since the last backup or save,
     /// a backup is written. A new Autosave choice starts the timer again.
     pub(crate) fn backup_tick(&mut self, now: Instant) {
+        if self.backup.discarded_on_exit {
+            return;
+        }
+        if let Some(job) = &self.backup.pending {
+            let result = match job.rx.try_recv() {
+                Ok(result) => Some(result),
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => Some(Err("Backup worker stopped".into())),
+                Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            };
+            let Some(result) = result else { return };
+            let job = self.backup.pending.take().unwrap();
+            if std::sync::Arc::ptr_eq(&job.epoch, &self.state.playlist.vocal.epoch) {
+                match result {
+                    Ok(()) => {
+                        self.backup.last = Some(job.snapshot);
+                        self.backup.partial = if let Some((target, source)) = job.recovery {
+                            self.register_recovery(&target, source);
+                            job.model_only.then_some((target, job.epoch))
+                        } else {
+                            None
+                        };
+                    }
+                    Err(e) => { self.state.message = Some(format!("Backup failed: {e}")); self.invalidate(); }
+                }
+            }
+        }
         let every = interval(prefs::index(&prefs::AUTOSAVE));
         if every != self.backup.every {
             self.backup.every = every;
             self.backup.due = every.map(|e| now + e);
         }
         let (Some(every), Some(due)) = (every, self.backup.due) else { return };
-        if now < due {
+        // Live plug-in state access shares processing locks with the audio
+        // thread. Save the editable project model when busy, then capture live
+        // plug-in states as soon as it is safe to do so.
+        let busy = self.transport.playing() && !self.transport.paused()
+            || self.state.rec.recording() || self.audio_rec.is_some()
+            || !self.transport.sounding().is_empty()
+            || self.transport.peaks().0.max(self.transport.peaks().1) > 0.00001;
+        let finishing_partial = !busy && self.backup.partial.as_ref().is_some_and(|(_, epoch)| {
+            std::sync::Arc::ptr_eq(epoch, &self.state.playlist.vocal.epoch)
+        });
+        if now < due && !finishing_partial {
             return;
         }
-        if self.changed_since_backup() {
-            match self.write_backup(chrono::Local::now().naive_local()) {
+        let model_changed = self.state.project != self.saved.0 || self.state.tempo != self.saved.1;
+        if (self.changed_since_backup() && (!busy || model_changed)) || finishing_partial {
+            self.backup.preparing = true;
+            self.backup.model_only = busy;
+            let result = self.write_backup(chrono::Local::now().naive_local());
+            self.backup.preparing = false;
+            self.backup.model_only = false;
+            match result {
                 // A project loading or an export rendering: at a later tick.
                 None => return,
                 Some(Err(e)) => {
@@ -144,7 +289,7 @@ impl App {
 
     /// Whether the project changed since it was last backed up, and since it was last saved (or opened, or created).
     pub(crate) fn changed_since_backup(&self) -> bool {
-        self.unsaved() && self.backup.last.as_ref().is_none_or(|(p, t)| *p != self.state.project || *t != self.state.tempo)
+        self.unsaved() && self.backup.last.as_ref().is_none_or(|(p, t, r)| *p != self.state.project || *t != self.state.tempo || *r != self.plugins.edit_revision)
     }
 
     /// Writes a backup of the project as it is now, named for local time `t`, then deletes its oldest autosaves beyond
@@ -153,17 +298,28 @@ impl App {
     pub(crate) fn write_backup(&mut self, t: NaiveDateTime) -> Option<Result<PathBuf, String>> {
         let Some(dir) = crate::data_folder::backup_folder(&self.state, self.state.path.as_deref()) else { return Some(Err("no user folder".into())) };
         let name = project_name(self.state.path.as_deref());
-        let target = dir.join(file_name(&name, "autosaved", t));
+        let mut target = dir.join(file_name(&name, "autosaved", t));
+        let partial = self.backup.partial.as_ref().filter(|(path, epoch)| {
+            path.parent() == Some(dir.as_path())
+                && std::sync::Arc::ptr_eq(epoch, &self.state.playlist.vocal.epoch)
+        });
         if target.exists() {
-            return Some(Ok(target));
+            if let Some((path, _)) = partial.filter(|_| self.backup.preparing && !self.backup.model_only) {
+                target = path.clone();
+            } else {
+                return Some(Ok(target));
+            }
         }
         if let Err(e) = std::fs::create_dir_all(&dir) {
             return Some(Err(format!("{}: {e}", dir.display())));
         }
-        let snap = (self.state.project.clone(), self.state.tempo);
+        let synchronous_snapshot = (!self.backup.preparing).then(|| self.backup_snapshot());
         let done = self.save_copy(target.clone())?;
-        if done.is_ok() {
-            self.backup.last = Some(snap);
+        if let Some(job) = self.backup.pending.as_mut() {
+            job.recovery = Some((target.clone(), self.state.path.clone()));
+        } else if done.is_ok() {
+            self.register_recovery(&target, self.state.path.clone());
+            self.backup.last = synchronous_snapshot;
             prune(&dir, &name, usize::from(prefs::number(&prefs::BACKUP_MAXIMUM)));
         }
         Some(done.map(|()| target))
@@ -195,14 +351,167 @@ mod tests {
     }
 
     #[test]
+    fn recovery_opens_unsaved_copy_and_acknowledges_revision() {
+        let dir = scratch("recovery");
+        let mut app = App::new(None);
+        app.state.tempo = 111.;
+        let backup = app.write_backup(at(11, 15, 16, 0)).unwrap().unwrap();
+        let (candidate, revision) = recovery_candidate().unwrap();
+        assert_eq!(candidate, backup);
+        app.recover_project(candidate, revision, true);
+        assert!(app.state.path.is_none());
+        assert_eq!(app.state.tempo, 111.);
+        assert!(app.unsaved());
+        assert!(backup.is_file());
+        assert!(recovery_candidate().is_none());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn discord_discard_on_exit_keeps_backup_without_recovery_prompt() {
+        use crate::dialog::{Answer, Next, Reply, Then};
+        let dir = scratch("discard-on-exit");
+        let mut app = App::new(None);
+        app.state.tempo = 111.0;
+        let backup = app.write_backup(at(11, 15, 16, 0)).unwrap().unwrap();
+        let expected = recovery_candidate().unwrap();
+        app.dialog_done(Then::Discard(Next::Close), Reply::Button(Answer::Cancel));
+        assert_eq!(recovery_candidate(), Some(expected.clone()));
+
+        // A different unsaved project must retain the first project's candidate.
+        let mut other = App::new(None);
+        other.state.tempo = 115.0;
+        other.dialog_done(Then::Discard(Next::Close), Reply::Button(Answer::No));
+        assert_eq!(recovery_candidate(), Some(expected));
+
+        app.backup.preparing = true;
+        let last = app.write_backup(at(11, 15, 16, 1)).unwrap().unwrap();
+        app.backup.preparing = false;
+        app.backup.pending.as_mut().unwrap().worker.take().unwrap().join().unwrap();
+        app.dialog_done(Then::Discard(Next::Quit), Reply::Button(Answer::No));
+        assert_eq!(app.quit_answer.take(), Some(true));
+        app.backup_tick(Instant::now());
+        assert!(recovery_candidate().is_none());
+        assert!(backup.is_file());
+        drop(app);
+        assert!(last.is_file());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn background_failure_and_project_switch_do_not_acknowledge_edits() {
+        let mut app = App::new(None);
+        let before = app.state.project.clone();
+        let epoch = app.state.playlist.vocal.epoch.clone();
+        app.backup.enqueue((before.clone(), app.state.tempo, 0), epoch.clone(), || Err("injected write failure".into()));
+        let until = Instant::now() + Duration::from_secs(10);
+        while app.backup.pending.is_some() {
+            app.backup_tick(Instant::now());
+            assert!(Instant::now() < until);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(app.backup.last.is_none());
+        assert!(app.state.message.as_deref().unwrap().contains("injected write failure"));
+        app.backup.enqueue((before, app.state.tempo, 0), epoch, || Ok(()));
+        app.state.playlist.vocal.epoch = std::sync::Arc::new(());
+        while app.backup.pending.is_some() {
+            app.backup_tick(Instant::now());
+            assert!(Instant::now() < until);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(app.backup.last.is_none());
+    }
+
+    #[test]
+    fn background_snapshot_keeps_later_edits_dirty() {
+        let dir = scratch("background");
+        let mut app = App::new(None);
+        app.state.tempo = 111.;
+        app.backup.preparing = true;
+        let target = app.write_backup(at(11, 12, 14, 0)).unwrap().unwrap();
+        app.backup.preparing = false;
+        assert!(app.backup.pending.is_some());
+        app.state.tempo = 123.;
+        let until = Instant::now() + Duration::from_secs(10);
+        while app.backup.pending.is_some() {
+            app.backup_tick(Instant::now());
+            assert!(Instant::now() < until);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let saved = os_flp::FlpFile::parse(&std::fs::read(&target).unwrap()).unwrap();
+        assert_eq!(os_flp::project::load(&saved).unwrap().tempo, Some(111.));
+        assert!(app.changed_since_backup());
+        assert_eq!(app.state.tempo, 123.);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    #[test]
+    fn playing_project_gets_a_recovery_snapshot_and_refreshes_when_idle() {
+        let dir = scratch("playing");
+        let mut app = App::new(None);
+        prefs::set_choice(&prefs::AUTOSAVE, 5);
+        let now = Instant::now();
+        app.backup_tick(now);
+        app.state.tempo = 111.;
+        app.transport.pretend_at(0., true);
+        let due = now + Duration::from_secs(61);
+        app.backup_tick(due);
+        let until = Instant::now() + Duration::from_secs(10);
+        while app.backup.pending.is_some() {
+            app.backup_tick(due);
+            assert!(Instant::now() < until);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let (backup, _) = recovery_candidate().expect("recovery while playing");
+        let project = |path| {
+            let file = os_flp::FlpFile::parse(&std::fs::read(path).unwrap()).unwrap();
+            os_flp::project::load(&file).unwrap()
+        };
+        assert_eq!(project(&backup).tempo, Some(111.));
+        assert!(app.backup.partial.is_some());
+        app.transport.stop();
+        app.state.tempo = 123.;
+        app.backup_tick(due);
+        while app.backup.pending.is_some() {
+            app.backup_tick(due);
+            assert!(Instant::now() < until);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let (backup, _) = recovery_candidate().expect("full recovery after Stop");
+        assert_eq!(project(&backup).tempo, Some(123.));
+        assert!(app.backup.partial.is_none());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    #[ignore = "large synthetic autosave measurement"]
+    fn measure_autosave_capture() {
+        let _dir = scratch("capture-time");
+        let mut app = App::new(None);
+        app.state.project = crate::app::test_project();
+        let pattern = app.state.project.patterns[0].clone();
+        for index in 1..=32 {
+            let mut p = pattern.clone();
+            p.number = index + 1;
+            p.notes.extend((0..4096).map(|i| os_model::Note::step(0, i * 24)));
+            app.state.project.patterns.push(p);
+        }
+        app.backup.preparing = true;
+        let start = Instant::now();
+        app.write_backup(at(11, 22, 12, 0)).unwrap().unwrap();
+        println!("Autosave capture us {}", start.elapsed().as_micros());
+        assert!(app.backup.pending.is_some());
+        drop(app);
+        std::fs::remove_dir_all(_dir).unwrap();
+    }
+    #[test]
     fn names_follow_fl() {
-        assert_eq!(file_name("gs7", "autosaved", at(10, 15, 0, 13)), "gs7 (autosaved on 10-15-2026 at 0h13).lemon");
-        assert_eq!(file_name("untitled", "overwritten", at(3, 4, 18, 5)), "untitled (overwritten on 3-4-2026 at 18h05).lemon");
+        assert_eq!(file_name("gs7", "autosaved", at(10, 15, 0, 13)), "gs7 (autosaved on 10-15-2026 at 0h13).lmn");
+        assert_eq!(file_name("untitled", "overwritten", at(3, 4, 18, 5)), "untitled (overwritten on 3-4-2026 at 18h05).lmn");
         assert_eq!(project_name(None), "untitled");
-        assert_eq!(project_name(Some(Path::new("/music/My song.flp"))), "My song");
-        assert_eq!(autosaved_at("gs7 (autosaved on 10-15-2026 at 0h13).lemon", "gs7"), Some((2026, 10, 15, 0, 13)));
-        assert_eq!(autosaved_at("gs7 (autosaved on 10-15-2026 at 0h13).flp", "gs7"), Some((2026, 10, 15, 0, 13)), "an older backup");
-        for other in ["gs7 (overwritten on 10-15-2026 at 0h13).flp", "gs70 (autosaved on 10-15-2026 at 0h13).flp", "gs7.flp"] {
+        assert_eq!(project_name(Some(Path::new("/music/My song.lmn"))), "My song");
+        assert_eq!(autosaved_at("gs7 (autosaved on 10-15-2026 at 0h13).lmn", "gs7"), Some((2026, 10, 15, 0, 13)));
+        assert_eq!(autosaved_at("gs7 (autosaved on 10-15-2026 at 0h13).flp", "gs7"), Some((2026, 10, 15, 0, 13)));
+        for other in ["gs7 (overwritten on 10-15-2026 at 0h13).lmn", "gs70 (autosaved on 10-15-2026 at 0h13).lmn", "gs7.lmn"] {
             assert_eq!(autosaved_at(other, "gs7"), None, "{other}");
         }
         assert_eq!(interval(2), Some(Duration::from_secs(600)), "Occasionally");
@@ -249,6 +558,12 @@ mod tests {
         app.backup_tick(t0 + minute + Duration::from_secs(30));
         assert!(names(&dir).is_empty(), "the interval runs on");
         app.backup_tick(t0 + 2 * minute);
+        let until = Instant::now() + Duration::from_secs(10);
+        while app.backup.pending.is_some() {
+            app.backup_tick(t0 + 2 * minute);
+            assert!(Instant::now() < until);
+            std::thread::sleep(Duration::from_millis(5));
+        }
         let files = names(&dir);
         assert_eq!(files.len(), 1, "{files:?}");
         assert!(autosaved_at(&files[0], "untitled").is_some(), "{files:?}");
@@ -275,7 +590,7 @@ mod tests {
         let mut app = App::new(None);
         let work = dir.join("work");
         std::fs::create_dir_all(&work).unwrap();
-        let song = work.join("song.flp");
+        let song = work.join("song.lmn");
         app.save_to(song.clone());
         assert!(song.is_file());
         assert_eq!(names(&dir), ["work"], "a new file: nothing saved over");

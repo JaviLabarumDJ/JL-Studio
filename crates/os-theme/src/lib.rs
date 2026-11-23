@@ -22,6 +22,9 @@ pub mod fl;
 pub mod presets;
 pub mod waves;
 pub use design::{Design, Style};
+pub mod appearance;
+pub mod chrome;
+pub mod regions;
 pub use fl::FlTheme;
 
 /// An sRGB color with alpha.
@@ -157,6 +160,7 @@ macro_rules! tokens {
             pub xf: fl::Xform,
             /// Shape language of the design this palette belongs to (corner radii; spec: ui/lemon-design.md).
             pub style: Style,
+            pub appearance: appearance::Appearance,
             /// The theme's Waves gradient, (position, colour) sorted by position: a `.flstheme`'s `WaveClr0..5` at
             /// `WaveSpc0..5` (spec: ui/flstheme.md §3). Empty without one; colourful waveforms then use
             /// `waves::STOCK`.
@@ -176,13 +180,20 @@ macro_rules! tokens {
 
         impl Default for Palette {
             fn default() -> Self {
-                Palette { $($name: Color::rgb($hex),)* xf: fl::Xform::default(), style: Style::CITRUS, waves: Vec::new(), wallpaper: None, pl_lines: 1.0, pr_lines: 1.0 }
+                Palette { $($name: Color::rgb($hex),)* xf: fl::Xform::default(), style: Style::CITRUS, appearance: Default::default(), waves: Vec::new(), wallpaper: None, pl_lines: 1.0, pr_lines: 1.0 }
             }
         }
 
         impl Palette {
             /// Token names, in declaration order.
             pub const NAMES: &'static [&'static str] = &[$(stringify!($name),)*];
+
+            pub fn description(name: &str) -> &'static str {
+                match name {
+                    $(stringify!($name) => $doc,)*
+                    _ => "",
+                }
+            }
 
             pub fn get_mut(&mut self, name: &str) -> Option<&mut Color> {
                 match name {
@@ -200,7 +211,7 @@ macro_rules! tokens {
 
             fn map(&self, f: impl Fn(Color) -> Color) -> Palette {
                 let (xf, style, waves, wallpaper) = (self.xf.clone(), self.style, self.waves.clone(), self.wallpaper.clone());
-                Palette { $($name: f(self.$name),)* xf, style, waves, wallpaper, pl_lines: self.pl_lines, pr_lines: self.pr_lines }
+                Palette { $($name: f(self.$name),)* xf, style, appearance: self.appearance, waves, wallpaper, pl_lines: self.pl_lines, pr_lines: self.pr_lines }
             }
 
             /// Playlist line colour `c` at the theme's line strength (`line_at` over `grid`; spec: ui/flstheme.md §3,
@@ -300,6 +311,9 @@ tokens! {
     meter_low = 0x6cc04a, "Meter, low level.";
     meter_high = 0xe8d040, "Meter, high level.";
     meter_clip = 0xf05040, "Meter, clipping.";
+    inspector_panel = 0x313436, "Attached mixer inspector background.";
+    inspector_grip = 0x7e8386, "Attached mixer inspector resize grips and scroll thumbs.";
+    inspector_fader = 0xd5d9de, "Attached Traditional mixer fader cap.";
     rack_row_box = 0x2a2d2e, "Channel rack mixer-track box.";
     name_button = 0x2e3132, "Channel name button.";
     name_button_sel = 0x485156, "Selected channel name button.";
@@ -340,6 +354,22 @@ tokens! {
     note_sel_bottom = 0xd37373, "Selected note body, bottom.";
     note_sel_rim = 0x714243, "Selected note rim.";
     note_sel_text = 0xfbe9e9, "Selected note label.";
+    playlist_key_white = 0xced2d8, "Playlist keyboard & activity: Idle white keys.";
+    playlist_key_black = 0x333436, "Playlist keyboard & activity: Idle black keys.";
+    playlist_key_white_active = 0xa8e44a, "Playlist keyboard & activity: Solid played white keys.";
+    playlist_key_black_active = 0xa8e44a, "Playlist keyboard & activity: Solid played black keys.";
+    playlist_key_frame = 0x282a2c, "Playlist keyboard & activity: Keyboard frame.";
+    playlist_key_separator = 0xabaeb3, "Playlist keyboard & activity: Idle key separators.";
+    playlist_activity_halo = 0xa8e44a, "Playlist keyboard & activity: Channel activity halo.";
+    playlist_record_idle = 0x793943, "Playlist record light when idle.";
+    playlist_record_armed = 0xff5666, "Playlist record light when armed.";
+    playlist_record_live = 0xff3549, "Playlist record light while recording.";
+    playlist_record_rim = 0x6a7579, "Playlist record light bezel or frame.";
+    trad_record_idle = 0x793943, "Traditional Mixer record button when idle.";
+    trad_record_armed = 0xff3549, "Traditional Mixer record button when armed.";
+    trad_record_rim = 0x6a7579, "Traditional Mixer record button bezel or frame.";
+    playlist_waveform = 0x7e8386, "Playlist keyboard & activity: Idle sample waveform.";
+    playlist_waveform_active = 0xa8e44a, "Playlist keyboard & activity: Active sample waveform.";
     key_white = 0xe5e9f0, "Piano keyboard: white keys (right end of the gradient).";
     key_white_left = 0xbfc3ca, "Piano keyboard: white keys (left end).";
     key_black = 0x4d4e50, "Piano keyboard: black keys (right end).";
@@ -353,6 +383,106 @@ tokens! {
     key_black_lit_left = 0x7a4f24, "Piano keyboard: sounding black key (left end).";
     velocity = 0xacdfb3, "Velocity lollipops.";
     velocity_dot = 0x477a4e, "Velocity lollipop disc.";
+    button_pressed = 0x916329, "Custom button face while held down.";
+    button_disabled = 0x282a2c, "Custom disabled button face.";
+    button_border = 0x171a1c, "Custom button border.";
+    indicator_on = 0xecad48, "Custom indicator when lit.";
+    indicator_off = 0x483b28, "Custom indicator when off.";
+    knob_cap = 0x484d50, "Custom dial cap.";
+    knob_pointer = 0xe0e6e9, "Custom dial pointer.";
+    knob_ring = 0xf0a34e, "Custom dial value ring.";
+    knob_track = 0x222629, "Shared dial unfilled ring track.";
+    knob_rim = 0x171a1c, "Shared dial outer border.";
+    active_button_face = 0x2096f3, "Shared active button fill.";
+    active_button_text = 0x101820, "Shared active button text and icons.";
+    mixer_channel_name = 0xaab4bb, "Mixer channel name text, including colored inserts and Master.";
+    mixer_channel_number = 0x939fa5, "Mixer channel numbers and Master headings.";
+    mixer_channel_number_selected = 0x101820, "Selected Mixer channel number.";
+    mixer_channel_header = 0x2b2e30, "Mixer channel number background.";
+    mixer_channel_header_selected = 0x2096f3, "Selected Mixer channel background behind the number.";
+    mixer_separator = 0x535b61, "Mixer separator color in both expanded and folded sections.";
+    mixer_action_face = 0x2096f3, "Attach to Playlist and Mix Assistant button background.";
+    mixer_action_hover = 0x45a3eb, "Attach to Playlist and Mix Assistant hover background.";
+    mixer_action_pressed = 0x1885da, "Attach to Playlist and Mix Assistant pressed background.";
+    mixer_action_border = 0x146cae, "Attach to Playlist and Mix Assistant border.";
+    mixer_action_text = 0x101820, "Attach to Playlist and Mix Assistant label color.";
+    settings_group_title = 0xc9d0d4, "Settings section headings, including Workspace Visibility.";
+    settings_group_note = 0x7e8386, "Settings section secondary labels and fold arrows.";
+    settings_group_face = 0x25272a, "Settings section background.";
+    settings_group_border = 0x1c1e21, "Settings section border.";
+    settings_tab_text = 0xc9d0d4, "Inactive Settings tab text.";
+    settings_tab_selected_text = 0x101820, "Active Settings tab text.";
+    settings_tab_face = 0x222425, "Inactive Settings tab background.";
+    settings_tab_selected_face = 0x2096f3, "Active Settings tab background.";
+    playlist_bar_face = 0x292b2c, "Playlist toolbar and title bar background.";
+    playlist_bar_text = 0xbfc7cc, "Playlist toolbar labels, icons and window controls.";
+    playlist_bar_divider = 0x181b1c, "Line between the Playlist toolbar and overview.";
+    playlist_bar_button = 0x35393c, "Inactive Playlist toolbar button background.";
+    playlist_bar_hover = 0x45484d, "Playlist toolbar button hover background.";
+    playlist_bar_selected = 0x2096f3, "Active Playlist toolbar button background.";
+    playlist_bar_selected_text = 0x101820, "Active Playlist toolbar button text and icons.";
+    playlist_overview_track = 0x22282d, "Playlist overview scrollbar track.";
+    playlist_overview_thumb = 0x7ac4ff, "Playlist overview scrollbar handle.";
+    playlist_overview_thumb_edge = 0x7ac4ff, "Playlist overview scrollbar handle edge.";
+    trad_meter_low_bottom = 0xb6db4d, "Traditional meter low band bottom color.";
+    trad_meter_low_top = 0xa0db40, "Traditional meter low band top color.";
+    trad_meter_hot_bottom = 0xfac050, "Traditional meter high band bottom color.";
+    trad_meter_hot_top = 0xeec757, "Traditional meter high band top color.";
+    trad_meter_clip_bottom = 0xf05040, "Traditional meter clipping band bottom color.";
+    trad_meter_clip_top = 0xf05040, "Traditional meter clipping band top color.";
+    trad_meter_well = 0x232729, "Traditional channel meter background.";
+    trad_meter_frame = 0x191d1e, "Traditional meter border color.";
+    trad_meter_ticks = 0x111315, "Traditional meter scale tick color.";
+    trad_meter_hold = 0xe16e2f, "Traditional meter peak hold color.";
+    trad_meter_cap = 0x181c1e, "Traditional meter moving tip color.";
+    trad_meter_scale_bg = 0x222527, "Traditional selected channel scale background.";
+    trad_meter_scale_text = 0x7f8a90, "Traditional meter scale label color.";
+    insert_knob_face = 0x53575c, "Traditional insert knob face color.";
+    insert_knob_face_edge = 0x282c30, "Traditional insert knob face edge color.";
+    insert_knob_pointer = 0xe5e9ed, "Traditional insert knob pointer color.";
+    insert_knob_track = 0x3b4045, "Traditional insert knob unfilled inner track color.";
+    insert_knob_ring = 0x2096f3, "Traditional FL-style mixer plugin insert dry/wet mix knob thin value ring.";
+    insert_knob_rim = 0x55595c, "Traditional FL-style mixer plugin insert dry/wet mix knob outer circle.";
+    mixer_plate = 0x303638, "Themed mixer label and meter surround.";
+    skin_knob_rim = 0x292d2b, "Mixer Skin Designer knob rim.";
+    skin_fader_edge = 0x292d2b, "Mixer Skin Designer fader edge.";
+    skin_fader_stripe = 0xf4e7cf, "Mixer Skin Designer fader stripe.";
+    skin_meter_face = 0xe6d6af, "Mixer Skin Designer meter face.";
+    skin_meter_scale = 0x493e28, "Mixer Skin Designer meter scale and pivot.";
+    skin_meter_needle = 0x971d1b, "Mixer Skin Designer meter needle.";
+    skin_panel_trim = 0x3d4238, "Mixer Skin Designer panel trim.";
+    skin_knob_cap = 0x484d50, "Mixer Skin Designer knob cap.";
+    skin_knob_pointer = 0xe0e6e9, "Mixer Skin Designer knob pointer.";
+    skin_knob_ring = 0xf0a34e, "Mixer Skin Designer knob arc.";
+    skin_fader_cap = 0xada38a, "Mixer Skin Designer fader cap.";
+    skin_button_normal = 0x383b35, "Mixer Skin Designer normal button face.";
+    skin_button_hover = 0x555b4e, "Mixer Skin Designer hovered button face.";
+    skin_button_held = 0x916329, "Mixer Skin Designer held button face.";
+    skin_button_active = 0xeab85e, "Mixer Skin Designer active button face.";
+    skin_button_disabled = 0x282a2c, "Mixer Skin Designer disabled button face.";
+    skin_button_edge = 0x171a1c, "Mixer Skin Designer button edge.";
+    skin_meter_low = 0x6cc04a, "Mixer Skin Designer low meter segment.";
+    skin_meter_high = 0xe8d040, "Mixer Skin Designer high meter segment.";
+    skin_meter_clip = 0xf05040, "Mixer Skin Designer meter clip indication.";
+    skin_panel_face = 0x35382f, "Mixer Skin Designer panel surface.";
+    skin_panel_selected = 0xc9b878, "Mixer Skin Designer selected panel trim.";
+    note_group_01 = 0x9fcf8d, "Piano Roll note group 01.";
+    note_group_02 = 0xdca4b6, "Piano Roll note group 02.";
+    note_group_03 = 0xc5a7dd, "Piano Roll note group 03.";
+    note_group_04 = 0xaba8df, "Piano Roll note group 04.";
+    note_group_05 = 0x95b3dd, "Piano Roll note group 05.";
+    note_group_06 = 0x8bc8d5, "Piano Roll note group 06.";
+    note_group_07 = 0x8bd1bb, "Piano Roll note group 07.";
+    note_group_08 = 0xbed08d, "Piano Roll note group 08.";
+    note_group_09 = 0xd4cb88, "Piano Roll note group 09.";
+    note_group_10 = 0xd8b080, "Piano Roll note group 10.";
+    note_group_11 = 0xd99b88, "Piano Roll note group 11.";
+    note_group_12 = 0xd99b9d, "Piano Roll note group 12.";
+    note_group_13 = 0xc5aaba, "Piano Roll note group 13.";
+    note_group_14 = 0xb2b5c6, "Piano Roll note group 14.";
+    note_group_15 = 0x9bbeb7, "Piano Roll note group 15.";
+    note_group_16 = 0xc8c5a0, "Piano Roll note group 16.";
+
 }
 
 /// Role-mapped literals: widgets that need a measured shade with no token of its own write it as
@@ -370,7 +500,7 @@ impl Palette {
         self.xf.highlight(Color::rgb(hex))
     }
     pub fn tx(&self, hex: u32) -> Color {
-        self.xf.text(Color::rgb(hex))
+        chrome::Chrome::Text.or(self, self.xf.text(Color::rgb(hex)))
     }
     pub fn led(&self, hex: u32) -> Color {
         self.xf.mute(Color::rgb(hex))
@@ -384,19 +514,23 @@ impl Palette {
 /// ui/theme-presets.md "Skins").
 impl Palette {
     pub fn brand_lit(&self, c: Color) -> Color {
+        if self.style.neon_3036 && let Some(map) = &self.xf.design { return map.highlight_of(c); }
         self.xf.retint.as_ref().map_or(c, |r| r.highlight(c))
     }
     pub fn brand_sel(&self, c: Color) -> Color {
+        if self.style.neon_3036 && let Some(map) = &self.xf.design { return map.accent_of(c); }
         self.xf.retint.as_ref().map_or(c, |r| r.accent(c))
     }
     pub fn brand_led(&self, c: Color) -> Color {
+        if self.style.neon_3036 && let Some(map) = &self.xf.design { return map.mute_of(c); }
         self.xf.retint.as_ref().map_or(c, |r| r.mute(c))
     }
     pub fn brand_grey(&self, c: Color) -> Color {
+        if self.style.neon_3036 && let Some(map) = &self.xf.design { return map.surface(c); }
         self.xf.retint.as_ref().map_or(c, |r| r.surface(c))
     }
     pub fn brand_ink(&self, c: Color) -> Color {
-        self.xf.retint.as_ref().map_or(c, |r| r.text(c))
+        chrome::Chrome::Text.or(self, self.xf.retint.as_ref().map_or(c, |r| r.text(c)))
     }
 }
 
@@ -409,6 +543,11 @@ pub fn current() -> std::sync::Arc<Palette> {
         return p;
     }
     std::sync::Arc::new(Palette::default())
+}
+
+/// Read on editor UI threads. A plugin loaded in a separate host gets its original appearance.
+pub fn stock_editor_look() -> Option<design::StockEditorLook> {
+    CURRENT.read().ok()?.as_ref()?.style.stock_editor
 }
 
 pub fn set_current(p: &Palette) {
@@ -477,7 +616,7 @@ impl Theme {
     /// Serialize as a theme file listing every token.
     pub fn to_text(&self) -> String {
         let mut s = format!(
-            "# Lemon Studio theme: {}\nhue = {}\nsaturation = {}\nlightness = {}\n",
+            "# Theme: {}\nhue = {}\nsaturation = {}\nlightness = {}\n",
             self.name, self.adjust.hue, self.adjust.saturation, self.adjust.lightness
         );
         for name in Palette::NAMES {

@@ -17,21 +17,12 @@ use signalsmith_stretch::Stretch;
 /// Stretches the stereo buffer `left` / `right` (`rate` Hz) to `frames` frames with its pitch multiplied by
 /// `transpose`. The result starts where the input starts: the stretcher's latency is taken out.
 pub fn whole(left: &[f32], right: &[f32], rate: u32, frames: usize, transpose: f64) -> (Vec<f32>, Vec<f32>) {
-    whole_formant(left, right, rate, frames, transpose, None)
-}
-
-/// `whole`, with the formants kept where they were (corrected for the transposition) and then moved by `formant`
-/// (a frequency factor, 1 = kept), when it is set.
-pub fn whole_formant(left: &[f32], right: &[f32], rate: u32, frames: usize, transpose: f64, formant: Option<f64>) -> (Vec<f32>, Vec<f32>) {
     let n = left.len().min(right.len());
     if frames == 0 || n == 0 {
         return (vec![0.0; frames], vec![0.0; frames]);
     }
     let mut st = Stretch::preset_default(2, rate.max(1));
     st.set_transpose_factor(transpose as f32, None);
-    if let Some(f) = formant {
-        st.set_formant_factor(f as f32, true);
-    }
     // The stretcher needs an output of at least twice its latency: a shorter one is made from the input padded with
     // silence in proportion (the same ratio), and the padding's part of the output is cut off.
     let out_n = frames.max(2 * st.output_latency() + 1);
@@ -77,6 +68,55 @@ fn exact(st: &mut Stretch, input: &[f32], out: &mut [f32]) {
     out.copy_within(lat_out * 2.., 0);
     // The final chunk.
     st.flush(&mut out[(frames - lat_out) * 2..]);
+}
+
+/// Piecewise pitch-preserving warp. Anchors are source and destination frame positions.
+/// Neighboring segments share short context and overlap, avoiding hard joins at anchors.
+pub fn warp(left:&[f32],right:&[f32],rate:u32,points:&[(usize,usize)])->Result<(Vec<f32>,Vec<f32>),String>{
+    warp_segments(left, right, rate, points, false, true)
+}
+
+/// Vocal timing warp with longer cosine joins. Unity-ratio attack islands are copied
+/// at their original pitch and shape, using the same joins as stretched material.
+pub fn vocal_warp(left: &[f32], right: &[f32], rate: u32, points: &[(usize, usize)]) -> Result<(Vec<f32>, Vec<f32>), String> {
+    warp_segments(left, right, rate, points, true, true)
+}
+
+/// Historical slice maps are normalized to fixed clip boundaries. Their local ratios may
+/// exceed the interactive limit even when both original edits were valid. Keep the same
+/// bounded output and ordered-anchor validation, and render this composed map only once.
+pub fn clip_warp(left:&[f32],right:&[f32],rate:u32,points:&[(usize,usize)])->Result<(Vec<f32>,Vec<f32>),String>{
+    warp_segments(left,right,rate,points,false,false)
+}
+
+fn warp_segments(left: &[f32], right: &[f32], rate: u32, points: &[(usize, usize)], vocal: bool, interactive_limits: bool) -> Result<(Vec<f32>, Vec<f32>), String> {
+    let n=left.len().min(right.len());
+    if points.len()<2||points.len()>1024||points[0].1!=0||points.last().unwrap().0>n||points.windows(2).any(|w|w[1].0<=w[0].0||w[1].1<=w[0].1){return Err("Warp anchors must stay in order and inside the sample".into());}
+    let frames=points.last().unwrap().1;
+    if frames>rate as usize*60*20{return Err("Warp output exceeds 20 minutes".into());}
+    let start=points[0].0;
+    if points.iter().all(|&(s,d)|s-start==d){return Ok((left[start..start+frames].to_vec(),right[start..start+frames].to_vec()));}
+    let (mut l,mut r,mut weights)=(vec![0.;frames],vec![0.;frames],vec![0.;frames]);
+    for pair in points.windows(2){
+        let ((a,x),(b,y))=(pair[0],pair[1]);
+        if !vocal && a==x&&b==y{for j in a..b{l[j]+=left[j];r[j]+=right[j];weights[j]+=1.;}continue;}
+        let ratio=(y-x) as f64/(b-a) as f64;
+        if interactive_limits && !(0.0625..=16.).contains(&ratio){return Err("Keep each warp segment between 1/16 and 16 times its original duration".into());}
+        let pad=(rate as usize / if vocal { 40 } else { 100 }).min((b-a)/4).max(1);
+        let lo=a.saturating_sub(pad);let hi=(b+pad).min(n);
+        let before=((a-lo) as f64*ratio).round() as usize;let after=((hi-b) as f64*ratio).round() as usize;
+        let (sl,sr)=if vocal && y-x==b-a {(left[lo..hi].to_vec(),right[lo..hi].to_vec())}
+            else {whole(&left[lo..hi],&right[lo..hi],rate,y-x+before+after,1.)};
+        for j in 0..sl.len(){let dest=x as isize+j as isize-before as isize;if dest<0||dest>=frames as isize{continue;}
+            let w=if j<before{(j+1) as f32/(before+1) as f32}else if j>=before+y-x{(sl.len()-j) as f32/(after+1) as f32}else{1.};
+            let w=if vocal {0.5 - 0.5 * (std::f32::consts::PI * w).cos()} else {w};
+            let d=dest as usize;l[d]+=sl[j]*w;r[d]+=sr[j]*w;weights[d]+=w;
+        }
+    }
+    for i in 0..frames {if weights[i]>0.{l[i]/=weights[i];r[i]/=weights[i];}}
+    // A mono source must remain mono; the stretcher may decorrelate identical inputs.
+    if left==right {r.clone_from(&l);}
+    Ok((l,r))
 }
 
 /// A stretch that runs while a voice plays: stereo frames in, stereo frames out, in any amounts per call, the pitch
@@ -279,4 +319,15 @@ mod tests {
         assert!((f - 660.0).abs() < 4.0, "{f}");
         assert!(rms(&out[20000..40000]) > 0.25, "level kept");
     }
+}
+
+#[cfg(test)] mod warp_tests {
+ use super::*;
+ #[test] fn community_warp_preserves_pitch_and_identity(){
+    let rate=48000;let x:Vec<_>=(0..rate).map(|i|(i as f32*440.*std::f32::consts::TAU/rate as f32).sin()*0.2).collect();
+    let (a,b)=warp(&x,&x,rate as u32,&[(0,0),(rate,rate)]).unwrap();assert_eq!(a,x);assert_eq!(b,x);
+    let (a,b)=warp(&x,&x,rate as u32,&[(0,0),(rate/2,rate/4),(rate,rate)]).unwrap();assert_eq!(a.len(),rate);assert_eq!(a,b);
+    for (start,end) in [(3000,9000),(24000,42000)] {let v=&a[start..end];let crossings=v.windows(2).filter(|w|w[0]<=0.&&w[1]>0.).count();let hz=crossings as f64*rate as f64/v.len() as f64;assert!((hz-440.).abs()<15.,"{hz}");}
+    assert!(warp(&x,&x,rate as u32,&[(0,0),(100,200),(90,300)]).is_err());
+ }
 }

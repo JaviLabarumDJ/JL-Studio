@@ -1,5 +1,4 @@
 // Copyright (C) 2026 ItsAlphaNeon
-// Copyright (C) 2026 thacer13
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
@@ -40,8 +39,7 @@ fn sampler_state(wav: &Path, params: &str) -> Vec<u8> {
 }
 
 fn tone(name: &str, frames: usize) -> PathBuf {
-    // One file per process: test runs side by side must not write each other's.
-    let wav = std::env::temp_dir().join(format!("{}-{name}", std::process::id()));
+    let wav = std::env::temp_dir().join(name);
     let t: Vec<f32> = (0..frames).flat_map(|i| { let v = (i as f32 * 0.05).sin() * 0.5; [v, v] }).collect();
     os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &t).unwrap();
     wav
@@ -81,6 +79,40 @@ fn finds_bundles_and_single_file_modules() {
     assert_eq!(module_file(&found[1]), found[1]);
     assert!(Module::load(&found[0]).is_err(), "an empty bundle is not a plug-in");
     let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Manual integration fixture using the vendor's Windows dBComp VST3.
+#[test]
+#[ignore]
+fn dbcomp_external_key_changes_gain_on_the_same_main_signal() {
+    use os_engine::HostedEffect;
+    use os_host::Plugin as _;
+    let module = Module::load(&PathBuf::from(std::env::var_os("ML_TEST_DBCOMP").unwrap())).unwrap();
+    let measure = |key_level: f32, switch: Option<u32>| {
+        let mut p = Plugin::new(&module, &module.plugins()[0].id).unwrap();
+        assert!(p.activate(48000));
+        // In dBComp 2.0 the sidechain switches have IDs but empty display names.
+        for (id, value) in [(0, 0.05), (1, 1.0), (4, 1.0)] {
+            assert!(p.set_param(id, value));
+        }
+        if let Some(id) = switch { assert!(p.set_param(id, 1.0)); }
+        let mut energy = 0.;
+        for block in 0..100 {
+            let tone: [f32; 512] = std::array::from_fn(|i| ((block * 512 + i) as f32 * 0.09).sin());
+            let key = tone.map(|s| s * key_level);
+            let mut left = tone.map(|s| s * 0.015);
+            let mut right = left;
+            p.process_fx_keyed(48000, &mut left, &mut right, (&key, &key));
+            if block >= 80 { energy += left.iter().map(|x| x*x).sum::<f32>(); }
+        }
+        (energy / (20. * 512.)).sqrt()
+    };
+    let internal = (measure(0., None), measure(0.9, None));
+    let (quiet, loud) = (measure(0., Some(6)), measure(0.9, Some(6)));
+    assert!(internal.0 > 0.0001 && (internal.0 - internal.1).abs() < 0.00001);
+    eprintln!("dBComp output RMS with EXT-SC: quiet key {quiet}, loud key {loud}");
+    assert!(quiet > 0.0001 && loud < quiet * 0.8);
+
 }
 
 #[test]
@@ -324,7 +356,6 @@ fn engine_plays_a_pattern() {
         assert!(p.activate(48000));
     }
     let ch = os_model::Channel {
-        id: os_model::Id::NONE,
         index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Lemon Sampler".into()), plugin_state: None, color: None,
         enabled: true, volume: 0.78125, pan: 0.0, pitch_cents: 0, mixer_track: 0, sample_path: None,
         layer_children: vec![], envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
@@ -349,7 +380,7 @@ fn engine_plays_a_pattern() {
 fn mono_portamento_glides_through_the_tuning_expression() {
     let Some((_m, shared)) = sampler() else { return };
     // 4 s of a 441 Hz sine at 48 kHz.
-    let wav = std::env::temp_dir().join(format!("os-vst3-porta-{}.wav", std::process::id()));
+    let wav = std::env::temp_dir().join("os-vst3-porta.wav");
     let sine: Vec<f32> = (0..48000 * 4).flat_map(|i| { let v = (i as f32 / 48000.0 * 441.0 * std::f32::consts::TAU).sin() * 0.5; [v, v] }).collect();
     os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &sine).unwrap();
     {
@@ -359,7 +390,6 @@ fn mono_portamento_glides_through_the_tuning_expression() {
     }
     let misc = os_model::ChannelMisc { mono: true, porta: true, slide: 1.0, ..Default::default() };
     let ch = os_model::Channel {
-        id: os_model::Id::NONE,
         index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Lemon Sampler".into()), plugin_state: None, color: None,
         enabled: true, volume: 0.78125, pan: 0.0, pitch_cents: 0, mixer_track: 0, sample_path: None,
         layer_children: vec![], envelopes: Default::default(), rack: Default::default(), misc, sound: Default::default(),
@@ -415,10 +445,56 @@ fn rate_changes_reactivate_on_idle() {
 
 /// `OS_VST3_PLUGIN=<path>`: any VST 3 plug-in loads, activates, processes a block and saves its state.
 #[test]
+#[ignore = "loads the explicitly selected installed plugin, without an editor or audio device"]
+fn plugin_load_processing_probe() {
+    use os_host::Plugin as _;
+    use os_engine::HostedEffect as _;
+    let path = std::env::var_os("OS_VST3_PLUGIN").expect("OS_VST3_PLUGIN required");
+    let m = Module::load(Path::new(&path)).expect("load");
+    let d = m.plugins().iter().find(|d| !d.is_instrument()).expect("effect");
+    let mut p = Plugin::new(&m, &d.id).expect("create");
+    if let Some(path) = std::env::var_os("OS_VST3_PROJECT") {
+        let bytes = std::fs::read(path).expect("read diagnostic project");
+        let file = os_flp::FlpFile::parse(&bytes).expect("parse project");
+        let project = os_flp::project::load(&file).expect("load project");
+        let saved = project.mixer.iter().flat_map(|t| t.slots.iter().flatten())
+            .filter_map(|s| os_flp::wrapper::decode(&s.state))
+            .find(|s| s.name == d.name).expect("selected effect in project");
+        assert!(p.load_state(&saved.state), "restore saved effect settings");
+    }
+    assert!(p.activate(48000));
+    for frames in [16, 64, 128, 256, 512] {
+        let (mut l, mut r) = (vec![0.; frames], vec![0.; frames]);
+        let mut processing = std::time::Duration::ZERO;
+        let mut idle = std::time::Duration::ZERO;
+        let mut notifications = 0;
+        for block in 0..(48000 / frames) {
+            for (i, (l, r)) in l.iter_mut().zip(&mut r).enumerate() {
+                *l = ((block * frames + i) as f32 * 0.0576).sin() * 0.1;
+                *r = *l;
+            }
+            let start = Instant::now();
+            p.process_fx(48000, &mut l, &mut r);
+            processing += start.elapsed();
+            assert!(l.iter().chain(&r).all(|v| v.is_finite()));
+            if block % (48000 / frames / 30).max(1) == 0 {
+                let flags = p.shared.restart.load(Ordering::Acquire);
+                notifications += usize::from(flags != 0);
+                let start = Instant::now();
+                p.idle();
+                idle += start.elapsed();
+            }
+        }
+        eprintln!("{} frames={frames}: process={processing:?} idle={idle:?} notifications={notifications} latency={}", d.name, p.latency());
+    }
+}
+
+#[test]
 fn hosts_a_plugin_from_env() {
     let Some(path) = std::env::var_os("OS_VST3_PLUGIN") else { return };
     let m = Module::load(Path::new(&path)).expect("load");
     for d in m.plugins() {
+        if std::env::var("OS_VST3_NAME").ok().is_some_and(|name| d.name != name) { continue; }
         eprintln!("{} | {} | {} | {:?} | {:?}", d.uid(), d.name, d.vendor, d.kind, d.features);
         let shared = m.clone().create(&d.id).expect("create");
         let mut p = shared.lock().unwrap();
@@ -439,11 +515,39 @@ fn hosts_a_plugin_from_env() {
 }
 
 /// A plug-in whose edit controller is a class of its own, the layout of most VST 3 plug-ins (`mock.rs`).
+#[test]
+#[ignore = "requires an installed plugin named by OS_VST3_PLUGIN and OS_VST3_NAME"]
+fn editor_creation_from_env_without_window() {
+    let path = std::env::var_os("OS_VST3_PLUGIN").expect("plugin path");
+    let name = std::env::var("OS_VST3_NAME").expect("plugin name");
+    let m = Module::load(Path::new(&path)).expect("load");
+    let d = m.plugins().iter().find(|d| d.name == name).expect("named plugin");
+    let mut p = Plugin::new(&m, &d.id).expect("create");
+    assert!(p.activate(48000));
+    eprintln!("{}: editor available {}", name, p.has_editor());
+    let c = p.controller.as_ref().expect("controller");
+    for i in 0..2 {
+        unsafe {
+            let v = owned::<dyn IPlugView>(c.create_view(c"editor".as_ptr())).expect("create editor view");
+            let mut r = ViewRect::default();
+            eprintln!("view {i}: platform {}, size result {}, {}x{}", v.is_platform_type_supported(PLATFORM_TYPE.as_ptr()), v.get_size(&mut r), r.right-r.left, r.bottom-r.top);
+            eprintln!("set frame: {:?}", os_host::guard::catch(|| v.set_frame(p.editor_state.lock().unwrap().frame.raw())));
+            if let Some(scale) = v.cast::<dyn IPlugViewContentScaleSupport>() {
+                let result = os_host::guard::catch(|| scale.set_scale_factor(1.25));
+                eprintln!("scale before attach: {result:?}");
+                assert!(result.is_ok(), "scale before attach crashed");
+            }
+            v.set_frame(std::ptr::null_mut());
+        }
+    }
+}
+
+/// A plug-in whose edit controller is a class of its own, the layout of most VST 3 plug-ins (`mock.rs`).
 mod separate {
     use super::*;
     use crate::mock::{self, Probe, EXTRA, GAIN, MODE, PEAK};
     use os_engine::{HostedEffect, Instrument};
-    use os_host::ParamEvent::{Begin, End, Value};
+    use os_host::ParamEvent::{Begin, End, Sync, Value};
     use os_host::Plugin as _;
 
     fn test_module(probe: &Arc<Probe>) -> Arc<Module> {
@@ -455,6 +559,56 @@ mod separate {
         let id = m.plugins()[0].id.clone();
         let p = Plugin::new(&m, &id).expect("create");
         (m, p)
+    }
+
+    #[test]
+    fn routes_external_key_to_initially_disabled_mono_aux_after_two_main_buses() {
+        let probe = Arc::new(Probe::default());
+        probe.has_mono_key.store(true, Ordering::Relaxed);
+        let (_module, mut plugin) = instance(&probe);
+        assert!(plugin.activate(48000));
+        assert!(!probe.logged("comp.activate_bus 0 0 2 1").is_empty());
+        let (mut left, mut right) = ([0.; 64], [0.; 64]);
+        plugin.effect(48000, &mut left, &mut right, Some((&[0.2; 64], &[0.8; 64])));
+        assert_eq!((left, right), ([0.5; 64], [0.5; 64]));
+        plugin.effect(48000, &mut left, &mut right, None);
+        assert_eq!((left, right), ([0.; 64], [0.; 64]));
+    }
+
+    #[test]
+    fn smart_disable_checks_pending_work_and_keeps_vst3_host_time() {
+        let probe = Arc::new(Probe::default()); let (_m, mut p) = instance(&probe);
+        assert!(p.activate(48000));
+        p.process_fx(48000, &mut [0.; 16], &mut [0.; 16]);
+        assert_eq!(p.smart_disable_tail(), Some(0));
+        p.advance_silent(48000, 5000);
+        p.process_fx(48000, &mut [0.; 16], &mut [0.; 16]);
+        assert_eq!(p.context.continuous_time_samples, 5016);
+        assert_eq!(p.steady, 5032);
+        p.shared.to_processor.lock().unwrap().push((GAIN, 0.5));
+        assert_eq!(p.smart_disable_tail(), None);
+        p.process_fx(48000, &mut [0.; 16], &mut [0.; 16]);
+        assert_eq!(p.smart_disable_tail(), Some(0));
+        let editor = p.editor_state.lock().unwrap();
+        assert_eq!(p.smart_disable_tail(), None, "busy editor never blocks audio"); drop(editor);
+        let params = p.shared.to_processor.lock().unwrap();
+        assert_eq!(p.smart_disable_tail(), None, "busy parameter queue never blocks audio"); drop(params);
+        p.note_on(500000, 60, 1.); assert_eq!(p.smart_disable_tail(), None);
+        p.queue.clear(); p.shared.restart.store(LATENCY_CHANGED, Ordering::Release);
+        assert_eq!(p.smart_disable_tail(), None);
+    }
+
+    #[test]
+    fn mpe_native_events_keep_unisons_independent() {
+        let probe=Arc::new(Probe::default());let (_module,mut p)=instance(&probe);
+        p.mpe_map=[2,100000,5];
+        for b in os_model::mpe::Config::default().setup(){p.midi(0,b);}
+        p.midi(0,[0x91,60,100]);p.midi(0,[0x92,60,90]);p.midi(8,[0xe1,127,127]);p.midi(9,[0xd2,100,0]);p.midi(10,[0xb2,74,110]);
+        let ids:Vec<_>=p.mpe_queue.iter().filter(|e|e.type_==NOTE_ON_EVENT).map(|e|unsafe{e.event.note_on.note_id}).collect();assert_eq!(ids.len(),2);assert_ne!(ids[0],ids[1]);
+        assert!(p.mpe_queue.iter().any(|e|e.type_==NOTE_EXPRESSION_VALUE_EVENT&&unsafe{let v=e.event.note_expression_value;v.note_id==ids[0]&&v.type_id==2&&(v.value-0.7).abs()<1e-6}));
+        assert!(p.mpe_queue.iter().any(|e|e.type_==NOTE_EXPRESSION_VALUE_EVENT&&unsafe{let v=e.event.note_expression_value;v.note_id==ids[1]&&v.type_id==100000&&v.value>0.78}));
+        p.midi(11,[0x81,60,64]);assert_eq!(p.mpe_voices.len(),1);assert_eq!(p.mpe_voices[0].0,ids[1]);
+        p.reset();assert!(p.mpe_voices.is_empty());assert_eq!(p.mpe_queue.iter().filter(|e|e.type_==NOTE_OFF_EVENT).count(),2);
     }
 
     fn ones(n: usize) -> (Vec<f32>, Vec<f32>) {
@@ -507,6 +661,56 @@ mod separate {
     }
 
     #[test]
+    fn editor_dimensions_follow_cached_resize_notifications() {
+        let probe = Arc::new(Probe::default());
+        let (_m, p) = instance(&probe);
+        let mut editor = p.editor_state.lock().unwrap();
+        editor.editor = true;
+        editor.editor_scale = 1.5;
+        *editor.shared.size.lock().unwrap() = Some((800, 600));
+        assert_eq!(editor.editor_size(), Some((1200, 900)));
+        *editor.shared.size.lock().unwrap() = Some((1000, 700));
+        assert_eq!(editor.editor_size(), Some((1500, 1050)));
+        editor.close_editor();
+        assert_eq!(editor.editor_size(), None);
+    }
+
+    #[test]
+    fn deferred_display_updates_preserve_processing_and_newer_values() {
+        let probe = Arc::new(Probe::default());
+        let (_m, mut p) = instance(&probe);
+        assert!(p.activate(48000));
+        let (mut l, mut r) = ones(64);
+        p.process_fx(48000, &mut l, &mut r);
+        let job = p.take_ui_job().expect("display updates detached");
+        assert!(p.from_processor.is_empty());
+        p.idle();
+        assert_ne!(probe.controller().value(PEAK), 1.0, "idle did not deliver under the instance lock");
+        l.fill(0.25); r.fill(0.25);
+        p.process_fx(48000, &mut l, &mut r);
+        job();
+        assert_eq!(probe.controller().value(PEAK), 1.0);
+        p.take_ui_job().expect("newer meter reading retained")();
+        assert_eq!(probe.controller().value(PEAK), 0.25);
+    }
+
+    #[test]
+    fn controller_snapshot_reads_current_values() {
+        let probe = Arc::new(Probe::default());
+        let (_m, mut p) = instance(&probe);
+        assert!(p.set_param(GAIN, 0.75));
+        let job = p.param_values_job().expect("independent controller snapshot");
+        assert!(p.set_param(GAIN, 0.25));
+        let values = job();
+        assert_eq!(values.iter().find(|p| p.0 == GAIN).map(|p| p.1), Some(0.25));
+        assert_eq!(values.len(), p.param_count());
+        let first = p.param_values_job_range(0..1).unwrap()();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0], values[0]);
+        assert!(p.param_values_job_range(p.param_count()..p.param_count()).unwrap()().is_empty());
+    }
+
+    #[test]
     fn edits_reach_both_halves() {
         let probe = Arc::new(Probe::default());
         let (_m, mut p) = instance(&probe);
@@ -520,6 +724,7 @@ mod separate {
         // The processor's output parameter reaches the controller on idle.
         p.idle();
         assert_eq!(probe.controller().value(PEAK), 1.0);
+        assert_eq!(p.take_param_events(), [Sync(PEAK, 1.0)]);
         // An edit in the plug-in's editor: the gesture for the app, the value for the processor.
         probe.controller().user_edit(GAIN, 0.25);
         assert_eq!(p.take_param_events(), [Begin(GAIN), Value(GAIN, 0.25), End(GAIN)]);
@@ -987,7 +1192,7 @@ mod separate {
         fn the_popup_point_is_in_editor_pixels() {
             let probe = Arc::new(Probe::default());
             let (_m, mut p) = instance(&probe);
-            p.editor_scale = 2.0;
+            p.editor_state.lock().unwrap().editor_scale = 2.0;
             let m = pop(&mut p, probe.controller().context_menu(Some(GAIN)), 10, 21);
             assert_eq!(m.at, (20, 42));
             p.close_editor();
@@ -1070,6 +1275,25 @@ mod window {
         }
     }
 
+    fn capture_live(hwnd: HWND, w: i32, h: i32) -> Vec<u8> {
+        unsafe {
+            let dc = GetDC(hwnd);
+            let mem = CreateCompatibleDC(dc);
+            let mut bmi: BITMAPINFO = std::mem::zeroed();
+            bmi.bmiHeader = BITMAPINFOHEADER { biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32, biWidth: w, biHeight: -h, biPlanes: 1, biBitCount: 32, biCompression: BI_RGB, ..std::mem::zeroed() };
+            let mut bits: *mut c_void = std::ptr::null_mut();
+            let bmp = CreateDIBSection(dc, &bmi, DIB_RGB_COLORS, &mut bits, std::ptr::null_mut(), 0);
+            let old = SelectObject(mem, bmp);
+            BitBlt(mem, 0, 0, w, h, dc, 0, 0, SRCCOPY);
+            let px = std::slice::from_raw_parts(bits as *const u8, (w * h * 4) as usize).to_vec();
+            SelectObject(mem, old);
+            DeleteObject(bmp);
+            DeleteDC(mem);
+            ReleaseDC(hwnd, dc);
+            px
+        }
+    }
+
     fn write_bmp(path: &Path, w: i32, h: i32, px: &[u8]) {
         let mut f = Vec::new();
         f.extend_from_slice(b"BM");
@@ -1084,6 +1308,195 @@ mod window {
         f.extend_from_slice(&[0; 24]);
         f.extend_from_slice(px);
         std::fs::write(path, f).unwrap();
+    }
+
+    /// Opt-in ARA editor diagnostic with synthetic audio; no sound device or user project.
+    #[test]
+    #[ignore = "opens an installed ARA editor; requires explicit permission for GUI testing"]
+    fn ara_editor_audio_from_env() {
+        #[link(name = "ole32")]
+        extern "system" { fn CoInitializeEx(reserved: *mut c_void, flags: u32) -> i32; }
+        unsafe { CoInitializeEx(std::ptr::null_mut(), 2); }
+        let path = std::env::var_os("OS_VST3_PLUGIN").expect("plugin path");
+        let name = std::env::var("OS_VST3_NAME").expect("plugin name");
+        let module = Module::load(Path::new(&path)).expect("load");
+        let desc = module.plugins().iter().find(|p| p.name == name).expect("named plugin");
+        let wav = tone(&format!("lemon-ara-editor-{}.wav", std::process::id()), 96000);
+        let sample = os_engine::sample::load_shared(&wav).unwrap();
+        let mut plugin = Plugin::new_ara(&module, &desc.id, sample, None).expect("ARA binding");
+        assert!(plugin.activate(48000));
+        let hwnd = host_window(true);
+        let (w,h) = plugin.open_editor(hwnd.cast(), 1.0).expect("ARA editor");
+        unsafe { SetWindowPos(hwnd, HWND_TOPMOST, 60,60,w as i32,h as i32,SWP_NOACTIVATE); }
+        pump(&mut plugin, 3000);
+        let mut left = vec![0.;48000]; let mut right=left.clone();
+        plugin.render_ara_at(48000,0,&mut left,&mut right).expect("render");
+        let value = peak(&left).max(peak(&right));
+        eprintln!("ARA editor {}x{}; rendered peak {value}",w,h);
+        pump(&mut plugin, 300);
+        if let Some(dir) = std::env::var_os("OS_SHOT_DIR") {
+            let out=PathBuf::from(dir); std::fs::create_dir_all(&out).unwrap();
+            write_bmp(&out.join("ara-editor.bmp"),w as i32,h as i32,&capture_live(hwnd,w as i32,h as i32));
+        }
+        plugin.close_editor(); unsafe { DestroyWindow(hwnd); }
+        drop(plugin); std::fs::remove_file(wav).unwrap();
+        assert!(value > 0.001, "ARA playback silent with its editor attached");
+    }
+
+    /// The editor attaches to a host window (never shown), reports its size, and detaches.
+    #[test]
+    #[ignore = "creates a hidden editor for the installed plugin named in the environment"]
+    fn installed_editor_attaches_to_hidden_window() {
+        #[link(name = "ole32")]
+        extern "system" { fn CoInitializeEx(reserved: *mut c_void, flags: u32) -> i32; }
+        eprintln!("COM initialization: {}", unsafe { CoInitializeEx(std::ptr::null_mut(), 2) });
+        let path = std::env::var_os("OS_VST3_PLUGIN").expect("plugin path");
+        let name = std::env::var("OS_VST3_NAME").expect("plugin name");
+        let m = Module::load(Path::new(&path)).expect("load");
+        let d = m.plugins().iter().find(|d| d.name == name).expect("named plugin");
+        let shared = m.clone().create(&d.id).expect("create");
+        let mut p = shared.lock().unwrap();
+        assert!(p.activate(48000));
+        let hwnd = host_window(false);
+        let result = p.open_editor(hwnd as *mut c_void, 1.25);
+        eprintln!("editor result {result:?}; stopped {:?}", p.stopped());
+        let (w, h) = result.expect("editor opens");
+        assert!(w > 0 && h > 0);
+        pump(&mut *p, 100);
+        assert_eq!(p.stopped(), None);
+        p.close_editor();
+        unsafe { DestroyWindow(hwnd) };
+    }
+
+    /// Opt-in lifecycle test with independent synthetic processing; never uses an audio device.
+    #[test]
+    #[ignore = "visible installed editor diagnostic; requires explicit GUI authorization"]
+    fn installed_visible_editor_processing_probe() {
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        #[link(name = "ole32")]
+        extern "system" { fn CoInitializeEx(reserved: *mut c_void, flags: u32) -> i32; }
+        unsafe { CoInitializeEx(std::ptr::null_mut(), 2); }
+        let path = std::env::var_os("OS_VST3_PLUGIN").expect("plugin path");
+        let module = Module::load(Path::new(&path)).expect("load");
+        let desc = module.plugins().iter().find(|d| d.is_effect()).unwrap();
+        let shared = module.clone().create(&desc.id).expect("create");
+        assert!(shared.lock().unwrap().activate(48000));
+        let hwnd = host_window(false);
+        let ids: Vec<_> = {let p=shared.lock().unwrap();(0..p.param_count()).filter_map(|i|p.param_info(i).map(|p|p.id)).collect()};
+        // The legacy mode deliberately reproduces the old app parameter tick.
+        let legacy = std::env::var_os("OS_VST3_LEGACY_POLL").is_some();
+        let job = shared.lock().unwrap().editor_job(os_host::EditorAction::Open { parent: hwnd.cast(), scale: 1.0 }).unwrap();
+        let (w,h) = job().expect("editor opens");
+        unsafe { SetWindowPos(hwnd, HWND_TOP, 80, 80, w as i32, h as i32, SWP_NOACTIVATE); }
+        let stop = Arc::new(AtomicBool::new(false));
+        let stats = Arc::new([const { AtomicU64::new(0) }; 4]);
+        let (done, totals, audio) = (stop.clone(), stats.clone(), shared.clone());
+        let worker = std::thread::spawn(move || {
+            let mut frame = 0;
+            while !done.load(Ordering::Acquire) {
+                let start = Instant::now();
+                if let Ok(mut p) = audio.try_lock() {
+                    let mut l = [0.; 128]; let mut r = l;
+                    p.transport_fx(&os_engine::TransportInfo { playing:true, tempo:120., frame, beats:frame as f64/24000., bar_start:0., bar:0, numerator:4, denominator:4, looping:None });
+                    let at = Instant::now();
+                    p.process_fx(48000, &mut l, &mut r);
+                    let ns = at.elapsed().as_nanos() as u64;
+                    totals[0].fetch_add(ns, Ordering::Relaxed);
+                    totals[1].fetch_add(1, Ordering::Relaxed);
+                    totals[2].fetch_max(ns, Ordering::Relaxed);
+                    assert!(l.iter().chain(&r).all(|v|v.is_finite()));
+                } else { totals[3].fetch_add(1, Ordering::Relaxed); }
+                frame += 128;
+                std::thread::sleep(Duration::from_micros(2667).saturating_sub(start.elapsed()));
+            }
+        });
+        let mut missed = 0;
+        let mut processed = 0;
+        for visible in [false,true,false] {
+            unsafe { ShowWindow(hwnd, if visible {SW_SHOWNOACTIVATE} else {SW_HIDE}); }
+            for s in stats.iter() {s.store(0,Ordering::Relaxed);}
+            let start = Instant::now();
+            let mut idle_ns=0u128;
+            while start.elapsed() < Duration::from_secs(4) {
+                unsafe {
+                    let mut msg:MSG=std::mem::zeroed();
+                    for _ in 0..1000 {
+                        if PeekMessageW(&mut msg,std::ptr::null_mut(),0,0,PM_REMOVE)==0 {break;}
+                        TranslateMessage(&msg); DispatchMessageW(&msg);
+                    }
+                }
+                let at=Instant::now();
+                let (job,values)=if let Ok(mut p)=shared.try_lock() {
+                    if legacy {for id in &ids {let _=p.param_value(*id);}}
+                    let values=if legacy {None} else {Some(p.param_values_job().expect("controller snapshot"))};
+                    let job=p.take_ui_job();p.idle();let _=p.editor_size();let _=p.editor_resizable();(job,values)
+                }else{(None,None)};
+                if let Some(job)=job {job();}
+                if let Some(job)=values {assert_eq!(job().len(),ids.len());}
+                idle_ns+=at.elapsed().as_nanos();
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let v=stats.each_ref().map(|s|s.load(Ordering::Relaxed));
+            missed+=v[3]; processed+=v[1];
+            eprintln!("VISIBLE={visible} calls={} audio_load={:.2}% max_process_us={} lock_misses={} ui_idle_ms={}",v[1],v[0] as f64/(v[1].max(1) as f64*128./48000.*1e9)*100.,v[2]/1000,v[3],idle_ns/1_000_000);
+            if visible {if let Some(path)=std::env::var_os("OS_VST3_CAPTURE") {write_bmp(Path::new(&path),w as i32,h as i32,&capture_live(hwnd,w as i32,h as i32));}}
+        }
+        stop.store(true,Ordering::Release);worker.join().unwrap();
+        let job=shared.lock().unwrap().editor_job(os_host::EditorAction::Close).unwrap();job().unwrap();
+        unsafe {DestroyWindow(hwnd);}
+        assert_eq!(shared.lock().unwrap().stopped(),None);
+        if !legacy {assert!(processed > 1000 && missed*20 < processed,"parameter reads starved processing: {processed} blocks, {missed} misses");}
+    }
+
+    #[test]
+    #[ignore = "opens hidden editors for the installed effect named in the environment"]
+    fn installed_editor_jobs_keep_audio_processing() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        #[link(name = "ole32")]
+        extern "system" { fn CoInitializeEx(reserved: *mut c_void, flags: u32) -> i32; }
+        unsafe { CoInitializeEx(std::ptr::null_mut(), 2); }
+        let path = std::env::var_os("OS_VST3_PLUGIN").expect("plugin path");
+        let name = std::env::var("OS_VST3_NAME").expect("plugin name");
+        let module = Module::load(Path::new(&path)).expect("load");
+        let desc = module.plugins().iter().find(|d| d.name == name && d.is_effect()).expect("effect");
+        let shared = module.clone().create(&desc.id).expect("create");
+        assert!(shared.lock().unwrap().activate(48000));
+        let stop = Arc::new(AtomicBool::new(false));
+        let blocks = Arc::new(AtomicUsize::new(0));
+        let audio = shared.clone(); let done = stop.clone(); let count = blocks.clone();
+        let worker = std::thread::spawn(move || {
+            while !done.load(Ordering::Acquire) {
+                if let Ok(mut p) = audio.try_lock() {
+                    let mut l = [0.01; 64]; let mut r = l;
+                    p.process_fx(48000, &mut l, &mut r);
+                    assert!(l.iter().chain(&r).all(|v| v.is_finite()));
+                    count.fetch_add(1, Ordering::Release);
+                }
+                std::thread::sleep(std::time::Duration::from_micros(1333));
+            }
+        });
+        let hwnd = host_window(false);
+        let mut results = Vec::new();
+        for _ in 0..3 {
+            for action in [os_host::EditorAction::Open { parent: hwnd.cast(), scale: 1.25 }, os_host::EditorAction::Close] {
+                let job = shared.lock().unwrap().editor_job(action);
+                let Some(job) = job else {
+                    results.push((std::time::Duration::ZERO, 0, Err("No independent editor job (editor unavailable or plugin stopped)".to_string())));
+                    continue;
+                };
+                let before = blocks.load(Ordering::Acquire);
+                let started = std::time::Instant::now();
+                let result = job();
+                results.push((started.elapsed(), blocks.load(Ordering::Acquire) - before, result));
+            }
+        }
+        stop.store(true, Ordering::Release); worker.join().unwrap();
+        unsafe { DestroyWindow(hwnd); }
+        eprintln!("{name}: editor duration / concurrent 64-frame blocks / result: {results:?}");
+        assert!(results.iter().all(|(_, _, r)| r.is_ok()));
+        assert!(results.iter().filter(|(t,_,_)| t.as_millis() > 30).all(|(_,n,_)| *n > 0), "slow editor operations blocked audio");
+        assert!(blocks.load(Ordering::Acquire) > 0);
+        assert_eq!(shared.lock().unwrap().stopped(), None);
     }
 
     /// The editor attaches to a host window (never shown), reports its size, and detaches.
@@ -1143,38 +1556,119 @@ mod window {
     }
 }
 
-/// MIDI channel through (spec: ui/channel-rack.md §18): a note on goes on its MIDI channel, and its key's note off on
-/// the same one.
+/// Offline synthetic note test: no editor, audio device, MIDI hardware or microphone.
 #[test]
-fn notes_go_on_their_midi_channel() {
-    let mut ids = NoteIds { ids: [-1; 128], next: 0, chs: [0; 128] };
-    let on = ids.event(Note { time: 0, kind: NoteKind::On, key: 60, velocity: 1.0, ch: 3 }).expect("on");
-    let off = ids.event(Note { time: 0, kind: NoteKind::Off, key: 60, velocity: 0.0, ch: 0 }).expect("off");
-    let plain = ids.event(Note { time: 0, kind: NoteKind::On, key: 62, velocity: 1.0, ch: 0 }).expect("on");
-    unsafe {
-        assert_eq!((on.event.note_on.channel, off.event.note_off.channel, plain.event.note_on.channel), (3, 3, 0));
+#[ignore = "requires an installed instrument with a short default release via OS_VST3_PLUGIN"]
+fn installed_instrument_releases_notes_without_editor() {
+    let path=std::env::var_os("OS_VST3_PLUGIN").expect("instrument path");
+    let m=Module::load(Path::new(&path)).expect("load");
+    let d=m.plugins().iter().find(|d|d.is_instrument()).expect("instrument");
+    let shared=m.clone().create(&d.id).expect("create");
+    let mut p=shared.lock().unwrap();assert!(p.activate(48000));
+    let (mut l,mut r)=(vec![0.;480],vec![0.;480]);
+    for key in [60,64,60] {
+        p.note_on(0,key,0.8);let mut sounding=0.0f32;
+        for _ in 0..50 {l.fill(0.);r.fill(0.);p.process(48000,&mut l,&mut r);sounding=sounding.max(peak(&l)).max(peak(&r));}
+        p.note_off(0,key);let mut tail=0.0f32;
+        for block in 0..300 {l.fill(0.);r.fill(0.);p.process(48000,&mut l,&mut r);if block>=250{tail=tail.max(peak(&l)).max(peak(&r));}}
+        eprintln!("{} key={key}: held peak {sounding}, released peak {tail}",d.name);
+        assert!(sounding>0.001,"instrument must actually sound");
+        assert!(tail<0.0001,"note keeps sounding after key release");
     }
 }
 
-/// The notes among a processor's output events: ons, offs and a note on of velocity 0 as an off; other events are
-/// passed over (Burn MIDI to, spec: ui/channel-rack.md §18).
 #[test]
-fn notes_among_output_events() {
-    let on = |at: i32, pitch: i16, velocity: f32| Event {
-        bus_index: 0,
-        sample_offset: at,
-        ppq_position: 0.0,
-        flags: 0,
-        type_: NOTE_ON_EVENT,
-        event: EventData { note_on: NoteOnEvent { channel: 3, pitch, tuning: 0.0, velocity, length: 0, note_id: -1 } },
-    };
-    let off = Event { type_: NOTE_OFF_EVENT, event: EventData { note_off: NoteOffEvent { channel: 3, pitch: 60, velocity: 0.0, note_id: -1, tuning: 0.0 } }, ..on(9, 0, 0.0) };
-    let other = Event { type_: 4, ..on(5, 61, 1.0) };
-    let list = EventList::create();
-    for e in [on(2, 60, 0.5), other, on(6, 64, 0.0), off] {
-        list.get().push(e);
+fn released_notes_keep_their_matching_ids() {
+    let mut ids=NoteIds{ids:[-1;128],next:0,active:Vec::with_capacity(128)};
+    let note=|kind,key|Note{time:17,kind,key,velocity:0.8};
+    let a=ids.event(note(NoteKind::On,60)).unwrap();
+    let b=ids.event(note(NoteKind::On,60)).unwrap();
+    let c=ids.event(note(NoteKind::On,64)).unwrap();
+    let (a,b,c)=unsafe{(a.event.note_on.note_id,b.event.note_on.note_id,c.event.note_on.note_id)};
+    assert_ne!(a,b);
+    let tune=ids.event(note(NoteKind::Tune,60)).unwrap();
+    assert_eq!(unsafe{tune.event.note_expression_value.note_id},b);
+    let mut ended=Vec::new();
+    while let Some(e)=ids.event(note(NoteKind::Off,60)){assert_eq!(e.sample_offset,17);ended.push(unsafe{e.event.note_off.note_id});}
+    ended.sort();assert_eq!(ended,vec![a,b]);
+    assert!(ids.event(note(NoteKind::Tune,60)).is_none());
+    let other=ids.event(note(NoteKind::Off,64)).unwrap();assert_eq!(unsafe{other.event.note_off.note_id},c);
+    assert!(ids.active.is_empty());
+    let d=ids.event(note(NoteKind::On,60)).unwrap();let off=ids.event(note(NoteKind::Off,60)).unwrap();
+    assert_eq!(unsafe{d.event.note_on.note_id},unsafe{off.event.note_off.note_id});
+}
+
+#[test]
+fn ara_discovery_matches_only_the_advertised_audio_class() {
+    let probe = Arc::new(crate::mock::Probe::default());
+    let mut module = unsafe {Module::from_factory(Path::new("mock.vst3"),crate::mock::Factory::create(&probe),None)}.unwrap();
+    let id = module.plugins()[0].id.clone();
+    assert_eq!(module.ara_factory_id(&id),None);
+    let m=Arc::get_mut(&mut module).unwrap();
+    m.ara_factories.push(("Other plugin in shell".into(),"wrong".into()));
+    assert_eq!(m.ara_factory_id(&id),None);
+    m.ara_factories.push((m.plugins[0].name.clone(),"factory".into()));
+    assert_eq!(m.ara_factory_id(&id),Some("factory"));
+    assert_eq!(m.ara_factory_id("missing"),None);
+    m.ara_factories.push((m.plugins[0].name.clone(),"ambiguous".into()));
+    assert_eq!(m.ara_factory_id(&id),None);
+    assert_eq!(probe.live.load(std::sync::atomic::Ordering::Relaxed),0,"discovery must not create a processor or editor");
+}
+
+/// Synthetic offline acceptance: never opens an editor or an audio device.
+#[test]
+#[ignore = "requires OS_VST3_PLUGIN with an initialized pitched MPE instrument"]
+fn mpe_installed_instrument_pitch_and_release() {
+    use os_engine::Instrument;use os_host::Plugin as _;
+    let path=std::env::var_os("OS_VST3_PLUGIN").expect("instrument path");let m=Module::load(Path::new(&path)).expect("load");let d=m.plugins().iter().find(|d|d.is_instrument()).unwrap();
+    let mut p=Plugin::new(&m,&d.id).unwrap();assert!(p.activate(48000));eprintln!("{}: native expression IDs {:?}, MPE capability {}",d.name,p.mpe_map,p.mpe_support());
+    // The stock Vital patch disables MPE. Configure this isolated test instance,
+    // just as a user must enable MPE in their instrument; never edit a user preset.
+    let mpe_switch=(d.name=="Vital").then(||(0..p.param_count()).filter_map(|i|p.param_info(i)).find(|v|v.name=="MPE Enabled").expect("Vital MPE switch").id);
+    let bend_range=(d.name=="Vital").then(||(0..p.param_count()).filter_map(|i|p.param_info(i)).find(|v|v.name=="Pitch Bend Range").expect("Vital bend range").id);
+    let(mut l,mut r)=(vec![0.;480],vec![0.;480]);let mut rates=vec![];
+    for bend in [8192u16,10240] {
+        p.reset();
+        if let Some(id)=mpe_switch {assert!(p.set_param(id,1.));p.process(48000,&mut l,&mut r);}
+        if let Some(id)=bend_range {assert!(p.set_param(id,1.));p.process(48000,&mut l,&mut r);}
+        let mut playback=os_engine::mpe::Playback::new(Default::default(),vec![os_engine::mpe::Scheduled {
+            start:0,end:96,key:60,color:2,velocity:100,release:64,expression:Default::default(),fine:0.
+        }]).with_pitch_slides(if bend==8192 {vec![]} else {vec![os_engine::mpe::PitchSlide {start:4,len:3,key:72,color:2}]});
+        for tick in 0..8 {for b in playback.tick(tick,true){p.midi(0,b);}p.process(48000,&mut l,&mut r);}
+        let mut samples=vec![];for block in 0..100{p.process(48000,&mut l,&mut r);if block>=50{samples.extend_from_slice(&l);}}
+        assert!(samples.iter().all(|v|v.is_finite()));assert!(peak(&samples)>0.001);
+        // Band-limited waveform ringing can create extra zero crossings. Measure
+        // the dominant spectral pitch, using a Hann window over the settled tail.
+        let rate=(200..=700).map(|hz| {
+            let (mut re,mut im)=(0f64,0f64);
+            for (i,&v) in samples.iter().enumerate() {
+                let phase=std::f64::consts::TAU*hz as f64*i as f64/48000.;
+                let win=0.5-0.5*(std::f64::consts::TAU*i as f64/(samples.len()-1) as f64).cos();
+                re+=f64::from(v)*win*phase.cos();im+=f64::from(v)*win*phase.sin();
+            }
+            (hz,re*re+im*im)
+        }).max_by(|a,b|a.1.total_cmp(&b.1)).unwrap().0;
+        rates.push(rate as f64);
+        for b in playback.tick(96,true){p.midi(0,b);}let mut tail=0.0f32;for block in 0..300{p.process(48000,&mut l,&mut r);if block>250{tail=tail.max(peak(&l)).max(peak(&r));}}assert!(tail<0.0001,"released peak {tail}");
     }
-    let got: Vec<_> = notes_of(&list.get().take()).map(|n| (n.offset, n.key, n.channel, n.on, n.velocity)).collect();
-    assert_eq!(got, [(2, 60, 3, true, 0.5), (6, 64, 3, false, 0.0), (9, 60, 3, false, 0.0)]);
-    assert!(list.get().take().is_empty());
+    eprintln!("MPE baseline/bent spectral pitches: {rates:?}");assert!((rates[1]/rates[0]-2.).abs()<0.02,"note pitch must rise one octave");
+    p.reset();
+    for id in [mpe_switch,bend_range].into_iter().flatten(){assert!(p.set_param(id,1.));}
+    p.process(48000,&mut l,&mut r);
+    let mut playback=os_engine::mpe::Playback::new(Default::default(),[2,3].into_iter().map(|color|os_engine::mpe::Scheduled {
+        start:0,end:96,key:60,color,velocity:100,release:64,expression:Default::default(),fine:0.
+    }).collect()).with_pitch_slides(vec![os_engine::mpe::PitchSlide{start:4,len:3,key:72,color:2}]);
+    for tick in 0..8 {for b in playback.tick(tick,true){p.midi(0,b);}p.process(48000,&mut l,&mut r);}
+    let mut samples=vec![];for block in 0..100{p.process(48000,&mut l,&mut r);if block>=50{samples.extend_from_slice(&l);}}
+    let power=|hz:f64| {
+        let(mut re,mut im)=(0f64,0f64);
+        for(i,&v)in samples.iter().enumerate(){let phase=std::f64::consts::TAU*hz*i as f64/48000.;let win=0.5-0.5*(std::f64::consts::TAU*i as f64/(samples.len()-1)as f64).cos();re+=f64::from(v)*win*phase.cos();im+=f64::from(v)*win*phase.sin();}
+        (re*re+im*im)/(samples.len()*samples.len())as f64
+    };
+    // The held unison must remain audible at C4 while the other color reaches C5.
+    // C5 alone has no C4 subharmonic, so this rejects a global bend of both notes.
+    assert!(power(261.63)>1e-6,"unrelated colored note lost its original pitch");
+    assert!(power(523.25)>1e-6,"sliding colored note did not reach the target");
+    for b in playback.tick(96,true){p.midi(0,b);}for _ in 0..300{p.process(48000,&mut l,&mut r);}
+    assert!(peak(&l).max(peak(&r))<0.0001,"both unisons must release");
 }

@@ -5,8 +5,8 @@
 //! Skins: the shapes and base colours of a look over the same layout. A theme (`.flstheme`) colours whichever skin is
 //! in use.
 //!
-//! `Citrus` (formerly Classic) is the measured default look. `Lemon` is Lemon Studio's own look: neutral greys, one
-//! lemon-yellow brand colour and rounded-square controls (knobs stay round). It re-colours every token and every
+//! `Citrus` (formerly Classic) is the measured default look. `Lemon` is ML Studio's own look: neutral greys, one
+//! blue brand colour and rounded-square controls (knobs stay round). It re-colours every token and every
 //! role-mapped literal (`Palette::s/a/h/tx/led`) through a `DesignMap` (a neutral lightness ramp plus key colours), sets
 //! the tokens the map can't get right outright, and tells the widget kit which shape language to draw (`Style`). A
 //! theme other than the stock Dark one is laid over Lemon's colours by a `Retint`.
@@ -23,7 +23,7 @@ pub enum Design {
     /// The measured default look (named Classic before 2026-10-17).
     #[default]
     Citrus,
-    /// Lemon Studio's own look: lemon on neutral greys, rounded squares.
+    /// ML Studio's own look: blue on neutral greys, rounded squares.
     Lemon,
 }
 
@@ -33,17 +33,28 @@ impl Design {
 
     pub fn name(self) -> &'static str {
         match self {
+            Design::Citrus => "Console",
+            Design::Lemon => "Studio",
+        }
+    }
+
+    /// Stable identifier used by saved profiles and portable theme files.
+    pub fn key(self) -> &'static str {
+        match self {
             Design::Citrus => "Citrus",
             Design::Lemon => "Lemon",
         }
     }
 
-    /// A skin by name; `Classic` (Citrus's old name, still in older `design.txt` files) is Citrus.
+    /// Accept display names, stable identifiers and the original Classic name.
     pub fn parse(s: &str) -> Option<Design> {
-        if s.trim().eq_ignore_ascii_case("classic") {
+        let s = s.trim();
+        if s.eq_ignore_ascii_case("classic") {
             return Some(Design::Citrus);
         }
-        Design::ALL.into_iter().find(|d| d.name().eq_ignore_ascii_case(s.trim()))
+        Design::ALL.into_iter().find(|d| {
+            d.name().eq_ignore_ascii_case(s) || d.key().eq_ignore_ascii_case(s)
+        })
     }
 
     pub fn next(self) -> Design {
@@ -59,10 +70,42 @@ impl Design {
     }
 }
 
+/// Profile-wide 3036 shadow grading and the extra lift on header surfaces.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct NeonBackground {
+    pub tint: Option<Color>,
+    pub brightness: u8,
+    pub headers: u8,
+}
+
+impl NeonBackground {
+    pub const ORIGINAL: Self = Self { tint: None, brightness: 0, headers: 0 };
+
+    pub fn header(self, face: Color) -> Color {
+        let lift = u16::from(self.headers.min(100)) * 44 / 100;
+        let add = |v: u8| v.saturating_add(lift as u8);
+        Color { r: add(face.r), g: add(face.g), b: add(face.b), ..face }
+    }
+}
+
+/// Display-only settings passed to the bundled editor renderers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StockEditorLook {
+    pub inks: [Color; 3],
+    pub glow: u8,
+    pub spread: u8,
+    pub background: NeonBackground,
+}
+
 /// Shape language of a design. Sizes that affect layout are not here: the layout never changes.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Style {
     pub design: Design,
+    /// Fixed vintage appearance overlay.
+    pub vintage_2005: bool,
+    pub neon_3036: bool,
+    pub background: NeonBackground,
+    pub stock_editor: Option<StockEditorLook>,
     /// Corner radius of buttons, boxes and combos.
     pub radius: f32,
     /// Corner radius of small parts (steps, slots, LEDs, notes).
@@ -72,8 +115,8 @@ pub struct Style {
 }
 
 impl Style {
-    pub const CITRUS: Style = Style { design: Design::Citrus, radius: 3.0, radius_small: 2.5, radius_panel: 4.0 };
-    pub const LEMON: Style = Style { design: Design::Lemon, radius: 6.0, radius_small: 4.0, radius_panel: 10.0 };
+    pub const CITRUS: Style = Style { design: Design::Citrus, vintage_2005: false, neon_3036: false, background: NeonBackground::ORIGINAL, stock_editor: None, radius: 3.0, radius_small: 2.5, radius_panel: 4.0 };
+    pub const LEMON: Style = Style { design: Design::Lemon, vintage_2005: false, neon_3036: false, background: NeonBackground::ORIGINAL, stock_editor: None, radius: 5.0, radius_small: 3.5, radius_panel: 8.0 };
 
     pub fn is(&self, d: Design) -> bool {
         self.design == d
@@ -182,18 +225,18 @@ pub fn classic_keys() -> Keys {
 /// The Lemon brand palette (owner's base colours, 2026-10-12) and the in-between shades derived from it.
 pub mod lemon {
     use crate::Color;
-    /// Main colour (pale yellow): "on" controls, selection, the playhead, lit steps.
-    pub const MAIN: Color = Color::rgb(0xffe066);
+    /// Main colour (blue): "on" controls, selection, the playhead, lit steps.
+    pub const MAIN: Color = Color::rgb(0x2096f3);
     /// Highlight: the bright top of lit controls, hover on lit controls, selected notes.
-    pub const HIGHLIGHT: Color = Color::rgb(0xfff1b8);
+    pub const HIGHLIGHT: Color = Color::rgb(0x7ac4ff);
     /// Dark: the main surface (toolbar).
-    pub const DARK: Color = Color::rgb(0x3b3b3b);
+    pub const DARK: Color = Color::rgb(0x414141);
     /// Dark highlight: raised faces on hover, hairlines, knob tracks.
-    pub const DARK_HIGHLIGHT: Color = Color::rgb(0x666666);
+    pub const DARK_HIGHLIGHT: Color = Color::rgb(0x6a6a6a);
     /// Coloured dark: glyphs and text on lemon, unlit LEDs, hovered menu rows.
-    pub const COLORED_DARK: Color = Color::rgb(0x473900);
-    /// In-between: a darker lemon for edges of lit controls and meter bodies.
-    pub const DEEP: Color = Color::rgb(0xc9a92c);
+    pub const COLORED_DARK: Color = Color::rgb(0x0a2238);
+    /// In-between: a deeper blue for edges of lit controls and meter bodies.
+    pub const DEEP: Color = Color::rgb(0x186ab0);
     /// Text on the greys.
     pub const TEXT: Color = Color::rgb(0xececec);
 }
@@ -201,19 +244,19 @@ pub mod lemon {
 /// Lemon: Classic lightness -> Lemon lightness. Classic's toolbar (0.19) lands on DARK (#3b3b3b, 0.231) and the
 /// 0.33 raised greys on DARK_HIGHLIGHT (#666666, 0.40); the near-black lists and rulers lift to about #151515.
 const LEMON_RAMP: &[(f32, f32)] = &[
-    (0.0, 0.07),
-    (0.03, 0.085),
-    (0.06, 0.10),
-    (0.10, 0.125),
-    (0.13, 0.15),
-    (0.155, 0.18),
-    (0.19, 0.231),
-    (0.23, 0.285),
-    (0.27, 0.33),
-    (0.33, 0.40),
-    (0.5, 0.56),
-    (0.8, 0.84),
-    (1.0, 1.0),
+    (0.0, 0.089),
+    (0.03, 0.104),
+    (0.06, 0.119),
+    (0.10, 0.144),
+    (0.13, 0.169),
+    (0.155, 0.199),
+    (0.19, 0.250),
+    (0.23, 0.304),
+    (0.27, 0.349),
+    (0.33, 0.419),
+    (0.5, 0.579),
+    (0.8, 0.859),
+    (1.0, 1.000),
 ];
 
 fn map_of(d: Design) -> Option<DesignMap> {// This code is a part of L e m o n S t u d i o.
@@ -239,16 +282,16 @@ fn overrides(d: Design) -> Vec<(&'static str, Color)> {
         Design::Citrus => vec![],
         Design::Lemon => vec![
             ("toolbar", DARK),
-            ("toolbar_line", c(0x2a2a2a)),
-            ("toolbar_edge", c(0x4a4a4a)),
-            ("sunken", c(0x2b2b2b)),
-            ("sunken_dark", c(0x232323)),
-            ("time_panel", c(0x232323)),
-            ("menu_panel", c(0x333333)),
+            ("toolbar_line", c(0x2f2f2f)),
+            ("toolbar_edge", c(0x4f4f4f)),
+            ("sunken", c(0x303030)),
+            ("sunken_dark", c(0x282828)),
+            ("time_panel", c(0x282828)),
+            ("menu_panel", c(0x383838)),
             ("menu_text", TEXT),
-            ("news_panel", c(0x333333)),
-            ("button", c(0x474747)),
-            ("button_hi", c(0x555555)),
+            ("news_panel", c(0x383838)),
+            ("button", c(0x4c4c4c)),
+            ("button_hi", c(0x5a5a5a)),
             ("glyph", c(0xe6e6e6)),
             ("glyph_dim", c(0x8c8c8c)),
             ("text", TEXT),
@@ -260,19 +303,19 @@ fn overrides(d: Design) -> Vec<(&'static str, Color)> {
             ("pill", MAIN),
             ("pill_text", COLORED_DARK),
             ("record", c(0xff6159)),
-            ("tempo_box", c(0x2b2b2b)),
+            ("tempo_box", c(0x303030)),
             ("accent", MAIN),
             ("accent_dim", COLORED_DARK),
-            ("workspace", c(0x262626)),
-            ("watermark", c(0x2e2e2e)),
+            ("workspace", c(0x2c2c2c)),
+            ("watermark", c(0x343434)),
             ("version_text", c(0x5a5a5a)),
-            ("browser_title", c(0x333333)),
-            ("browser_tabs", c(0x2b2b2b)),
+            ("browser_title", c(0x383838)),
+            ("browser_tabs", c(0x303030)),
             ("browser_tab_outline", MAIN),
             ("browser_list", c(0x1f1f1f)),
-            ("browser_row_hi", c(0x333333)),
+            ("browser_row_hi", c(0x383838)),
             ("browser_folder", c(0xd9d9d9)),
-            ("browser_footer", c(0x2b2b2b)),
+            ("browser_footer", c(0x303030)),
             ("browser_search", MAIN),
             ("cat_project", MAIN),
             ("cat_recent", c(0xc8e3a6)),
@@ -280,29 +323,29 @@ fn overrides(d: Design) -> Vec<(&'static str, Color)> {
             ("cat_plugin_presets", c(0xe6b3cf)),
             ("cat_channel_presets", c(0xd4bce8)),
             ("cat_mixer_presets", c(0xbcc2ec)),
-            ("splitter", c(0x262626)),
+            ("splitter", c(0x2c2c2c)),
             ("splitter_dark", c(0x1c1c1c)),
-            ("window_title", c(0x333333)),
-            ("window_title_float", c(0x333333)),
+            ("window_title", c(0x383838)),
+            ("window_title_float", c(0x383838)),
             ("window_title_hi", c(0x3d3d3d)),
-            ("window_body", c(0x2e2e2e)),
+            ("window_body", c(0x343434)),
             ("window_border", c(0x1a1a1a)),
-            ("picker", c(0x2b2b2b)),
+            ("picker", c(0x303030)),
             ("track_header", c(0x383838)),
-            ("overview", c(0x555555)),
-            ("ruler", c(0x232323)),
+            ("overview", c(0x5a5a5a)),
+            ("ruler", c(0x282828)),
             ("ruler_text", c(0x9e9e9e)),
             ("grid", c(0x282828)),
             ("grid_alt", c(0x2d2d2d)),
             ("grid_gap", c(0x202020)),
             ("grid_bar", c(0x161616)),
-            ("scrollbar", c(0x2b2b2b)),
+            ("scrollbar", c(0x303030)),
             ("playhead", MAIN),
-            ("mixer_bg", c(0x262626)),
+            ("mixer_bg", c(0x2c2c2c)),
             ("mixer_strip", c(0x303030)),
             ("mixer_strip_dark", c(0x242424)),
-            ("mixer_panel", c(0x333333)),
-            ("slot", c(0x2b2b2b)),
+            ("mixer_panel", c(0x383838)),
+            ("slot", c(0x303030)),
             ("slot_text", c(0x707070)),
             ("slot_text_used", c(0xdedede)),
             ("fader_handle", c(0x5c5c5c)),
@@ -310,40 +353,40 @@ fn overrides(d: Design) -> Vec<(&'static str, Color)> {
             ("meter_high", HIGHLIGHT),
             ("meter_clip", c(0xff6159)),
             ("rack_row_box", c(0x3a3a3a)),
-            ("name_button", c(0x474747)),
+            ("name_button", c(0x4c4c4c)),
             ("name_button_sel", c(0x5e5e5e)),
             ("name_text", c(0xe2e2e2)),
-            ("rack_inset", c(0x333333)),
-            ("rack_inset_border", c(0x262626)),
+            ("rack_inset", c(0x383838)),
+            ("rack_inset_border", c(0x2c2c2c)),
             ("rack_control_border", c(0x222222)),
             ("step_a", c(0x4d4d4d)),
-            ("step_b", c(0x5a4d1f)),
+            ("step_b", c(0x304965)),
             ("step_dim_a", c(0x3a3a3a)),
-            ("step_dim_b", c(0x3d3827)),
-            ("step_dim_border", c(0x2e2e2e)),
+            ("step_dim_b", c(0x273746)),
+            ("step_dim_border", c(0x343434)),
             ("step_on", MAIN),
             ("add_hover", MAIN),
-            ("menu_drop", c(0x333333)),
+            ("menu_drop", c(0x383838)),
             ("menu_drop_hi", c(0x4d4d4d)),
             ("menu_drop_text", TEXT),
             ("menu_drop_disabled", c(0x7f7f7f)),
-            ("menu_pop", c(0x333333)),
+            ("menu_pop", c(0x383838)),
             ("menu_pop_border", c(0x1f1f1f)),
-            ("menu_pop_hi", COLORED_DARK),
+            ("menu_pop_hi", c(0x17466d)),
             ("menu_pop_text", TEXT),
-            ("menu_pop_shortcut", c(0xa3a3a3)),
+            ("menu_pop_shortcut", c(0xb7c0c9)),
             ("menu_pop_dim", c(0x7f7f7f)),
-            ("menu_pop_head", c(0x2b2b2b)),
+            ("menu_pop_head", c(0x303030)),
             ("menu_pop_head_text", c(0x8c8c8c)),
-            ("clip", c(0x8a7a3a)),
-            ("pr_row", c(0x2b2b2b)),
+            ("clip", c(0x35618a)),
+            ("pr_row", c(0x303030)),
             ("pr_row_black", c(0x242424)),
-            ("pr_row_sel", c(0x2f2c22)),
-            ("pr_row_black_sel", c(0x29261c)),
+            ("pr_row_sel", c(0x27333e)),
+            ("pr_row_black_sel", c(0x222e3a)),
             ("pr_bar", c(0x141414)),
             ("note_top", MAIN),
-            ("note_bottom", c(0xf2d052)),
-            ("note_rim", c(0x8a7420)),
+            ("note_bottom", c(0x1685dc)),
+            ("note_rim", c(0x1a507c)),
             ("note_text", COLORED_DARK),
             ("note_sel_top", c(0xffffff)),
             ("note_sel_bottom", HIGHLIGHT),
@@ -351,10 +394,10 @@ fn overrides(d: Design) -> Vec<(&'static str, Color)> {
             ("note_sel_text", COLORED_DARK),
             ("key_white", c(0xededed)),
             ("key_white_left", c(0xd2d2d2)),
-            ("key_black", c(0x3b3b3b)),
-            ("key_black_left", c(0x262626)),
+            ("key_black", c(0x414141)),
+            ("key_black_left", c(0x2c2c2c)),
             ("key_c", c(0xdddddd)),
-            ("key_label", c(0x8a7420)),
+            ("key_label", c(0x1a507c)),
             ("key_lit", HIGHLIGHT),
             ("key_lit_left", MAIN),
             ("key_lit_edge", DEEP),
@@ -373,6 +416,33 @@ fn overrides(d: Design) -> Vec<(&'static str, Color)> {
 pub fn palette(design: Design, theme: Option<&FlTheme>) -> Palette {
     let mut p = skin_palette(design, theme);
     p.wallpaper = theme.and_then(fl::wallpaper);
+    // Keep the inherited Traditional meter colors identical to its stock painter.
+    p.trad_meter_low_bottom = p.a(0xb6db4d);
+    p.trad_meter_low_top = p.a(0xa0db40);
+    p.trad_meter_hot_bottom = Color::rgb(0xfac050);
+    p.trad_meter_hot_top = Color::rgb(0xeec757);
+    p.trad_meter_clip_bottom = p.meter_clip;
+    p.trad_meter_clip_top = p.meter_clip;
+    p.trad_meter_well = p.s(0x232729);
+    p.trad_meter_frame = p.s(0x191d1e);
+    p.trad_meter_ticks = p.s(0x111315);
+    p.trad_meter_hold = p.h(0xe16e2f);
+    p.trad_meter_cap = p.s(0x181c1e);
+    p.trad_meter_scale_bg = p.s(0x222527);
+    p.trad_meter_scale_text = p.s(0x7f8a90);
+    if let Some(theme) = theme {
+        for (slot, &color) in [
+            &mut p.trad_meter_low_bottom, &mut p.trad_meter_low_top,
+            &mut p.trad_meter_hot_bottom, &mut p.trad_meter_hot_top,
+            &mut p.trad_meter_clip_bottom, &mut p.trad_meter_clip_top,
+        ].into_iter().zip(&theme.meters) {
+            *slot = color;
+        }
+    }
+    if let Some(theme) = theme {
+        theme.appearance.apply(&mut p, &theme.color_overrides);
+        crate::regions::apply(&mut p, &theme.area_tones);
+    }
     p
 }
 
@@ -400,6 +470,30 @@ fn skin_palette(design: Design, theme: Option<&FlTheme>) -> Palette {
             None => Palette::default(),
         };
     };
+    let mut p = mapped_palette(map);
+    for (name, c) in overrides(design) {
+        if let Some(slot) = p.get_mut(name) {
+            *slot = c;
+        }
+    }
+    p.style = design.style();
+    if let Some(th) = theme.filter(|t| !t.is_stock()) {
+        static LEMON_DEFAULT: std::sync::OnceLock<FlTheme> = std::sync::OnceLock::new();
+        let base = LEMON_DEFAULT.get_or_init(|| FlTheme::parse(&default_text(Design::Lemon)));
+        let own_colours = th.same_colours(&FlTheme {
+            appearance: th.appearance,
+            area_tones: th.area_tones,
+            color_overrides: th.color_overrides.clone(),
+            ..base.clone()
+        });
+        if !own_colours {
+            retint(&mut p, th);
+        }
+    }
+    p
+}
+
+fn mapped_palette(map: DesignMap) -> Palette {
     let classic = Palette::default();
     let mut p = classic.clone();
     for name in Palette::NAMES {
@@ -413,17 +507,214 @@ fn skin_palette(design: Design, theme: Option<&FlTheme>) -> Palette {
         };
         *p.get_mut(name).expect("token") = v;
     }
-    for (name, c) in overrides(design) {
-        if let Some(slot) = p.get_mut(name) {
-            *slot = c;
-        }
-    }
     p.xf = fl::Xform { design: Some(map), ..fl::Xform::default() };
-    p.style = design.style();
-    if let Some(th) = theme.filter(|t| !t.is_stock()) {
-        retint(&mut p, th);
+    p
+}
+
+/// Main colour families of the 3036 surface, controls and signal artwork.
+pub const NEON_INKS: [Color;3] = [Color::rgb(0x37ffea), Color::rgb(0xa839fb), Color::rgb(0xfa41d8)];
+
+pub fn neon_with_inks(inks:[Color;3]) -> Palette {
+    let base=neon_3036();
+    if inks==NEON_INKS { return base.clone(); }
+    let recolor=|c:Color| {
+        let (h,s,l)=c.hsl();
+        if s < 0.035 {return c;}
+        // Dark violet glass, bright pink outlines and cyan controls have separate owners.
+        let family=if (150.0..225.0).contains(&h) {0}
+            else if (225.0..295.0).contains(&h) || (l<0.19 && (285.0..330.0).contains(&h)) {1}
+            else if (295.0..347.0).contains(&h) {2} else {return c;};
+        if inks[family]==NEON_INKS[family] {return c;}
+        let (bh,bs,bl)=NEON_INKS[family].hsl();
+        let (nh,ns,nl)=inks[family].hsl();
+        Color::from_hsl_pub(h+nh-bh,(s*ns/bs).clamp(0.,1.),(l+(nl-bl)*2.*l.min(1.-l)*0.80).clamp(0.,1.),c.a)
+    };
+    let mut p=base.map(recolor);
+    p.waves.iter_mut().for_each(|(_,c)| *c=recolor(*c));
+    p.appearance.icon_color=p.appearance.icon_color.map(recolor);
+    p.appearance.cursor_color=p.appearance.cursor_color.map(recolor);
+    if let Some(m)=&mut p.xf.design {
+        let neutral=recolor(Color::from_hsl_pub(m.tint.0,m.tint.1,0.12,255)).hsl();
+        m.tint=(neutral.0,neutral.1);
+        m.accent=recolor(m.accent); m.highlight=recolor(m.highlight);
+        m.text=recolor(m.text); m.text_bg=recolor(m.text_bg);
     }
     p
+}
+
+/// Fixed featured appearance. All dimensions remain in the normal logical coordinate space.
+pub fn neon_3036() -> &'static Palette {
+    use crate::appearance::{Knob, Mixer, PeakMeterFill};
+    static PALETTE: std::sync::OnceLock<Palette> = std::sync::OnceLock::new();
+    PALETTE.get_or_init(|| {
+        let rgb = Color::rgb;
+        let mut p = mapped_palette(DesignMap {
+            ramp: &[(0.0, 0.01), (0.10, 0.032), (0.24, 0.095), (0.48, 0.28), (0.75, 0.72), (1.0, 0.98)],
+            tint: (302.0, 0.52), accent: rgb(0x31f2ee), highlight: rgb(0xff48da),
+            mute: rgb(0x58ffba), text: rgb(0xf5defa), text_bg: rgb(0x180a20),
+        });
+        p.style = Style { neon_3036: true, ..Style::LEMON };
+        p.appearance.mixer = Some(Mixer::CleanModern);
+        p.appearance.knob = Some(Knob::Ring);
+        p.appearance.cursor_family = Some(0);
+        p.appearance.icon_pack = 0;
+        p.appearance.icon_color = Some(rgb(0xff91eb));
+        p.appearance.cursor_color = Some(rgb(0x84fffc));
+        p.appearance.chrome_overrides = u64::MAX;
+        p.appearance.traditional_meter.fill = Some(PeakMeterFill::Segments);
+        p.appearance.themed_buttons = true;
+        p.waves = vec![(0.,rgb(0xdc28cc)), (0.5,rgb(0xff54e5)), (1.,rgb(0xffb6ff))];
+        p.workspace = rgb(0x100815);
+        p.grid = rgb(0x100815);
+        p.mixer_bg = rgb(0x100815);
+        p.grid_alt = rgb(0x190b20);
+        p.window_body = rgb(0x190b20);
+        p.mixer_strip = rgb(0x190b20);
+        p.track_header = rgb(0x190b20);
+        p.toolbar = rgb(0x280d2c);
+        p.window_title = rgb(0x280d2c);
+        p.window_title_float = rgb(0x280d2c);
+        p.mixer_panel = rgb(0x280d2c);
+        p.grid_bar = rgb(0x542252);
+        p.rack_control_border = rgb(0x542252);
+        p.grid_gap = rgb(0x27102c);
+        p.mixer_strip_dark = rgb(0x27102c);
+        p.button_border = rgb(0xa13794);
+        p.window_border = rgb(0xa13794);
+        p.toolbar_edge = rgb(0xa13794);
+        p.playhead = rgb(0x37ffea);
+        p.pill = rgb(0x39efef);
+        p.pill_text = rgb(0x0a1721);
+        p.time_panel = rgb(0x14091b);
+        p.on_top = rgb(0x71fff0);
+        p.on_bottom = rgb(0x27c7ca);
+        p.on_glyph = rgb(0x11252a);
+        p.record = rgb(0xff387b);
+        p.mixer_action_face = rgb(0x2fcacb);
+        p.mixer_action_hover = rgb(0x65f2e2);
+        p.mixer_action_text = rgb(0x0b1d23);
+        p.settings_group_title = rgb(0xf9c4ef);
+        p.settings_tab_selected_face = rgb(0x37e5d8);
+        p.settings_tab_selected_text = rgb(0x221022);
+        p.accent = rgb(0x37ffea);
+        p.playlist_key_white_active = rgb(0x37ffea);
+        p.playlist_activity_halo = rgb(0x37ffea);
+        p.active_button_face = rgb(0x37ffea);
+        p.step_on = rgb(0x58ffb5);
+        p.meter_low = rgb(0x58ffb5);
+        p.playlist_waveform_active = rgb(0x58ffb5);
+        p.meter_high = rgb(0xd980ff);
+        p.note_top = rgb(0xd980ff);
+        p.appearance.note_groups = u16::MAX;
+        let group_colors = [0xda83ff,0xff62cb,0xc090ff,0x8b9cff,0x59c8ff,0x4ce8f3,0x53f5bd,0x99f187,
+            0xe4e67d,0xffb271,0xff8e82,0xff809b,0xf89ce9,0xabaeff,0x82e2dc,0xe7d4a0];
+        for (role, hex) in crate::appearance::NOTE_GROUPS.iter().zip(group_colors) {
+            *p.get_mut(role).expect("note group token") = rgb(hex);
+        }
+        p.meter_clip = rgb(0xff3884);
+        p.playlist_waveform = rgb(0xfa41d8);
+        p.clip = rgb(0xfa41d8);
+        p.note_bottom = rgb(0xa839fb);
+        p.note_rim = rgb(0x8033ab);
+        p.step_a = rgb(0x341135);
+        p.button = rgb(0x341135);
+        p.step_b = rgb(0x482049);
+        p.ruler_text = rgb(0xe6afe7);
+        p.trad_meter_low_bottom = rgb(0x21a590);
+        p.trad_meter_low_top = rgb(0x58ffba);
+        p.trad_meter_hot_bottom = rgb(0x72dfff);
+        p.trad_meter_hot_top = rgb(0xe38cff);
+        p.trad_meter_clip_bottom = rgb(0xf5409c);
+        p.trad_meter_clip_top = rgb(0xff647d);
+        p.trad_meter_well = rgb(0x13091c);
+        p.trad_meter_frame = rgb(0x63346b);
+        p.trad_meter_ticks = rgb(0x673669);
+        p.trad_meter_hold = rgb(0xbbf9ff);
+        p.trad_meter_cap = rgb(0x8cffe0);
+        p.knob_cap = rgb(0x26142d);
+        p.knob_ring = rgb(0x29f3e7);
+        p.knob_pointer = rgb(0xfcd5ff);
+        p.knob_track = rgb(0x4c284e);
+        p.knob_rim = rgb(0x994c99);
+        p.mixer_channel_header = rgb(0x311337);
+        p.mixer_channel_header_selected = rgb(0x38e5db);
+        p.mixer_channel_number_selected = rgb(0x190e24);
+        p.playlist_overview_thumb_edge = rgb(0x72f9ed);
+        p.fader_handle = rgb(0xc694dc);
+        p.active_button_text = rgb(0x240d29);
+        p.text = rgb(0xfce5ff);
+        p.glyph = rgb(0xfce5ff);
+        p.slot_text_used = rgb(0xfce5ff);
+        p.text_dim = rgb(0xcfa8d6);
+        p.slot_text = rgb(0xcfa8d6);
+        p
+    })
+}
+
+/// The fixed workspace palette. This is independent of imported themes and skin preferences.
+pub fn vintage_2005() -> &'static Palette {
+    use crate::appearance::{Finish, Indicator, Lettering};
+    static PALETTE: std::sync::OnceLock<Palette> = std::sync::OnceLock::new();
+    PALETTE.get_or_init(|| {
+        let rgb = Color::rgb;
+        let mut p = mapped_palette(DesignMap {
+            ramp: &[(0.0, 0.0), (0.08, 0.075), (0.13, 0.19), (0.19, 0.295),
+                (0.26, 0.39), (0.4, 0.53), (0.7, 0.74), (1.0, 1.0)],
+            tint: (202.0, 0.12),
+            accent: rgb(0xc7d49a),
+            highlight: rgb(0xe5ae75),
+            mute: rgb(0x9ab779),
+            text: rgb(0xe0e5df),
+            text_bg: rgb(0x424b51),
+        });
+        p.style = Style {
+            vintage_2005: true,
+            radius: 1.5,
+            radius_small: 1.5,
+            radius_panel: 1.0,
+            ..Style::CITRUS
+        };
+        p.appearance.buttons = Some(Finish::Beveled);
+        p.appearance.panels = Some(Finish::Beveled);
+        p.appearance.bevel = Some(0.19);
+        p.appearance.themed_buttons = true;
+        p.appearance.indicator = Some(Indicator::Round);
+        p.appearance.title_text = Some(Lettering::Bold);
+        p.appearance.icon_pack = crate::appearance::VINTAGE_ICON_PACK;
+        p.appearance.cursor_family = Some(crate::appearance::VINTAGE_CURSOR_PACK);
+        p.appearance.ui_font = 2;
+        for (name, hex) in [
+            ("workspace", 0x252a30), ("toolbar", 0x5f686d), ("toolbar_edge", 0x929c9d),
+            ("toolbar_line", 0x252b30), ("menu_panel", 0x5b6c6d), ("menu_text", 0xcde3e4),
+            ("menu_pop", 0x9ba6a8), ("menu_pop_border", 0x263033),
+            ("menu_pop_hi", 0xb7cebd), ("menu_pop_text", 0x182327),
+            ("menu_pop_shortcut", 0x314447), ("menu_pop_dim", 0x465356),
+            ("menu_pop_head", 0x66777c), ("menu_pop_head_text", 0xe1e9e7),
+            ("sunken", 0x303b3d), ("sunken_dark", 0x20292c), ("time_panel", 0x263637),
+            ("button", 0x566066), ("button_hi", 0x68747a), ("button_border", 0x20282c),
+            ("button_pressed", 0x907655), ("button_disabled", 0x40494e),
+            ("on_top", 0xe5b382), ("on_bottom", 0x9b6a4d), ("on_glyph", 0x292821),
+            ("text", 0xc0d0d8), ("text_dim", 0xb0c0c8), ("glyph", 0xdce5e1),
+            ("window_title", 0x606d70), ("window_body", 0x747b7d),
+            ("window_border", 0x242b2f), ("splitter_dark", 0x232c31),
+            ("browser_list", 0x101416), ("browser_folder", 0xc0cdd0),
+            ("rack_inset", 0x6a7274), ("rack_inset_border", 0x1b2327),
+            ("step_a", 0x7b8587), ("step_b", 0x8c7370), ("step_on", 0xf3e7cb),
+            ("step_dim_a", 0x374044), ("step_dim_b", 0x43383b),
+            ("grid", 0x30323f), ("grid_alt", 0x353744), ("grid_gap", 0x454653),
+            ("grid_bar", 0x1f222e), ("clip", 0x6b8291),
+            ("pr_row", 0x39414b), ("pr_row_black", 0x303742), ("pr_bar", 0x202831),
+            ("mixer_bg", 0x39434a), ("mixer_strip", 0x747e82),
+            ("mixer_strip_dark", 0x505c60), ("mixer_plate", 0x3f494e),
+            ("mixer_panel", 0x465259), ("fader_handle", 0x788388),
+            ("accent", 0xe4a452), ("track_header", 0x697274),
+            ("browser_title", 0x5b686b), ("browser_tabs", 0x3f4b50),
+            ("indicator_on", 0xe4a452), ("record", 0xeb7762),
+        ] {
+            *p.get_mut(name).expect("vintage palette token") = rgb(hex);
+        }
+        p
+    })
 }
 
 /// FL's base palette toolbar (spec: ui/flstheme.md §5): its slight blue tint is what a theme's Hue and Saturation turn.
@@ -527,7 +818,7 @@ pub fn default_text(d: Design) -> String {
 /// `fl::COLORS_KEY` so either skin draws them exactly (spec: ui/theme-presets.md §B). The rest of the file is
 /// `default_text(d)`, which is what FL reads.
 pub fn skin_text(d: Design) -> String {
-    format!("{}{}={}\n", default_text(d), fl::COLORS_KEY, d.name())
+    format!("{}{}={}\n", default_text(d), fl::COLORS_KEY, d.key())
 }
 
 /// Lemon's palette `p` coloured by `th` (see `Retint`). Step faces are the theme's own (as Citrus draws them); the
@@ -660,6 +951,8 @@ mod tests {
     fn names_round_trip() {
         for d in Design::ALL {
             assert_eq!(Design::parse(d.name()), Some(d));
+            assert_eq!(Design::parse(d.key()), Some(d));
+            assert_eq!(FlTheme::parse(&skin_text(d)).colors, Some(d));
         }
         assert_eq!(Design::Lemon.next(), Design::Citrus);
         assert_eq!(Design::parse("Classic"), Some(Design::Citrus));

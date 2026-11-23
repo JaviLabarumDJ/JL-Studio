@@ -3,20 +3,17 @@
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! `cargo run -p bundle-app [-- --install]` (macOS): builds Lemon Studio in release mode and writes
-//! `<target>/bundled/Lemon Studio.app`: the program, its icon and an `Info.plist` that lets the Finder open `.flp`
-//! projects with it and says why it uses the microphone (without that, macOS does not let an app hear its audio
-//! inputs: the mixer tracks' inputs and audio recording). The icon is made from the Icon Composer document
-//! `assets/logo/macOS.icon` by `tools/logo/macos-icon.sh`: `assets/lemonstudio.car` (the bundle's `Assets.car`) is the
-//! icon macOS 26 and later draw, in every appearance, and `assets/lemonstudio.icns` the one older macOS shows. The
-//! bundle is signed ad hoc, as Apple silicon requires of any program it runs. `--install` copies it to
-//! `~/Applications`.
+//! `<target>/bundled/ML Studio.app`: the program, its icon and an `Info.plist` that lets the Finder open `.flp`
+//! projects with it. `tools/logo/macos-icon.sh` generates `assets/lemonstudio.icns` from the ML Studio emblem.
+//! `Assets.car` stays in the signed bundle layout so existing updaters accept it. The bundle is signed ad hoc, as Apple
+//! silicon requires of any program it runs. `--install` copies it to `~/Applications`.
 //!
 //! The macOS counterpart of Linux's desktop entry (`crates/os-app/assets/lemonstudio.desktop`).
 
 use std::path::PathBuf;
 use std::process::Command;
 
-const NAME: &str = "Lemon Studio";
+const NAME: &str = "ML Studio";
 const EXE: &str = "lemonstudio";
 const IDENTIFIER: &str = "io.github.itsalphaneon.lemonstudio";
 
@@ -29,14 +26,19 @@ fn main() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().expect("repository root");
     let target = std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from).unwrap_or_else(|| root.join("target"));
     let target = if target.is_relative() { root.join(target) } else { target };
-    let ok = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
-        .args(["build", "--release", "--bin", EXE, "-p", "os-app"])
-        .current_dir(&root)
-        .env("CARGO_TARGET_DIR", &target)
-        .status()
-        .expect("cargo")
-        .success();
-    assert!(ok, "build of os-app failed");
+    let app_target = std::env::var("LEMON_APP_TARGET").ok();
+    if !std::env::args().any(|arg| arg == "--prebuilt") {
+        let target_args: Vec<&str> = app_target.as_deref().map(|t|vec!["--target",t]).unwrap_or_default();
+        let ok = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
+            .args(["build", "--locked", "--release", "--bin", EXE, "-p", "os-app"])
+            .args(&target_args)
+            .current_dir(&root)
+            .env("CARGO_TARGET_DIR", &target)
+            .status()
+            .expect("cargo")
+            .success();
+        assert!(ok, "build of os-app failed");
+    }
 
     let app = target.join("bundled").join(format!("{NAME}.app"));
     if app.exists() {
@@ -46,7 +48,7 @@ fn main() {
     let (macos, resources) = (contents.join("MacOS"), contents.join("Resources"));
     std::fs::create_dir_all(&macos).expect("bundle folders");
     std::fs::create_dir_all(&resources).expect("bundle folders");
-    std::fs::copy(target.join("release").join(EXE), macos.join(EXE)).expect("copy the program");
+    std::fs::copy(app_target.as_ref().map_or_else(||target.clone(),|t|target.join(t)).join("release").join(EXE), macos.join(EXE)).expect("copy the program");
     std::fs::write(contents.join("Info.plist"), info_plist()).expect("Info.plist");
     std::fs::write(contents.join("PkgInfo"), "APPL????").expect("PkgInfo");
     let assets = root.join("crates/os-app/assets");
@@ -73,7 +75,7 @@ fn run(cmd: &mut Command, what: &str) {
 }
 
 fn info_plist() -> String {
-    let version = env!("CARGO_PKG_VERSION");
+    let version = include_str!("../../../packaging/product-version.txt").trim();
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -82,14 +84,12 @@ fn info_plist() -> String {
 	<key>CFBundleName</key>
 	<string>{NAME}</string>
 	<key>CFBundleDisplayName</key>
-	<string>{NAME}</string>
+	<string>ML Studio — Michael Lane Edition</string>
 	<key>CFBundleExecutable</key>
 	<string>{EXE}</string>
 	<key>CFBundleIdentifier</key>
 	<string>{IDENTIFIER}</string>
 	<key>CFBundleIconFile</key>
-	<string>{EXE}</string>
-	<key>CFBundleIconName</key>
 	<string>{EXE}</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
@@ -102,22 +102,23 @@ fn info_plist() -> String {
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.music</string>
 	<key>LSMinimumSystemVersion</key>
-	<string>11.0</string>
+	<string>12.0</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>ML Studio uses your audio input to record vocals and instruments into your projects.</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
-	<key>NSMicrophoneUsageDescription</key>
-	<string>Lemon Studio records and monitors your audio inputs on its mixer tracks.</string>
 	<key>CFBundleDocumentTypes</key>
 	<array>
 		<dict>
 			<key>CFBundleTypeName</key>
-			<string>FL Studio project</string>
+			<string>ML Studio project</string>
 			<key>CFBundleTypeRole</key>
 			<string>Editor</string>
 			<key>LSHandlerRank</key>
 			<string>Alternate</string>
 			<key>CFBundleTypeExtensions</key>
 			<array>
+				<string>lmn</string>
 				<string>flp</string>
 			</array>
 		</dict>

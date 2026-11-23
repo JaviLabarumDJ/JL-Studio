@@ -21,9 +21,6 @@ use os_plugkit::live::LiveEdits;
 
 /// Parameters (fields 1..=114 of the saved state).
 pub const COUNT: usize = 114;
-/// The poly modulation ids of the cutoff (a note's mod X) and the resonance (its mod Y).
-pub const MOD_X_POLY: u32 = 1;
-pub const MOD_Y_POLY: u32 = 2;
 /// Saved state size: 115 int32 fields.
 pub const STATE_LEN: usize = 460;
 /// Field 0.
@@ -182,6 +179,13 @@ pub fn defs() -> Vec<Def> {
     v.push(Def { hidden: true, ..d("x112".into(), "Spare 3".into(), 0, 65536, 0, Text::Raw) });
     v.push(d("filter".into(), "Filter type".into(), 0, 7, 0, Text::Filter));
     debug_assert_eq!(v.len(), COUNT);
+    v.push(d("o1_mix".into(),"Osc 1 volume".into(),0,128,128,Text::Mix));
+    for n in 1..=3 {
+        for (id,label,max,start,text) in [("a","Attack (ms)",6000,0,Text::Raw),("d","Decay (ms)",6000,0,Text::Raw),
+            ("s","Sustain",128,128,Text::Mix),("r","Release (ms)",6000,0,Text::Raw)] {
+            v.push(d(format!("o{n}_{id}"),format!("Osc {n} {label}"),0,max,start,text));
+        }
+    }
     v
 }
 
@@ -277,13 +281,7 @@ impl Default for Osc3Params {
                 if d.hidden {
                     ip = ip.hide().non_automatable();
                 }
-                // A note's mod X / Y as the host's per-note modulation of the filter knobs (spec:
-                // plugins/lemon-3x-osc.md §6.1).
-                match d.id.as_str() {
-                    "cutoff" => ip.with_poly_modulation_id(MOD_X_POLY),
-                    "resonance" => ip.with_poly_modulation_id(MOD_Y_POLY),
-                    _ => ip,
-                }
+                ip
             })
             .collect();
         Osc3Params { p, defs, raw: RwLock::new(default_state()), raw_version: AtomicU64::new(0), live: Arc::default(), sample_path: RwLock::default() }
@@ -352,39 +350,11 @@ fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
-/// A state of the full size: shorter ones (an older version's, 92 bytes in projects older than FL 21) are completed
-/// with the defaults and take the current version.
+/// A state of the full size (shorter ones are completed with the defaults).
 fn normalized(mut b: Vec<u8>) -> Vec<u8> {
     let d = default_state();
     if b.len() < STATE_LEN {
         b.extend_from_slice(&d[b.len()..]);
-        set_field(&mut b, 0, STATE_VERSION);
-    }
-    b
-}
-
-/// An older version's state (shorter than the current one, so without envelope records or filter) completed with the
-/// channel's own voicing, which FL plays for such a state (spec: plugins/lemon-3x-osc.md §6.1): `records` are the
-/// channel's five event 218 records in record order (`T_*`), 17 fields each as stored (`None` keeps the default
-/// record), `filter` its event 219 cutoff, resonance and type. The state's own fields are kept; a current state is
-/// returned as it is.
-pub fn with_channel_voicing(fl: &[u8], records: &[Option<[i32; 17]>; 5], filter: [i32; 3]) -> Vec<u8> {
-    if fl.len() >= STATE_LEN {
-        return fl.to_vec();
-    }
-    let mut b = normalized(fl.to_vec());
-    let mut set = |k: usize, v: i32| {
-        if 4 * k >= fl.len() {
-            set_field(&mut b, k, v);
-        }
-    };
-    for (t, r) in records.iter().enumerate() {
-        for (i, &v) in r.iter().flatten().enumerate() {
-            set(rec(t) + i + 1, v);
-        }
-    }
-    for (k, v) in [CUTOFF, RESONANCE, FILTER].into_iter().zip(filter) {
-        set(k + 1, v);
     }
     b
 }
@@ -431,7 +401,7 @@ pub fn encode(k: usize, v: i32) -> i32 {
 pub fn default_state() -> Vec<u8> {
     let mut b = vec![0u8; STATE_LEN];
     set_field(&mut b, 0, STATE_VERSION);
-    for (k, d) in defs().iter().enumerate() {
+    for (k, d) in defs().iter().take(COUNT).enumerate() {
         set_field(&mut b, k + 1, encode(k, d.default));
     }
     b
@@ -468,7 +438,13 @@ pub fn values_of(fl: &[u8]) -> Vec<i32> {
 pub fn plugin_state_from_fl(fl: &[u8]) -> Vec<u8> {
     let b = normalized(fl.to_vec());
     let defs = defs();
-    let params: Vec<String> = values_of(&b).iter().zip(&defs).map(|(v, d)| format!("\"{}\":{{\"i32\":{v}}}", d.id)).collect();
+    let mut values = values_of(&b);
+    let extra=fl.get(STATE_LEN..).and_then(|bytes|bytes.strip_prefix(b"OENV"));
+    for (i,d) in defs[COUNT..].iter().enumerate() {
+        let value=extra.and_then(|b|b.get(i*4..i*4+4)).map(|v|i32::from_le_bytes(v.try_into().unwrap()));
+        values.push(value.unwrap_or(d.default).clamp(d.min,d.max));
+    }
+    let params: Vec<String> = values.iter().zip(&defs).map(|(v, d)| format!("\"{}\":{{\"i32\":{v}}}", d.id)).collect();
     let state = format!(
         "{{\"version\":\"{}\",\"params\":{{{}}},\"fields\":{{\"{STATE_FIELD}\":\"\\\"{}\\\"\"}}}}",
         env!("CARGO_PKG_VERSION"),
@@ -482,18 +458,28 @@ pub fn plugin_state_from_fl(fl: &[u8]) -> Vec<u8> {
 
 /// The original's saved state for a plugin state blob (see [`plugin_state_from_fl`]); `None` when it is not one.
 pub fn fl_from_plugin_state(blob: &[u8]) -> Option<Vec<u8>> {
-    let (_, json) = os_hostlink::state::json(blob);
+    let json = if blob.len() > 8 && blob[0] != b'{' { &blob[8..] } else { blob };
     let v: serde_json::Value = serde_json::from_str(std::str::from_utf8(json).ok()?).ok()?;
     let raw = normalized(from_hex(v.get("fields")?.get(STATE_FIELD)?.as_str()?.trim_matches('"'))?);
     let params = v.get("params")?;
     let defs = defs();
     let mut vals = values_of(&raw);
-    for (k, d) in defs.iter().enumerate() {
+    for (k, d) in defs.iter().take(COUNT).enumerate() {
         if let Some(x) = params.get(&d.id).and_then(|p| p.get("i32")).and_then(|x| x.as_i64()) {
             vals[k] = x as i32;
         }
     }
-    Some(to_fl(&vals, &raw))
+    let mut out=to_fl(&vals,&raw);
+    let extra:Vec<_>=defs[COUNT..].iter().map(|d|params[&d.id]["i32"].as_i64().unwrap_or(i64::from(d.default)).clamp(i64::from(d.min),i64::from(d.max)) as i32).collect();
+    let saved = &out[STATE_LEN..];
+    let old_len = if saved.starts_with(b"OENV") { saved.len().min(4+4*extra.len()) } else { 0 };
+    let mut extension = Vec::new();
+    if extra.iter().zip(&defs[COUNT..]).any(|(v,d)|*v!=d.default) {
+        extension.extend(b"OENV");
+        for value in extra { extension.extend(value.to_le_bytes()); }
+    }
+    out.splice(STATE_LEN..STATE_LEN+old_len,extension);
+    Some(out)
 }
 
 #[cfg(test)]
@@ -513,31 +499,10 @@ mod tests {
         assert_eq!((109..115).map(|k| field(&b, k)).collect::<Vec<_>>(), vec![0, 0, 256, 0, 0, 0]);
     }
 
-    /// An older version's state takes the channel's records and filter for the fields it does not have; its own
-    /// fields stay, and a current state is not touched.
-    #[test]
-    fn an_older_state_takes_the_channels_voicing() {
-        let mut old = default_state()[..92].to_vec();
-        set_field(&mut old, 0, 12);
-        set_field(&mut old, osc(1) + COARSE + 1, 5);
-        let mut pitch = [0; 17];
-        pitch[1] = -1;
-        pitch[8] = 1200;
-        let b = with_channel_voicing(&old, &[None, None, None, None, Some(pitch)], [64, 32, 3]);
-        assert_eq!((b.len(), field(&b, 0)), (STATE_LEN, STATE_VERSION));
-        assert_eq!(b[4..92], old[4..]);
-        assert_eq!((0..17).map(|i| field(&b, rec(T_PITCH) + i + 1)).collect::<Vec<_>>(), pitch.to_vec());
-        let others = 4 * (rec(0) + 1)..4 * (rec(T_PITCH) + 1);
-        assert_eq!(b[others.clone()], default_state()[others]);
-        assert_eq!([CUTOFF, RESONANCE, FILTER].map(|k| field(&b, k + 1)), [64, 32, 3]);
-        let full = default_state();
-        assert_eq!(with_channel_voicing(&full, &[Some(pitch); 5], [64, 32, 3]), full);
-    }
-
     #[test]
     fn parameter_order_follows_the_original() {
         let d = defs();
-        assert_eq!(d.len(), COUNT);
+        assert_eq!(d.len(), COUNT+13);
         assert_eq!(d[0].name, "Osc 1 panning");
         assert_eq!(d[6].name, "Osc 2 mix level");
         assert_eq!(d[13].name, "Osc 3 mix level");
@@ -556,7 +521,7 @@ mod tests {
         let mut ids: Vec<&str> = d.iter().map(|x| x.id.as_str()).collect();
         ids.sort();
         ids.dedup();
-        assert_eq!(ids.len(), COUNT);
+        assert_eq!(ids.len(), COUNT+13);
     }
 
     #[test]

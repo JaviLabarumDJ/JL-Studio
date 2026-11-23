@@ -13,7 +13,7 @@
 //! - An offline render waits: a voice whose frames are not in yet reads them itself. Either way a voice reads the
 //!   same frames in the same order as from the sample in memory, so what it plays is the same to the bit.
 //!
-// spec: plugins/lemon-sampler.md "Keep on disk (Lemon Studio)"
+// spec: plugins/lemon-sampler.md "Keep on disk (ML Studio)"
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -42,29 +42,16 @@ const OVERLAP: usize = 2 * N_MAX + 2;
 /// Frames a voice keeps behind its reads: a rising pitch reaches further back.
 const KEEP: usize = 2 * N_MAX;
 
-/// Exports rendering now, in every host of the process.
-static EXPORTING: AtomicUsize = AtomicUsize::new(0);
+static EXPORTING: AtomicBool = AtomicBool::new(false);
 
-/// An export starts (Lemon Studio calls it for every export, high quality or not): until it finishes, voices wait for
-/// their frames as in an offline render. Exports are counted, so one that finishes does not end another's wait.
-pub fn export_started() {
-    EXPORTING.fetch_add(1, Ordering::AcqRel);
+/// The host renders an export (Lemon Studio sets it for every export, high quality or not): voices wait for their
+/// frames as in an offline render.
+pub fn set_exporting(on: bool) {
+    EXPORTING.store(on, Ordering::Release);
 }
 
-/// The export `export_started` began has finished (never below none).
-pub fn export_finished() {
-    let mut n = EXPORTING.load(Ordering::Acquire);
-    while n > 0 {
-        match EXPORTING.compare_exchange_weak(n, n - 1, Ordering::AcqRel, Ordering::Acquire) {
-            Ok(_) => return,
-            Err(now) => n = now,
-        }
-    }
-}
-
-/// Whether an export is rendering.
 pub fn exporting() -> bool {
-    EXPORTING.load(Ordering::Acquire) > 0
+    EXPORTING.load(Ordering::Acquire)
 }
 
 static OPEN: AtomicUsize = AtomicUsize::new(0);
@@ -729,7 +716,7 @@ impl Played {
     /// (an offline render) the frames are read now instead.
     pub fn read(&self, feed: &mut Feed, pos: f64, ratio: f64, quality: Quality, wait: bool) -> Option<(f32, f32)> {
         let n = self.frames();
-        let (lo, hi) = resample::reach(n, pos, ratio);
+        let (lo, hi) = resample::reach_quality(n, pos, ratio, quality);
         loop {
             // The voice's ring, once the frames are in.
             if let Some(i) = feed.slot {
@@ -739,8 +726,12 @@ impl Played {
                     if let Some(ring) = slot.ring.get() {
                         let rel = lo.saturating_sub(KEEP).saturating_sub(feed.start);
                         if rel > feed.released {
+                            // The reader refills whole chunks. Wake it when that much new
+                            // space is available, rather than after every audio block.
+                            let refill_due = rel / CHUNK != feed.released / CHUNK;
                             feed.released = rel;
                             slot.used.store(pack(feed.req, rel), Ordering::Release);
+                            if refill_due { self.disk.wake(); }
                         }
                         let s = feed.start;
                         return Some(resample::read_by(n, pos, ratio, quality, |x| ring.at(x - s)));

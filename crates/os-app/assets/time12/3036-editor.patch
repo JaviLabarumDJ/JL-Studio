@@ -1,0 +1,23 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index c258663..1b49431 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -42 +42 @@ juce_add_plugin(${PROJECT_NAME}
+-        COPY_PLUGIN_AFTER_BUILD TRUE
++        COPY_PLUGIN_AFTER_BUILD FALSE
+diff --git a/src/PluginEditor.cpp b/src/PluginEditor.cpp
+index 24e8953..fb9393d 100644
+--- a/src/PluginEditor.cpp
++++ b/src/PluginEditor.cpp
+@@ -777,0 +778,2 @@ void TIME12AudioProcessorEditor::resized()
++
++#include "StockEditorHost.inc"
+diff --git a/src/PluginEditor.h b/src/PluginEditor.h
+index ffd871a..69723c0 100644
+--- a/src/PluginEditor.h
++++ b/src/PluginEditor.h
+@@ -11,0 +12 @@
++#include "StockEditorEffect.h"
+@@ -99,0 +101,2 @@ private:
++    mlstock::StockEditorEffect stockAppearance{*this};
++

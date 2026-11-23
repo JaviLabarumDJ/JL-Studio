@@ -7,9 +7,100 @@
 //! itself runs on the audio thread (`transport`); the form is `export_form`.
 // spec: audio/export.md
 
-use std::path::{Path, PathBuf};
+use std::{fs, io, path::{Path, PathBuf}};
+use std::sync::atomic::{AtomicBool, Ordering};
+type Cancel<'a> = Option<&'a AtomicBool>;
+fn checkpoint(cancel: Cancel<'_>) -> Result<(), String> {
+    if cancel.is_some_and(|c| c.load(Ordering::Acquire)) { Err("Export cancelled during shutdown".into()) } else { Ok(()) }
+}
 
 use crate::settings_file as sf;
+
+const AUTO_NUMBER: &str = "export_auto_number";
+
+pub(crate) fn auto_number() -> bool {
+    sf::flag(AUTO_NUMBER, false)
+}
+
+pub(crate) fn set_auto_number(on: bool) {
+    sf::set_flag(AUTO_NUMBER, on);
+}
+
+fn metadata(path: &Path) -> io::Result<Option<fs::Metadata>> {
+    match fs::symlink_metadata(path) {
+        Ok(info) => Ok(Some(info)),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err),
+    }
+}
+
+pub(crate) fn occupied(path: &Path) -> io::Result<bool> {
+    Ok(metadata(path)?.is_some())
+}
+
+pub(crate) fn check_directory(path: &Path) -> io::Result<()> {
+    if metadata(path)?.is_some_and(|info| !info.is_dir()) {
+        return Err(io::Error::other(format!("{} is not an export folder", path.display())));
+    }
+    Ok(())
+}
+
+pub(crate) fn existing_files(paths: impl IntoIterator<Item = PathBuf>) -> io::Result<Vec<PathBuf>> {
+    let mut existing = Vec::new();
+    for path in paths {
+        if let Some(info) = metadata(&path)? {
+            if !info.is_file() {
+                return Err(io::Error::other(format!("{} is not a regular file", path.display())));
+            }
+            existing.push(path);
+        }
+    }
+    Ok(existing)
+}
+
+/// Use the original name if it is free. A numbered export uses one name for its entire set.
+pub(crate) fn available_name(base: &str, mut in_use: impl FnMut(&str) -> io::Result<bool>) -> io::Result<String> {
+    if !in_use(base)? {
+        return Ok(base.to_owned());
+    }
+    let (stem, first) = base.strip_suffix(')').and_then(|s| s.rsplit_once(" ("))
+        .and_then(|(stem, number)| Some((stem, number.parse::<u32>().ok()?.checked_add(1)?)))
+        .filter(|(stem, first)| !stem.is_empty() && *first >= 2)
+        .unwrap_or((base, 2));
+    for i in first..first.saturating_add(10_000) {
+        let name = format!("{stem} ({i})");
+        if !in_use(&name)? {
+            return Ok(name);
+        }
+    }
+    Err(io::Error::other("Could not find a free export name"))
+}
+
+/// Encode beside the destination, then commit the complete file. A late collision must never truncate a file.
+pub(crate) fn write_file(
+    path: &Path, approved: &[PathBuf], write: impl FnOnce(&mut fs::File) -> io::Result<()>,
+) -> io::Result<()> {
+    let folder = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(".ml-export-");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(fs::Permissions::from_mode(0o666));
+    }
+    let mut staging = builder.tempfile_in(folder)?;
+    write(staging.as_file_mut())?;
+    let result = if approved.iter().any(|p| p == path) && metadata(path)?.is_some_and(|info| info.is_file()) {
+        staging.persist(path)
+    } else {
+        staging.persist_noclobber(path)
+    };
+    result.map(|_| ()).map_err(|e| {
+        if e.error.kind() == io::ErrorKind::AlreadyExists {
+            io::Error::new(io::ErrorKind::AlreadyExists, "A file already exists here. Choose another export name or approve its replacement.")
+        } else { e.error }
+    })
+}
 
 /// The formats, in the form's order.
 pub const FORMATS: [&str; 4] = ["WAV", "FLAC", "MP3", "OGG"];
@@ -27,7 +118,7 @@ pub const BITRATES: [u32; 8] = [64, 96, 128, 160, 192, 224, 256, 320];
 /// The sample rates besides the device's (index 0).
 pub const RATES: [u32; 5] = [44100, 48000, 88200, 96000, 192000];
 pub const CHANNELS: [&str; 4] = ["Stereo", "Mono (merged)", "Mono (left)", "Mono (right)"];
-/// The resampling choices: the window's width in points (2: linear); 27 is what playback uses.
+/// The resampling choices: the window's width in points (2: linear); live playback uses 16.
 pub const POINTS: [u32; 8] = [2, 8, 16, 27, 64, 128, 256, 512];
 pub const TAILS: [&str; 3] = ["Cut", "Ring out", "Wrap"];
 
@@ -66,6 +157,7 @@ pub struct Options {
     /// Hosted plugins render in their offline mode.
     pub hq: bool,
     pub split: bool,
+    pub playlist_solo: bool,
     pub split_master: bool,
     pub insert_fx: bool,
     pub master_fx: bool,
@@ -92,11 +184,12 @@ impl Default for Options {
             ogg_kbps: 192,
             rate: 0,
             channels: 0,
-            points: 27,
+            points: 512,
             tail: Tail::Ring,
             dither: false,
             hq: true,
             split: false,
+            playlist_solo: false,
             split_master: true,
             insert_fx: true,
             master_fx: true,
@@ -111,7 +204,7 @@ impl Default for Options {
 }
 
 /// The settings.txt keys of the switches, in `Options::flags` order.
-const FLAG_KEYS: [&str; 12] = [
+const FLAG_KEYS: [&str; 13] = [
     "export_dither",
     "export_hq",
     "export_split",
@@ -124,11 +217,12 @@ const FLAG_KEYS: [&str; 12] = [
     "export_tempo",
     "export_reveal",
     "export_mp3_gapless",
+    "export_playlist_solo",
 ];
 
 impl Options {
     /// The switches, in `FLAG_KEYS` order.
-    fn flags(&mut self) -> [&mut bool; 12] {
+    fn flags(&mut self) -> [&mut bool; 13] {
         [
             &mut self.dither,
             &mut self.hq,
@@ -142,6 +236,7 @@ impl Options {
             &mut self.tempo,
             &mut self.reveal,
             &mut self.mp3_gapless,
+            &mut self.playlist_solo,
         ]
     }
 
@@ -233,10 +328,18 @@ pub struct Marker {
 /// markers, the loop, the tempo and the mixer tracks' names.
 #[derive(Debug, Clone)]
 pub struct Job {
+    /// Track renders isolate hosted generators without changing their rack identities.
+    pub instrument_rows: Option<Vec<usize>>,
+    /// Each named Playlist solo keeps the same lanes as the normal Solo command.
+    pub playlist_solos: Vec<(String, Vec<u16>)>,
+    /// Only these mixer stems need buffering (None keeps ordinary split-export behavior).
+    pub capture_tracks: Option<Vec<usize>>,
     pub options: Options,
     /// The files' folder and name (without extension).
     pub folder: PathBuf,
     pub name: String,
+    pub auto_number: bool,
+    pub approved_replacements: Vec<PathBuf>,
     /// Render only ticks from..to (Range Selection).
     pub span: Option<(u64, u64)>,
     pub markers: Vec<Marker>,
@@ -246,9 +349,6 @@ pub struct Job {
     pub tempo: (f64, f64),
     /// Mixer track names by track number (master first).
     pub track_names: Vec<String>,
-    /// The mixer track menu's File ▸ Render to wave file...: these tracks' outputs are the files, without the mix
-    /// (empty: an export of the mix).
-    pub tracks: Vec<u16>,
 }
 
 impl Job {
@@ -257,15 +357,19 @@ impl Job {
     pub fn wav(path: &Path) -> Job {
         let options = Options { markers: false, loops: false, ..Options::default() };
         Job {
+        playlist_solos: Vec::new(),
+        instrument_rows: None,
+        capture_tracks: None,
             options,
             folder: path.parent().map(Path::to_path_buf).unwrap_or_default(),
             name: path.file_stem().map_or_else(|| "Untitled".into(), |n| n.to_string_lossy().into_owned()),
+            auto_number: false,
+            approved_replacements: Vec::new(),
             span: None,
             markers: Vec::new(),
             loop_frames: None,
             tempo: (120.0, 0.0),
             track_names: Vec::new(),
-            tracks: Vec::new(),
         }
     }
 
@@ -274,15 +378,79 @@ impl Job {
         self.folder.join(format!("{}.{}", self.name, EXTENSIONS[f]))
     }
 
-    /// Mixer track `t`'s name as a file name takes it (the characters one cannot hold as `_`).
-    fn track_name(&self, t: usize) -> String {
-        let name = self.track_names.get(t).cloned().unwrap_or_else(|| if t == 0 { "Master".into() } else { format!("Bus {t}") });
-        name.chars().map(|c| if r#"<>:"/\|?*"#.contains(c) { '_' } else { c }).collect()
-    }
-
     /// The folder the split mixer tracks go to.
     pub fn stems_folder(&self) -> PathBuf {
         self.folder.join(format!("{} stems", self.name))
+    }
+
+    pub fn playlist_folder(&self) -> PathBuf {
+        self.folder.join(format!("{} tracks", self.name))
+    }
+
+    fn stem_file(&self, directory: &Path, t: usize, f: usize) -> PathBuf {
+        let name = self.track_names.get(t).cloned().unwrap_or_else(|| {
+            if t == 0 { "Master".into() } else { format!("Insert {t}") }
+        });
+        let name: String = name.chars().map(|c| if r#"<>:"/\|?*"#.contains(c) { '_' } else { c }).collect();
+        directory.join(format!("{t:02} {name}.{}", EXTENSIONS[f]))
+    }
+
+    fn stem_formats(&self) -> impl Iterator<Item = usize> + '_ {
+        self.options.ticked().filter(|&f| f == WAV || f == FLAC)
+    }
+
+    fn extra_folder(&self) -> Option<PathBuf> {
+        if self.options.playlist_solo {
+            Some(self.playlist_folder())
+        } else if self.options.split && self.stem_formats().next().is_some() {
+            Some(self.stems_folder())
+        } else {
+            None
+        }
+    }
+
+    fn output_paths(&self) -> Vec<PathBuf> {
+        if self.options.playlist_solo {
+            let folder = self.playlist_folder();
+            return self.playlist_solos.iter().flat_map(|(name, _)| {
+                let folder = &folder;
+                self.options.ticked().map(move |f| folder.join(format!("{name}.{}", EXTENSIONS[f])))
+            }).collect();
+        }
+        let mut paths: Vec<_> = self.options.ticked().map(|f| self.file(f)).collect();
+        if let Some(folder) = self.extra_folder() {
+            for t in usize::from(!self.options.split_master)..self.track_names.len() {
+                paths.extend(self.stem_formats().map(|f| self.stem_file(&folder, t, f)));
+            }
+        }
+        paths
+    }
+
+    pub(crate) fn conflicts(&self) -> io::Result<Vec<PathBuf>> {
+        if let Some(dir) = self.extra_folder() {
+            check_directory(&dir)?;
+        }
+        existing_files(self.output_paths())
+    }
+
+    pub(crate) fn prepare_destination(&mut self) -> io::Result<()> {
+        if self.auto_number {
+            let mut probe = self.clone();
+            self.name = available_name(&self.name, |name| {
+                probe.name = name.to_owned();
+                if let Some(dir) = probe.extra_folder() && occupied(&dir)? {
+                    return Ok(true);
+                }
+                for f in probe.options.ticked().filter(|_| !probe.options.playlist_solo) {
+                    if occupied(&probe.file(f))? { return Ok(true); }
+                }
+                Ok(false)
+            })?;
+        }
+        if let Some(path) = self.conflicts()?.into_iter().find(|path| !self.approved_replacements.contains(path)) {
+            return Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("{} already exists. Choose another export name or approve its replacement.", path.display())));
+        }
+        Ok(())
     }
 }
 
@@ -292,13 +460,14 @@ const SILENT: f32 = 1.584_893_1e-5;
 /// Writes the files of `job` from the render at `rate`: `mix` and the mixer tracks' outputs (interleaved stereo, by
 /// track number; empty unless Split mixer tracks), `song` frames long before the tail. Returns the files written.
 pub fn write(job: &Job, rate: u32, mix: Vec<f32>, tracks: Vec<Vec<f32>>, song: u64) -> Result<Vec<PathBuf>, String> {
+    write_cancellable(job,rate,mix,tracks,song,None)
+}
+pub fn write_cancellable(job: &Job, rate:u32, mix:Vec<f32>, tracks:Vec<Vec<f32>>, song:u64, cancel:Cancel<'_>) -> Result<Vec<PathBuf>,String> {
+    checkpoint(cancel)?;
     let o = &job.options;
     let out_rate = if o.rate == 0 { rate } else { o.rate };
     let mut written = Vec::new();
-    if !job.tracks.is_empty() {
-        return write_tracks(job, rate, tracks, song);
-    }
-    let mix = shape(o, mix, song, rate, out_rate);
+    let mix = shape_cancellable(o, mix, song, rate, out_rate,cancel)?;
     let scale = f64::from(out_rate) / f64::from(rate);
     let meta = Meta {
         markers: job.markers.iter().map(|m| Marker { frame: (m.frame as f64 * scale).round() as u64, name: m.name.clone() }).collect(),
@@ -307,10 +476,10 @@ pub fn write(job: &Job, rate: u32, mix: Vec<f32>, tracks: Vec<Vec<f32>>, song: u
     };
     for f in o.ticked() {
         let path = job.file(f);
-        encode(o, f, &path, &mix, out_rate, &meta)?;
+        encode(job, f, &path, &mix, out_rate, &meta,cancel)?;
         written.push(path);
     }
-    if o.split {
+    if o.split && job.stem_formats().next().is_some() {
         let dir = job.stems_folder();
         let mut made = false;
         for (t, audio) in tracks.into_iter().enumerate() {
@@ -318,40 +487,17 @@ pub fn write(job: &Job, rate: u32, mix: Vec<f32>, tracks: Vec<Vec<f32>>, song: u
                 continue;
             }
             if !made {
+                check_directory(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
                 std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
                 made = true;
             }
-            let audio = shape(o, audio, song, rate, out_rate);
-            let name = job.track_name(t);
+            let audio = shape_cancellable(o, audio, song, rate, out_rate,cancel)?;
             // As FL, only WAV and FLAC (spec §3 "Split mixer tracks").
-            for f in o.ticked().filter(|&f| f == WAV || f == FLAC) {
-                let path = dir.join(format!("{t:02} {name}.{}", EXTENSIONS[f]));
-                encode(o, f, &path, &audio, out_rate, &Meta::default())?;
+            for f in job.stem_formats() {
+                let path = job.stem_file(&dir, t, f);
+                encode(job, f, &path, &audio, out_rate, &Meta::default(),cancel)?;
                 written.push(path);
             }
-        }
-    }
-    Ok(written)
-}
-
-/// Render to wave file... (the mixer track menu's File ▸): the outputs of `job.tracks` (from `tracks`, by track number),
-/// each in every format ticked, silent ones too. One track's file is named as the form's name; several are
-/// "<name> - <NN> <track name>". Lemon Studio's choice: the original's own naming and form were not looked at.
-fn write_tracks(job: &Job, rate: u32, mut tracks: Vec<Vec<f32>>, song: u64) -> Result<Vec<PathBuf>, String> {
-    let o = &job.options;
-    let out_rate = if o.rate == 0 { rate } else { o.rate };
-    let mut written = Vec::new();
-    for &t in &job.tracks {
-        let audio = tracks.get_mut(usize::from(t)).map(std::mem::take).unwrap_or_default();
-        let audio = shape(o, audio, song, rate, out_rate);
-        let stem = match job.tracks.len() {
-            1 => job.name.clone(),
-            _ => format!("{} - {t:02} {}", job.name, job.track_name(usize::from(t))),
-        };
-        for f in o.ticked() {
-            let path = job.folder.join(format!("{stem}.{}", EXTENSIONS[f]));
-            encode(o, f, &path, &audio, out_rate, &Meta::default())?;
-            written.push(path);
         }
     }
     Ok(written)
@@ -360,12 +506,14 @@ fn write_tracks(job: &Job, rate: u32, mut tracks: Vec<Vec<f32>>, song: u64) -> R
 /// The tail, the sample rate and the channels applied to interleaved stereo `audio`: interleaved, in the file's
 /// channel count.
 pub fn shape(o: &Options, audio: Vec<f32>, song: u64, rate: u32, out_rate: u32) -> Vec<f32> {
-    let audio = tail(audio, song as usize, o.tail);
-    let audio = if out_rate == rate { audio } else { resample(&audio, 2, rate, out_rate, o.points) };
-    match o.channels {
-        0 => audio,
-        c => audio.chunks_exact(2).map(|f| [(f[0] + f[1]) * 0.5, f[0], f[1]][c - 1]).collect(),
-    }
+    shape_cancellable(o,audio,song,rate,out_rate,None).expect("uncancelled shape")
+}
+fn shape_cancellable(o:&Options,audio:Vec<f32>,song:u64,rate:u32,out_rate:u32,cancel:Cancel<'_>)->Result<Vec<f32>,String> {
+    checkpoint(cancel)?;
+    let audio=tail(audio,song as usize,o.tail);
+    let audio=if out_rate==rate {audio}else{resample_cancellable(&audio,2,rate,out_rate,o.points,cancel)?};
+    checkpoint(cancel)?;
+    Ok(match o.channels {0=>audio,c=>audio.chunks_exact(2).map(|f|[(f[0]+f[1])*0.5,f[0],f[1]][c-1]).collect()})
 }
 
 /// Interleaved stereo `audio` cut to `song` frames (Cut), as it is (Ring), or with what is past `song` added to the
@@ -398,7 +546,56 @@ pub fn tail(mut audio: Vec<f32>, song: usize, t: Tail) -> Vec<f32> {
 
 /// `audio` (interleaved, `ch` channels) from `from` Hz to `to` Hz through a Blackman-windowed sinc `points` wide (2:
 /// linear), its cutoff lowered to the new Nyquist when going down.
-pub fn resample(audio: &[f32], ch: usize, from: u32, to: u32, points: u32) -> Vec<f32> {
+pub fn resample(audio:&[f32],ch:usize,from:u32,to:u32,points:u32)->Vec<f32> {
+    resample_cancellable(audio,ch,from,to,points,None).expect("uncancelled resampling")
+}
+fn resample_cancellable(audio:&[f32],ch:usize,from:u32,to:u32,points:u32,cancel:Cancel<'_>)->Result<Vec<f32>,String> {
+    checkpoint(cancel)?;
+    let n = audio.len() / ch;
+    if n == 0 || from == to {
+        return Ok(audio.to_vec());
+    }
+    let step = f64::from(from) / f64::from(to);
+    let out_n = ((n as f64) / step).round() as usize;
+    let mut out = vec![0.0f32; out_n * ch];
+    if points <= 2 {
+        for j in 0..out_n {
+        if j % 256 == 0 {checkpoint(cancel)?;}
+            let t = j as f64 * step;
+            let i = (t as usize).min(n - 1);
+            let (k, x) = ((i + 1).min(n - 1), (t - i as f64) as f32);
+            for c in 0..ch {
+                out[j * ch + c] = audio[i * ch + c] + (audio[k * ch + c] - audio[i * ch + c]) * x;
+            }
+        }
+        return Ok(out);
+    }
+    let cut = (1.0 / step).min(1.0);
+    let half = f64::from(points) / 2.0;
+    // The window's reach in source samples: wider when the cutoff is lower.
+    let reach = half / cut;
+    let mut acc = vec![0.0f64; ch];
+    for j in 0..out_n {
+        if j % 256 == 0 {checkpoint(cancel)?;}
+        let t = j as f64 * step;
+        let i0 = (t - reach).ceil().max(0.0) as usize;
+        let i1 = ((t + reach).floor() as usize).min(n - 1);
+        acc.iter_mut().for_each(|a| *a = 0.0);
+        let weights=os_dsp::sinc_kernel::BlackmanSinc::new(i0 as f64-t,cut,reach);
+        for (i,w) in (i0..=i1).zip(weights) {
+            for (c, a) in acc.iter_mut().enumerate() {
+                *a += f64::from(audio[i * ch + c]) * w;
+            }
+        }
+        for (c, a) in acc.iter().enumerate() {
+            out[j * ch + c] = *a as f32;
+        }
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+fn resample_reference(audio: &[f32], ch: usize, from: u32, to: u32, points: u32) -> Vec<f32> {
     let n = audio.len() / ch;
     if n == 0 || from == to {
         return audio.to_vec();
@@ -441,6 +638,7 @@ pub fn resample(audio: &[f32], ch: usize, from: u32, to: u32, points: u32) -> Ve
     out
 }
 
+#[cfg(test)]
 fn sinc(x: f64) -> f64 {
     if x == 0.0 {
         1.0
@@ -450,6 +648,7 @@ fn sinc(x: f64) -> f64 {
     }
 }
 
+#[cfg(test)]
 fn blackman(t: f64, w: f64) -> f64 {
     if t.abs() >= w {
         return 0.0;
@@ -460,6 +659,10 @@ fn blackman(t: f64, w: f64) -> f64 {
 
 /// Samples as `bits`-bit integers, with triangular dither of 1 LSB when `dither`.
 pub fn quantize(audio: &[f32], bits: u32, dither: bool) -> Vec<i32> {
+    audio.iter().copied().map(quantizer(bits, dither)).collect()
+}
+
+fn quantizer(bits: u32, dither: bool) -> impl FnMut(f32) -> i32 {
     let full = (1i64 << (bits - 1)) as f64;
     let (lo, hi) = (-full, full - 1.0);
     let mut seed: u32 = 0x9E37_79B9;
@@ -470,13 +673,10 @@ pub fn quantize(audio: &[f32], bits: u32, dither: bool) -> Vec<i32> {
         seed ^= seed << 5;
         f64::from(seed) / f64::from(u32::MAX)
     };
-    audio
-        .iter()
-        .map(|&s| {
-            let d = if dither { rnd() - rnd() } else { 0.0 };
-            (f64::from(s) * full + d).round().clamp(lo, hi) as i32
-        })
-        .collect()
+    move |s| {
+        let d = if dither { rnd() - rnd() } else { 0.0 };
+        (f64::from(s) * full + d).round().clamp(lo, hi) as i32
+    }
 }
 
 /// What a WAV file carries besides its samples.
@@ -488,7 +688,9 @@ struct Meta {
 }
 
 /// Writes `audio` (interleaved, in the options' channel count) at `rate` as format `f` to `path`.
-fn encode(o: &Options, f: usize, path: &Path, audio: &[f32], rate: u32, meta: &Meta) -> Result<(), String> {
+fn encode(job: &Job, f: usize, path: &Path, audio: &[f32], rate: u32, meta: &Meta, cancel:Cancel<'_>) -> Result<(), String> {
+    checkpoint(cancel)?;
+    let o = &job.options;
     let ch = o.channel_count();
     let err = |e: String| format!("{}: {e}", path.display());
     let bytes = match f {
@@ -506,31 +708,46 @@ fn encode(o: &Options, f: usize, path: &Path, audio: &[f32], rate: u32, meta: &M
             if !o.tempo {
                 meta.tempo = (0.0, 0.0);
             }
-            wav_bytes(audio, ch, rate, bits, o.dither, &meta).map_err(err)?
+            return write_file(path, &job.approved_replacements, |file| {
+                write_wav(file, audio, ch, rate, bits, o.dither, &meta, cancel)
+            }).map_err(|e| err(e.to_string()));
         }
-        FLAC => flac_bytes(audio, ch, rate, [16, 24][o.flac_depth], o.flac_level, o.dither).map_err(err)?,
+        FLAC => flac_bytes(audio, ch, rate, [16, 24][o.flac_depth], o.flac_level, o.dither,cancel).map_err(err)?,
         MP3 => {
             // MP3 goes up to 48 kHz: higher rates are brought down to 48 kHz for it.
             if rate > 48000 {
-                let down = resample(audio, usize::from(ch), rate, 48000, o.points);
-                mp3_bytes(&down, ch, 48000, o.mp3_kbps, o.mp3_gapless).map_err(err)?
+                let down = resample_cancellable(audio, usize::from(ch), rate, 48000, o.points,cancel)?;
+                mp3_bytes(&down, ch, 48000, o.mp3_kbps, o.mp3_gapless,cancel).map_err(err)?
             } else {
-                mp3_bytes(audio, ch, rate, o.mp3_kbps, o.mp3_gapless).map_err(err)?
+                mp3_bytes(audio, ch, rate, o.mp3_kbps, o.mp3_gapless,cancel).map_err(err)?
             }
         }
-        _ => ogg_bytes(audio, ch, rate, o.ogg_kbps).map_err(err)?,
+        _ => ogg_bytes(audio, ch, rate, o.ogg_kbps,cancel).map_err(err)?,
     };
-    std::fs::write(path, bytes).map_err(|e| err(e.to_string()))
+    checkpoint(cancel)?;
+    write_file(path, &job.approved_replacements, |file| {
+        use std::io::Write;
+        file.write_all(&bytes)?;
+        checkpoint(cancel).map_err(io::Error::other)
+    }).map_err(|e| err(e.to_string()))
+}
+
+#[cfg(any(windows, test))]
+pub(crate) fn pcm16_stereo(sample: &os_engine::Sample) -> Result<Vec<u8>, String> {
+    let audio: Vec<_> = sample.left.iter().zip(&sample.right)
+        .flat_map(|(&left, &right)| [left, right]).collect();
+    let mut bytes = Vec::new();
+    write_wav(&mut bytes, &audio, 2, sample.rate, 16, false, &Meta::default(), None)
+        .map_err(|e| e.to_string())?;
+    Ok(bytes)
 }
 
 /// A WAV file: PCM at 16 or 24 bits (dithered when `dither`), IEEE float at 32; with `cue `, `LIST`/`adtl`, `smpl` and
 /// `acid` chunks for the markers, the loop and the tempo (`Meta`).
-fn wav_bytes(audio: &[f32], ch: u16, rate: u32, bits: u16, dither: bool, meta: &Meta) -> Result<Vec<u8>, String> {
+fn write_wav(out: &mut impl io::Write, audio: &[f32], ch: u16, rate: u32, bits: u16, dither: bool, meta: &Meta, cancel: Cancel<'_>) -> io::Result<()> {
+    checkpoint(cancel).map_err(io::Error::other)?;
     let bps = u32::from(bits / 8);
     let data_len = audio.len() as u64 * u64::from(bps);
-    if data_len > u64::from(u32::MAX) - 4096 {
-        return Err("too long for a WAV file".into());
-    }
     let mut chunks: Vec<u8> = Vec::new();
     let mut put = |id: &[u8; 4], body: &[u8]| {
         chunks.extend_from_slice(id);
@@ -547,17 +764,6 @@ fn wav_bytes(audio: &[f32], ch: u16, rate: u32, bits: u16, dither: bool, meta: &
     fmt.extend_from_slice(&(rate * u32::from(ch) * bps).to_le_bytes());
     fmt.extend_from_slice(&(ch * bits / 8).to_le_bytes());
     fmt.extend_from_slice(&bits.to_le_bytes());
-    put(b"fmt ", &fmt);
-    let mut data = Vec::with_capacity(data_len as usize);
-    if bits == 32 {
-        audio.iter().for_each(|s| data.extend_from_slice(&s.to_le_bytes()));
-    } else {
-        for v in quantize(audio, u32::from(bits), dither) {
-            data.extend_from_slice(&v.to_le_bytes()[..bps as usize]);
-        }
-    }
-    put(b"data", &data);
-    drop(data);
     let frames = audio.len() as u64 / u64::from(ch);
     let markers: Vec<&Marker> = meta.markers.iter().filter(|m| m.frame <= frames).collect();
     if !markers.is_empty() {
@@ -613,17 +819,43 @@ fn wav_bytes(audio: &[f32], ch: u16, rate: u32, bits: u16, dither: bool, meta: &
         acid.extend_from_slice(&(meta.tempo.0 as f32).to_le_bytes());
         put(b"acid", &acid);
     }
-    let mut out = Vec::with_capacity(chunks.len() + 12);
-    out.extend_from_slice(b"RIFF");
-    out.extend_from_slice(&(4 + chunks.len() as u32).to_le_bytes());
-    out.extend_from_slice(b"WAVE");
-    out.extend_from_slice(&chunks);
-    Ok(out)
+    let padded = data_len + data_len % 2;
+    let riff_size = u32::try_from(36 + padded + chunks.len() as u64)
+        .map_err(|_| io::Error::other("too long for a WAV file"))?;
+    out.write_all(b"RIFF")?;
+    out.write_all(&riff_size.to_le_bytes())?;
+    out.write_all(b"WAVEfmt ")?;
+    out.write_all(&(fmt.len() as u32).to_le_bytes())?;
+    out.write_all(&fmt)?;
+    out.write_all(b"data")?;
+    out.write_all(&(data_len as u32).to_le_bytes())?;
+    let mut quantize = quantizer(u32::from(bits), dither);
+    let mut bytes = Vec::with_capacity(8192 * bps as usize);
+    for block in audio.chunks(8192) {
+        checkpoint(cancel).map_err(io::Error::other)?;
+        bytes.clear();
+        if bits == 32 {
+            for sample in block {
+                bytes.extend_from_slice(&sample.to_le_bytes());
+            }
+        } else {
+            for &sample in block {
+                bytes.extend_from_slice(&quantize(sample).to_le_bytes()[..bps as usize]);
+            }
+        }
+        out.write_all(&bytes)?;
+    }
+    if data_len % 2 != 0 {
+        out.write_all(&[0])?;
+    }
+    out.write_all(&chunks)?;
+    checkpoint(cancel).map_err(io::Error::other)
 }
 
 /// A FLAC file at `bits`, compression `level` 0..=8 (block size, prediction order and stereo coding go up with it, as
 /// libFLAC's levels do).
-fn flac_bytes(audio: &[f32], ch: u16, rate: u32, bits: u32, level: u8, dither: bool) -> Result<Vec<u8>, String> {
+fn flac_bytes(audio: &[f32], ch: u16, rate: u32, bits: u32, level: u8, dither: bool, cancel:Cancel<'_>) -> Result<Vec<u8>, String> {
+    checkpoint(cancel)?;
     use flacenc::component::BitRepr;
     use flacenc::error::Verify;
     let samples = quantize(audio, bits, dither);
@@ -640,8 +872,19 @@ fn flac_bytes(audio: &[f32], ch: u16, rate: u32, bits: u32, level: u8, dither: b
     config.stereo_coding.use_leftside = level >= 1;
     config.stereo_coding.use_rightside = level >= 1;
     let config = config.into_verified().map_err(|e| format!("FLAC settings: {e:?}"))?;
-    let source = flacenc::source::MemSource::from_samples(&samples, usize::from(ch), bits as usize, rate as usize);
+    struct Source<'a> { samples:&'a [i32],ch:usize,bits:usize,rate:usize,pos:usize,cancel:Cancel<'a> }
+    impl flacenc::source::Source for Source<'_> {
+        fn channels(&self)->usize{self.ch} fn bits_per_sample(&self)->usize{self.bits} fn sample_rate(&self)->usize{self.rate}
+        fn len_hint(&self)->Option<usize>{Some(self.samples.len()/self.ch)}
+        fn read_samples<F:flacenc::source::Fill>(&mut self,n:usize,dest:&mut F)->Result<usize,flacenc::error::SourceError>{
+            if checkpoint(self.cancel).is_err(){dest.fill_interleaved(&[])?;return Ok(0);}
+            let end=(self.pos+n*self.ch).min(self.samples.len());let frames=(end-self.pos)/self.ch;
+            dest.fill_interleaved(&self.samples[self.pos..end])?;self.pos=end;Ok(frames)
+        }
+    }
+    let source=Source{samples:&samples,ch:usize::from(ch),bits:bits as usize,rate:rate as usize,pos:0,cancel};
     let stream = flacenc::encode_with_fixed_block_size(&config, source, config.block_size).map_err(|e| format!("FLAC: {e:?}"))?;
+    checkpoint(cancel)?;
     let mut sink = flacenc::bitsink::ByteSink::new();
     stream.write(&mut sink).map_err(|e| format!("FLAC: {e:?}"))?;
     let mut bytes = sink.as_slice().to_vec();
@@ -658,7 +901,8 @@ fn flac_bytes(audio: &[f32], ch: u16, rate: u32, bits: u32, level: u8, dither: b
 
 /// An MP3 file at a constant `kbps`, LAME's best quality; `gapless`: with LAME's Info frame first (the encoder's delay
 /// and padding, for players that trim them).
-fn mp3_bytes(audio: &[f32], ch: u16, rate: u32, kbps: u32, gapless: bool) -> Result<Vec<u8>, String> {
+fn mp3_bytes(audio: &[f32], ch: u16, rate: u32, kbps: u32, gapless: bool, cancel:Cancel<'_>) -> Result<Vec<u8>, String> {
+    checkpoint(cancel)?;
     use mp3lame_encoder::{Bitrate, Builder, FlushGap, InterleavedPcm, MonoPcm, Quality};
     let rate_of = |k| match k {
         64 => Bitrate::Kbps64,
@@ -680,10 +924,9 @@ fn mp3_bytes(audio: &[f32], ch: u16, rate: u32, kbps: u32, gapless: bool) -> Res
     let mut out = Vec::new();
     let frames = audio.len() / usize::from(ch);
     out.reserve(mp3lame_encoder::max_required_buffer_size(frames));
-    if ch == 1 {
-        enc.encode_to_vec(MonoPcm(audio), &mut out).map_err(|e| format!("MP3: {e:?}"))?;
-    } else {
-        enc.encode_to_vec(InterleavedPcm(audio), &mut out).map_err(|e| format!("MP3: {e:?}"))?;
+    for block in audio.chunks(4096*usize::from(ch)) {
+        checkpoint(cancel)?;
+        if ch==1 {enc.encode_to_vec(MonoPcm(block),&mut out)} else {enc.encode_to_vec(InterleavedPcm(block),&mut out)}.map_err(|e|format!("MP3: {e:?}"))?;
     }
     // A full flush: the no-gap one (for joining streams) leaves the last samples unencoded.
     enc.flush_to_vec::<FlushGap>(&mut out).map_err(|e| format!("MP3: {e:?}"))?;
@@ -698,7 +941,8 @@ fn mp3_bytes(audio: &[f32], ch: u16, rate: u32, kbps: u32, gapless: bool) -> Res
 }
 
 /// An Ogg Vorbis file at an average `kbps`.
-fn ogg_bytes(audio: &[f32], ch: u16, rate: u32, kbps: u32) -> Result<Vec<u8>, String> {
+fn ogg_bytes(audio: &[f32], ch: u16, rate: u32, kbps: u32, cancel:Cancel<'_>) -> Result<Vec<u8>, String> {
+    checkpoint(cancel)?;
     use std::num::{NonZeroU32, NonZeroU8};
     use vorbis_rs::{VorbisBitrateManagementStrategy, VorbisEncoderBuilder};
     let e = |e: vorbis_rs::VorbisError| format!("OGG: {e}");
@@ -710,6 +954,7 @@ fn ogg_bytes(audio: &[f32], ch: u16, rate: u32, kbps: u32) -> Result<Vec<u8>, St
     let mut enc = b.build().map_err(e)?;
     let chans = usize::from(ch);
     for block in audio.chunks(4096 * chans) {
+        checkpoint(cancel)?;
         let planar: Vec<Vec<f32>> = (0..chans).map(|c| block.iter().skip(c).step_by(chans).copied().collect()).collect();
         enc.encode_audio_block(&planar).map_err(e)?;
     }
@@ -744,7 +989,7 @@ mod tests {
     #[test]
     fn resampling_keeps_a_tone() {
         let a = tone(4800, 48000, 1000.0);
-        for points in [2, 27, 64] {
+        for points in [2, 16, 27, 64, 512] {
             let b = resample(&a, 2, 48000, 44100, points);
             assert_eq!(b.len() / 2, 4410);
             // The level of a 1 kHz tone stays (away from the edges).
@@ -781,8 +1026,8 @@ mod tests {
     #[test]
     fn gapless_mp3_has_an_info_frame() {
         let audio: Vec<f32> = (0..44100 * 2).map(|i| ((i / 2) as f32 * 0.05).sin() * 0.5).collect();
-        let on = mp3_bytes(&audio, 2, 44100, 192, true).unwrap();
-        let off = mp3_bytes(&audio, 2, 44100, 192, false).unwrap();
+        let on = mp3_bytes(&audio, 2, 44100, 192, true,None).unwrap();
+        let off = mp3_bytes(&audio, 2, 44100, 192, false,None).unwrap();
         let find = |b: &[u8], what: &[u8]| b[..1200].windows(what.len()).position(|w| w == what);
         let info = find(&on, b"Info").or_else(|| find(&on, b"Xing")).expect("an Info frame");
         let lame = find(&on, b"LAME").expect("LAME's extension");
@@ -801,6 +1046,54 @@ mod tests {
         assert!(frames >= 44100 + delay as usize, "{frames} frames");
     }
 
+    #[test]
+    #[ignore = "long synthetic WAV export measurement"]
+    fn measure_wav_export() {
+        let dir = PathBuf::from(std::env::var_os("ML_QA_OUTPUT").unwrap());
+        let mut job = Job::wav(&dir.join("long.wav"));
+        job.options.wav_depth = 1;
+        job.options.dither = true;
+        job.options.loops = true;
+        job.options.markers = true;
+        job.options.tempo = true;
+        job.markers = vec![Marker { frame: 124, name: "Section".into() }];
+        job.tempo = (120., 4.);
+        let frames = 48_000 * 120;
+        let audio = (0..frames * 2).map(|i| ((i % 257) as f32 - 128.) / 128.).collect();
+        let start = std::time::Instant::now();
+        write(&job, 48_000, audio, vec![], frames as u64).unwrap();
+        println!("WAV export ms {}", start.elapsed().as_millis());
+    }
+    #[test]
+    fn wav_blocks_preserve_samples_padding_and_cancellation() {
+        let audio: Vec<_> = (0..8193).map(|i| ((i % 53) as f32 - 26.) / 25.).collect();
+        for bits in [16, 24, 32] {
+            let mut bytes = Vec::new();
+            write_wav(&mut bytes, &audio, 1, 48000, bits, true, &Meta::default(), None).unwrap();
+            let size = usize::from(bits / 8);
+            let expected: Vec<_> = if bits == 32 {
+                audio.iter().flat_map(|s| s.to_le_bytes()).collect()
+            } else {
+                quantize(&audio, u32::from(bits), true).into_iter()
+                    .flat_map(|s| s.to_le_bytes().into_iter().take(size)).collect()
+            };
+            assert_eq!(&bytes[44..44 + expected.len()], &expected);
+            assert_eq!(&bytes[40..44], &(expected.len() as u32).to_le_bytes());
+            assert_eq!(bytes.len(), 44 + expected.len() + expected.len() % 2);
+            assert_eq!(&bytes[4..8], &((bytes.len() - 8) as u32).to_le_bytes());
+        }
+        struct StopAfterBlock<'a>(&'a AtomicBool);
+        impl io::Write for StopAfterBlock<'_> {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                if bytes.len() >= 8192 { self.0.store(true, Ordering::Release); }
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> { Ok(()) }
+        }
+        let stop = AtomicBool::new(false);
+        let err = write_wav(&mut StopAfterBlock(&stop), &audio, 1, 48000, 24, true, &Meta::default(), Some(&stop)).unwrap_err();
+        assert!(err.to_string().contains("cancelled"));
+    }
     #[test]
     fn writes_every_format() {
         let dir = std::env::temp_dir().join(format!("lemon-export-test-{}", std::process::id()));
@@ -821,7 +1114,7 @@ mod tests {
         // The mix in four formats, the master and Drums stems in WAV and FLAC; the silent track is left out.
         assert_eq!(files.len(), 8, "{files:?}");
         assert!(dir.join("mix stems").join("01 Drums.flac").exists());
-        assert!(!dir.join("mix stems").join("02 Bus 2.wav").exists());
+        assert!(!dir.join("mix stems").join("02 Insert 2.wav").exists());
         let wav = std::fs::read(dir.join("mix.wav")).unwrap();
         for id in [&b"cue "[..], b"labl", b"Verse", b"smpl", b"acid"] {
             assert!(wav.windows(id.len()).any(|w| w == id), "{}", String::from_utf8_lossy(id));
@@ -835,28 +1128,97 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Render to wave file... (the mixer track menu): only the tracks asked for, silent ones too, without the mix; one
-    /// track's file takes the form's name, several are "<name> - <NN> <track name>".
     #[test]
-    fn render_to_wave_file_writes_the_tracks() {
-        let dir = std::env::temp_dir().join(format!("lemon-export-tracks-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let mut job = Job::wav(&dir.join("Drums.wav"));
+    fn export_destination_covers_stems_and_protects_late_collisions() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let mix = dir.path().join("Mix.wav");
+        let mut job = Job::wav(&mix);
         job.options.split = true;
-        job.track_names = vec!["Master".into(), "Drums".into(), "Bass/Sub".into()];
-        job.tracks = vec![1];
-        job.options.tail = Tail::Cut;
-        let mix = tone(4410, 44100, 440.0);
-        let tracks = vec![mix.clone(), mix.clone(), vec![0.0; mix.len()]];
-        let files = write(&job, 44100, mix.clone(), tracks.clone(), 4410).expect("render");
-        assert_eq!(files, [dir.join("Drums.wav")]);
-        assert_eq!(os_engine::sample::load(&files[0]).unwrap().frames(), 4410);
-        job.name = "Song".into();
-        job.tracks = vec![1, 2];
-        let files = write(&job, 44100, mix, tracks, 4410).expect("render");
-        assert_eq!(files, [dir.join("Song - 01 Drums.wav"), dir.join("Song - 02 Bass_Sub.wav")], "the silent track too");
-        assert!(!dir.join("Song.wav").exists() && !dir.join("Song stems").exists(), "no mix, no stems folder");
-        let _ = std::fs::remove_dir_all(&dir);
+        job.track_names = vec!["Master".into(), "Drums".into()];
+        fs::create_dir(job.stems_folder()).unwrap();
+        let stem = job.stems_folder().join("01 Drums.wav");
+        fs::write(&stem, b"old stem").unwrap();
+        assert_eq!(job.conflicts().unwrap(), [stem.clone()]);
+        assert!(job.prepare_destination().is_err());
+        assert!(!mix.exists());
+        job.auto_number = true;
+        job.prepare_destination().unwrap();
+        assert_eq!(job.name, "Mix (2)");
+        let numbered = job.file(WAV);
+        let error = write_file(&numbered, &[], |stage| {
+            fs::write(&numbered, b"someone else's export")?;
+            stage.write_all(b"new WAV")
+        }).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&numbered).unwrap(), b"someone else's export");
+        assert_eq!(fs::read(&stem).unwrap(), b"old stem");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2, "no temporary output remained");
+        write_file(&numbered, &[numbered.clone()], |stage| stage.write_all(b"approved")).unwrap();
+        assert_eq!(fs::read(&numbered).unwrap(), b"approved");
+        assert!(write_file(&numbered, &[numbered.clone()], |stage| {
+            stage.write_all(b"partial output")?;
+            Err(io::Error::other("simulated write error"))
+        }).is_err());
+        assert_eq!(fs::read(&numbered).unwrap(), b"approved");
+
+        job.options.playlist_solo = true;
+        job.playlist_solos = vec![("01 Vox".into(), vec![0])];
+        let path = job.playlist_folder().join("01 Vox.wav");
+        fs::create_dir(job.playlist_folder()).unwrap();
+        fs::write(&path, b"old solo").unwrap();
+        assert_eq!(job.conflicts().unwrap(), [path]);
+        job.prepare_destination().unwrap();
+        assert_eq!(job.name, "Mix (3)");
+    }
+}
+
+#[cfg(test)]
+mod export_performance_tests {
+    #[test]
+    fn export_cancellation_preserves_existing_destination() {
+        let path=std::env::temp_dir().join(format!("lemon-cancel-export-{}.wav",std::process::id()));
+        std::fs::write(&path,b"existing export").unwrap();
+        let cancel=std::sync::atomic::AtomicBool::new(true);
+        let result=super::write_cancellable(&super::Job::wav(&path),48000,vec![0.;96000],vec![],48000,Some(&cancel));
+        assert!(result.unwrap_err().contains("cancelled"));
+        assert_eq!(std::fs::read(&path).unwrap(),b"existing export");
+        std::fs::remove_file(path).unwrap();
+    }
+    #[test]
+    fn export_resampling_can_cancel_mid_conversion() {
+        use std::sync::{Arc,atomic::{AtomicBool,Ordering},mpsc};
+        let cancel=Arc::new(AtomicBool::new(false));let worker_cancel=cancel.clone();
+        let (tx,rx)=mpsc::channel();
+        let worker=std::thread::spawn(move||{
+            let audio=vec![0.25;1_000_000];tx.send(()).unwrap();
+            super::resample_cancellable(&audio,2,48000,44100,512,Some(&worker_cancel))
+        });
+        rx.recv().unwrap();std::thread::sleep(std::time::Duration::from_millis(5));
+        let start=std::time::Instant::now();cancel.store(true,Ordering::Release);
+        assert!(worker.join().unwrap().unwrap_err().contains("cancelled"));
+        assert!(start.elapsed()<std::time::Duration::from_millis(500));
+    }
+    #[test]
+    fn export_resampling_preserves_reference_audio() {
+        let audio:Vec<f32>=(0..4096).map(|i| ((i as f32 * 0.173).sin()*0.7)).collect();
+        for (from,to) in [(48000,44100),(44100,48000),(48000,96000),(96000,32000)] {
+            for points in [8,27,128,512] {
+                let expected=super::resample_reference(&audio,2,from,to,points);
+                let actual=super::resample(&audio,2,from,to,points);
+                assert_eq!(actual.len(),expected.len());
+                let error=actual.iter().zip(&expected).map(|(a,b)|(a-b).abs()).fold(0.0,f32::max);
+                assert!(error<2e-6,"{from}->{to}, {points}: {error}");
+            }
+        }
+    }
+    #[test]
+    #[ignore = "focused release-mode export benchmark"]
+    fn export_resampling_benchmark() {
+        let audio:Vec<f32>=(0..24000).map(|i| (i as f32 * 0.173).sin()*0.7).collect();
+        let start=std::time::Instant::now();let reference=super::resample_reference(&audio,2,48000,44100,512);let old=start.elapsed();
+        let start=std::time::Instant::now();let actual=super::resample(&audio,2,48000,44100,512);let new=start.elapsed();
+        assert_eq!(reference.len(),actual.len());
+        eprintln!("512-point stereo conversion: reference={old:?}, current={new:?}, speedup={:.2}x",old.as_secs_f64()/new.as_secs_f64());
     }
 }

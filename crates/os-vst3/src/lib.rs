@@ -10,7 +10,10 @@
 //! methods, under the instance's mutex.
 // spec: plugins/vst3-hosting.md
 
+pub mod ara;
+mod ara_playback;
 mod context_menu;
+mod editor;
 pub mod fl_state;
 mod host;
 pub mod preset;
@@ -29,7 +32,7 @@ use vst3_sys::gui::{IPlugView, IPlugViewContentScaleSupport, ViewRect};
 use vst3_sys::utils::SharedVstPtr;
 use vst3_sys::vst::{
     AudioBusBuffers, BusInfo, Event, EventData, IAudioProcessor, IComponent, IConnectionPoint, IEditController, IMidiMapping, INoteExpressionController,
-    IUnitInfo, NoteExpressionTypeInfo, NoteExpressionValueEvent, NoteOffEvent, NoteOnEvent, ParameterInfo, ProcessContext, ProcessData, ProcessSetup, UnitInfo,
+    INoteExpressionPhysicalUIMapping, IUnitInfo, NoteExpressionTypeInfo, NoteExpressionValueEvent, NoteOffEvent, NoteOnEvent, ParameterInfo, ProcessContext, ProcessData, ProcessSetup, UnitInfo,
 };
 use vst3_sys::{c_void, ComInterface, VstPtr, IID};
 
@@ -223,14 +226,14 @@ pub struct Module {
     plugins: Vec<Descriptor>,
     /// Class ids, parallel to `plugins`.
     classes: Vec<IID>,
+    /// Advertised ARA factory class name and ID; not proof of a working document binding.
+    ara_factories: Vec<(String, String)>,
     factory: Option<VstPtr<dyn IPluginFactory>>,
     host: Com<HostApp>,
     lib: Option<libloading::Library>,
     /// An address in the module's code (its factory's method table): which module the crash guard stops when it
     /// crashes.
     code: usize,
-    /// The factory's URL (the plug-ins' help page; `os_host::Plugin::help_url`).
-    url: String,
 }
 
 // SAFETY: the factory and host objects are only used from the UI thread (creating instances); VST 3 factories may be
@@ -260,19 +263,23 @@ impl Module {
         unsafe {
             let code = if factory.is_null() { 0 } else { *(factory as *const usize) };
             let factory = owned::<dyn IPluginFactory>(factory);
-            let mut m = Module { path: path.to_path_buf(), plugins: Vec::new(), classes: Vec::new(), factory: None, host: HostApp::create(), lib, code, url: String::new() };
+            let mut m = Module { path: path.to_path_buf(), plugins: Vec::new(), classes: Vec::new(), ara_factories: Vec::new(), factory: None, host: HostApp::create(), lib, code };
             let Some(factory) = factory else { return Err(format!("{}: no plug-in factory", file.display())) };
             if let Some(f3) = factory.cast::<dyn IPluginFactory3>() {
                 f3.set_host_context(m.host.raw());
             }
             let mut finfo: PFactoryInfo = std::mem::zeroed();
             let fvendor = if factory.get_factory_info(&mut finfo) == kResultOk { c_arr(&finfo.vendor) } else { String::new() };
-            m.url = c_arr(&finfo.url);
             let f2 = factory.cast::<dyn IPluginFactory2>();
             let f3 = factory.cast::<dyn IPluginFactory3>();
             for i in 0..factory.count_classes() {
                 let mut ci: PClassInfo = std::mem::zeroed();
-                if factory.get_class_info(i, &mut ci) != kResultOk || c_arr(&ci.category) != "Audio Module Class" {
+                if factory.get_class_info(i, &mut ci) != kResultOk { continue; }
+                if c_arr(&ci.category) == "ARA Main Factory Class" {
+                    m.ara_factories.push((c_arr(&ci.name), fuid_string(&ci.cid)));
+                    continue;
+                }
+                if c_arr(&ci.category) != "Audio Module Class" {
                     continue;
                 }
                 let (mut name, mut vendor, mut version, mut subcats) = (c_arr(&ci.name), fvendor.clone(), String::new(), String::new());
@@ -312,6 +319,7 @@ impl Module {
                 });
                 m.classes.push(ci.cid);
             }
+            for i in 0..m.plugins.len() {if m.ara_factory_id(&m.plugins[i].id).is_some(){m.plugins[i].features.push("ARA".into());}}
             m.factory = Some(factory);
             Ok(Arc::new(m))
         }
@@ -323,6 +331,17 @@ impl Module {
 
     pub fn plugins(&self) -> &[Descriptor] {
         &self.plugins
+    }
+
+    /// ARA's companion specification pairs audio and ARA factory classes by their exact name.
+    /// Never mark every audio class in a shell as ARA capable. Ambiguous names are rejected.
+    /// This is discovery only: callers must still validate the entry point and API generation.
+    pub fn ara_factory_id(&self, plugin_id: &str) -> Option<&str> {
+        let plugin = self.plugins.iter().find(|p| p.id.eq_ignore_ascii_case(plugin_id))?;
+        let mut matches = self.ara_factories.iter().filter(|(name, _)| name == &plugin.name);
+        let (_, id) = matches.next()?;
+        if matches.next().is_some() { return None; }
+        Some(id)
     }
 
     fn factory(&self) -> &VstPtr<dyn IPluginFactory> {
@@ -434,7 +453,7 @@ impl os_host::Library for Module {
     fn create(self: Arc<Self>, id: &str) -> Result<os_host::SharedPlugin, String> {
         let guard = os_host::guard::module_of(self.code as *const c_void);
         let name = self.plugins.iter().find(|d| d.id.eq_ignore_ascii_case(id)).map_or(id, |d| d.name.as_str());
-        let plugin = os_host::guard::call(&guard, || Plugin::with_guard(&self, id, guard.clone())).map_err(|c| os_host::guard::stopped_text(name, c))??;
+        let plugin = os_host::guard::call(&guard, || Plugin::new(&self, id)).map_err(|c| os_host::guard::stopped_text(name, c))??;
         Ok(os_host::share(plugin, guard))
     }
 }
@@ -455,8 +474,6 @@ struct Note {
     kind: NoteKind,
     key: u8,
     velocity: f32,
-    /// A note on's MIDI channel, 0..15 (`NoteLevels::channel`); a note off goes on its key's.
-    ch: u8,
 }
 
 // Event types and the tuning note expression (spec §5).
@@ -465,35 +482,101 @@ const NOTE_OFF_EVENT: u16 = 1;
 const NOTE_EXPRESSION_VALUE_EVENT: u16 = 4;
 const TUNING_TYPE_ID: u32 = 2;
 
+// Editor lifecycle is UI-thread-only and owns no audio-processing buffers.
+struct EditorState {
+    view: Option<VstPtr<dyn IPlugView>>,
+    controller: Option<VstPtr<dyn IEditController>>,
+    frame: Com<Frame>,
+    shared: Arc<Shared>,
+    editor: bool,
+    resizable: bool,
+    /// Device pixels per editor unit (points on macOS, pixels elsewhere).
+    editor_scale: f32,
+    _module: Arc<Module>,
+}
+impl EditorState {
+    pub fn open_editor(&mut self, parent: *mut c_void, scale: f32) -> Result<(u32, u32), String> {
+        self.close_editor();
+        self.editor_scale = if cfg!(target_os = "macos") && scale > 0.0 { scale } else { 1.0 };
+        let c = self.controller.as_ref().ok_or("no edit controller")?;
+        unsafe {
+            let view = owned::<dyn IPlugView>(c.create_view(c"editor".as_ptr())).ok_or("the plug-in could not create its editor")?;
+            if view.is_platform_type_supported(PLATFORM_TYPE.as_ptr()) != kResultTrue {
+                return Err("the editor cannot be shown in a window".into());
+            }
+            view.set_frame(self.frame.raw());
+            // Content scale before attaching, so the editor opens at its final size (optional interface).
+            if scale > 0.0 && !cfg!(target_os = "macos") {
+                if let Some(s) = view.cast::<dyn IPlugViewContentScaleSupport>() {
+                    s.set_scale_factor(scale);
+                }
+            }
+            if view.attached(parent, PLATFORM_TYPE.as_ptr()) != kResultOk {
+                view.set_frame(std::ptr::null_mut());
+                return Err("the plug-in refused the editor window".into());
+            }
+            let mut r = ViewRect::default();
+            view.get_size(&mut r);
+            self.view = Some(view);
+            self.editor = true;
+            self.resizable = self.view.as_ref().is_some_and(|v| v.can_resize() == kResultTrue);
+            if let Ok(mut s) = self.shared.size.lock() {
+                *s = Some((r.right - r.left, r.bottom - r.top));
+            }
+            Ok(self.to_px(r.right - r.left, r.bottom - r.top))
+        }
+    }
+
+    /// Opening seeds this cache. Plugin resizeView callbacks and host resizes update
+    /// it, so UI ticks never call into an expensive native editor under the DSP lock.
+    pub fn editor_size(&self) -> Option<(u32, u32)> {
+        if !self.editor { return None; }
+        self.shared.size.lock().ok().and_then(|s| *s).map(|(w, h)| self.to_px(w, h))
+    }
+
+    /// An editor size as the plug-in gives it (points on macOS) in pixels.
+    fn to_px(&self, w: i32, h: i32) -> (u32, u32) {
+        let px = |v: i32| (v.max(0) as f32 * self.editor_scale).round() as u32;
+        (px(w), px(h))
+    }
+
+    pub fn close_editor(&mut self) {
+        // A menu the editor asked the host to pop up goes first: its targets are the editor's (spec §9).
+        context_menu::drop_popup(&self.shared);
+        if let Some(v) = self.view.take() {
+            unsafe {
+                v.removed();
+                v.set_frame(std::ptr::null_mut());
+            }
+        }
+        self.frame.get().clear_run_loop();
+        self.editor = false;
+        self.resizable = false;
+    }
+
+}
+
 /// A running VST 3 instance.
 pub struct Plugin {
     // Interface pointers first: they are released (in this order) before the module.
-    view: Option<VstPtr<dyn IPlugView>>,
+    editor_state: Arc<std::sync::Mutex<EditorState>>,
     /// (component's, controller's) connection points of a separate controller, connected to each other.
     points: Option<(VstPtr<dyn IConnectionPoint>, VstPtr<dyn IConnectionPoint>)>,
     controller: Option<VstPtr<dyn IEditController>>,
     processor: VstPtr<dyn IAudioProcessor>,
     component: VstPtr<dyn IComponent>,
+    ara: Option<ara::Document>,
+    ara_playback: Option<ara_playback::Playback>,
+    ara_source: Option<String>,
+    ara_owner: Option<(u16, u32)>,
     /// The controller is its own object (initialised and terminated by the host).
     separate: bool,
     handler: Com<Handler>,
-    frame: Com<Frame>,
     events: Com<EventList>,
-    /// The processor's output events while capturing notes (`os_host::Plugin::capture_notes`), and the notes taken
-    /// from them.
-    events_out: Com<EventList>,
-    capture: bool,
-    notes_out: Vec<os_host::NoteOut>,
-    /// It has an event output bus (`os_host::Plugin::puts_out_notes`).
-    note_outputs: bool,
     params_in: Com<ParamChanges>,
     params_out: Com<ParamChanges>,
     shared: Arc<Shared>,
     desc: Descriptor,
-    editor: bool,
-    /// Device pixels per unit of the open editor's sizes: 1, except on macOS, where editors measure in points
-    /// (`open_editor`).
-    editor_scale: f32,
     /// The plug-in can show an editor in a host window.
     can_edit: bool,
     /// Active at this rate (0 = inactive).
@@ -503,10 +586,12 @@ pub struct Plugin {
     max_frames: u32,
     /// Channel count of each audio input / output bus, and whether the plug-in takes notes.
     ins: Vec<usize>,
+    key_bus: Option<usize>,
     outs: Vec<usize>,
     takes_notes: bool,
     /// Zeroed channels for inputs the host has no audio for, and output channels it does not use.
     scratch: Vec<f32>,
+    aux: os_host::instrument_outputs::InstrumentOutputs,
     ptrs: Vec<*mut c_void>,
     bus_in: Vec<AudioBusBuffers>,
     bus_out: Vec<AudioBusBuffers>,
@@ -523,6 +608,12 @@ pub struct Plugin {
     /// The parameter the controller maps each MIDI controller to (IMidiMapping, MIDI channel 1): controllers 0..127,
     /// then channel pressure (128) and pitch bend (129); `u32::MAX` = none (spec: ui/midi-settings.md §4).
     midi_map: Vec<u32>,
+    mpe: os_engine::mpe::Decoder,
+    mpe_map:[u32;3],
+    mpe_queue:Vec<Event>,
+    mpe_voices:Vec<(i32,u8,u8)>,
+    draw_voices: Vec<(u32, i32, u8)>,
+    note_expression_tuning: bool,
     /// Glides as pitch bend (through `midi_map`) for a plug-in whose controller lists no tuning note expression (spec:
     /// audio/channel-voices.md); `None`: glides are tuning expressions. `bend_range` survives a new reading.
     bend: Option<os_engine::TuningBend>,
@@ -552,12 +643,13 @@ unsafe impl Send for Plugin {}
 impl Plugin {
     /// Creates and initialises class `id` of `module` (spec §4.1-4.4); buses are set up, not active yet.
     pub fn new(module: &Arc<Module>, id: &str) -> Result<Plugin, String> {
-        Self::with_guard(module, id, os_host::guard::module_of(module.code as *const c_void))
+        Self::construct(module,id,None)
     }
-
-    /// [`Plugin::new`] for an instance called under `guard` ([`Module::create`]): its editor's run loop callbacks run
-    /// under the same guard (Linux).
-    fn with_guard(module: &Arc<Module>, id: &str, guard: Arc<os_host::guard::Module>) -> Result<Plugin, String> {
+    pub fn new_ara(module:&Arc<Module>,id:&str,sample:Arc<os_engine::sample::Sample>,archive:Option<&[u8]>)->Result<Plugin,String>{
+        let doc=ara::Document::new(module,id,sample,archive)?;
+        Self::construct(module,id,Some(doc))
+    }
+    fn construct(module:&Arc<Module>,id:&str,ara:Option<ara::Document>)->Result<Plugin,String>{
         let i = module.plugins.iter().position(|d| d.id.eq_ignore_ascii_case(id)).ok_or_else(|| format!("no plug-in {id} in {}", module.path.display()))?;
         let desc = module.plugins[i].clone();
         let cid = module.classes[i];
@@ -583,52 +675,51 @@ impl Plugin {
                     }
                 }
             };
-            #[cfg(target_os = "linux")]
-            let shared = Arc::new(Shared { guard, ..Shared::default() });
-            #[cfg(not(target_os = "linux"))]
-            let shared = {
-                drop(guard);
-                Arc::new(Shared::default())
-            };
+            let shared = Arc::new(Shared::default());
             let mut p = Plugin {
-                view: None,
+                editor_state: Arc::new(std::sync::Mutex::new(EditorState {
+                    view: None, controller: controller.clone(), frame: Frame::create(shared.clone()),
+                    shared: shared.clone(), editor: false, resizable: false, editor_scale: 1.0, _module: module.clone(),
+                })),
                 points: None,
                 controller,
                 processor,
                 component,
+                ara_playback: ara.as_ref().map(|d|ara_playback::Playback::new(d.duration())),
+                ara_source: None,
+                ara_owner: None,
+                ara,
                 separate,
                 handler: Handler::create(shared.clone()),
-                frame: Frame::create(shared.clone()),
                 events: EventList::create(),
-                events_out: EventList::create(),
-                capture: false,
-                notes_out: Vec::new(),
-                note_outputs: false,
                 params_in: ParamChanges::create(),
                 params_out: ParamChanges::create(),
                 shared,
                 desc,
-                editor: false,
-                editor_scale: 1.0,
                 can_edit: false,
                 rate: 0,
                 wanted_rate: AtomicU32::new(0),
                 processing: false,
                 max_frames: MAX_FRAMES,
                 ins: Vec::new(),
+                key_bus: None,
                 outs: Vec::new(),
                 takes_notes: false,
                 scratch: Vec::new(),
+            aux: Default::default(),
                 ptrs: Vec::new(),
                 bus_in: Vec::new(),
                 bus_out: Vec::new(),
                 queue: Vec::with_capacity(256),
-                note_ids: NoteIds { ids: [-1; 128], next: 0, chs: [0; 128] },
+                note_ids: NoteIds { ids: [-1; 128], next: 0, active: Vec::with_capacity(128) },
                 fx_in: (Vec::new(), Vec::new()),
                 from_processor: Vec::with_capacity(256),
                 pending_since: None,
                 param_ids: Vec::new(),
                 midi_map: Vec::new(),
+                mpe:Default::default(),mpe_map:[u32::MAX;3],mpe_queue:Vec::with_capacity(256),mpe_voices:vec![],
+                draw_voices: Vec::new(),
+                note_expression_tuning: false,
                 bend: None,
                 bend_range: os_engine::instrument::DEFAULT_BEND_RANGE,
                 auto: Vec::with_capacity(MAX_AUTO),
@@ -644,6 +735,7 @@ impl Plugin {
                 dbg_frames: 0,
                 _module: module.clone(),
             };
+            if let Some(doc)=&mut p.ara {doc.bind(&p.component)?;}
             if let Some(c) = &p.controller {
                 if separate {
                     if let (Some(a), Some(b)) = (p.component.cast::<dyn IConnectionPoint>(), c.cast::<dyn IConnectionPoint>()) {
@@ -673,6 +765,19 @@ impl Plugin {
         }
     }
 
+    pub fn ara_document(&self)->Option<&ara::Document>{self.ara.as_ref()}
+    /// Render an ARA source-relative block. Activation and model mutation remain on the UI thread.
+    pub fn render_ara_at(&mut self,rate:u32,frame:u64,left:&mut [f32],right:&mut [f32])->Result<(),String>{
+        if self.ara.is_none()||self.rate!=rate||left.len()!=right.len(){return Err("ARA renderer is not ready".into());}
+        self.start_processing();
+        let mut at=0;
+        while at<left.len(){let n=(left.len()-at).min(self.max_frames as usize);
+            let pos=frame+at as u64;
+            self.set_context(Some(ara_render_context(self.song,pos,rate)));
+            self.process_chunk(&mut left[at..at+n],&mut right[at..at+n],None,None);at+=n;
+        }Ok(())
+    }
+
     pub fn desc(&self) -> &Descriptor {
         &self.desc
     }
@@ -694,18 +799,37 @@ impl Plugin {
                     }
                 }
             }
-            let r = self.processor.set_bus_arrangements(arr_in.as_mut_ptr(), n_in as i32, arr_out.as_mut_ptr(), n_out as i32);
-            if debug() && r != kResultOk {
+            self.key_bus = (1..n_in).find(|&bus| {
+                let mut info: BusInfo = std::mem::zeroed();
+                c.get_bus_info(AUDIO, INPUT, bus as i32, &mut info) == kResultOk && info.bus_type == 1
+            }).or_else(|| (n_in > 1).then_some(1));
+            let negotiate = |inputs: &mut [u64], outputs: &mut [u64]| {
+                self.processor.set_bus_arrangements(inputs.as_mut_ptr(), n_in as i32, outputs.as_mut_ptr(), n_out as i32)
+            };
+            let result = if let Some(bus) = self.key_bus.filter(|&bus| arr_in[bus] == 0) {
+                // An empty arrangement has no audio channels even after activateBus.
+                // Some compressors accept a stereo key, others only the VST3 mono speaker.
+                [STEREO, 1 << 19, 0].into_iter().find_map(|layout| {
+                    arr_in[bus] = layout;
+                    let result = negotiate(&mut arr_in, &mut arr_out);
+                    (result == kResultOk).then_some(result)
+                })
+            } else {
+                Some(negotiate(&mut arr_in, &mut arr_out))
+            };
+            if debug() && result != Some(kResultOk) {
                 eprintln!("[os-vst3] {} keeps its own bus arrangement", self.desc.name);
             }
-            for b in 0..n_in.min(2) {
-                c.activate_bus(AUDIO, INPUT, b as i32, 1);
+            if n_in > 0 {
+                c.activate_bus(AUDIO, INPUT, 0, 1);
             }
-            if n_out > 0 {
-                c.activate_bus(AUDIO, OUTPUT, 0, 1);
+            if let Some(bus) = self.key_bus {
+                c.activate_bus(AUDIO, INPUT, bus as i32, 1);
+            }
+            for bus in 0..if self.desc.kind == os_host::Kind::Instrument {n_out} else {n_out.min(1)} {
+                c.activate_bus(AUDIO, OUTPUT, bus as i32, 1);
             }
             self.takes_notes = c.get_bus_count(EVENT, INPUT) > 0;
-            self.note_outputs = c.get_bus_count(EVENT, OUTPUT) > 0;
             if self.takes_notes {
                 c.activate_bus(EVENT, INPUT, 0, 1);
             }
@@ -721,6 +845,7 @@ impl Plugin {
             self.outs = channels(OUTPUT, n_out);
         }
         let total: usize = self.ins.iter().chain(&self.outs).sum();
+        self.aux.configure(self.outs.len().saturating_sub(1), self.max_frames as usize);
         self.scratch = vec![0.0; total * self.max_frames as usize];
         self.ptrs = Vec::with_capacity(total);
         self.bus_in = Vec::with_capacity(self.ins.len());
@@ -785,12 +910,15 @@ impl Plugin {
         }
         self.midi_map.clear();
         if let Some(m) = c.cast::<dyn IMidiMapping>() {
-            for cc in 0..130i16 {
+            for ch in 0..16 {for cc in 0..130i16 {
                 let mut id = u32::MAX;
-                let ok = unsafe { m.get_midi_controller_assignment(0, 0, cc, &mut id) } == kResultOk;
+                let ok = unsafe { m.get_midi_controller_assignment(0, ch, cc, &mut id) } == kResultOk;
                 self.midi_map.push(if ok { id } else { u32::MAX });
-            }
+            }}
         }
+        self.mpe_map=[u32::MAX;3];
+        if let Some(x)=c.cast::<dyn INoteExpressionController>(){unsafe{for i in 0..x.get_note_expression_count(0,0){let mut info:NoteExpressionTypeInfo=std::mem::zeroed();if x.get_note_expression_info(0,0,i,&mut info)==kResultOk {if info.type_id==2{self.mpe_map[0]=2;}if info.type_id==5{self.mpe_map[2]=5;}}}}}
+        if let Some(x)=c.cast::<dyn vst3_sys::vst::INoteExpressionPhysicalUIMapping>(){let mut maps=[vst3_sys::vst::PhysicalUIMap{physical_ui_type_id:0,note_expression_type_id:u32::MAX},vst3_sys::vst::PhysicalUIMap{physical_ui_type_id:2,note_expression_type_id:u32::MAX},vst3_sys::vst::PhysicalUIMap{physical_ui_type_id:1,note_expression_type_id:u32::MAX}];let mut list=vst3_sys::vst::PhysicalUIMapList{count:3,map:maps.as_mut_ptr()};if unsafe{x.get_physical_ui_mapping(0,0,&mut list)}==kResultOk{for(i,m)in maps.iter().enumerate(){if m.note_expression_type_id!=u32::MAX{self.mpe_map[i]=m.note_expression_type_id;}}}}
         // A plug-in that lists the tuning expression takes glides as one; another glides by pitch bend when it maps
         // pitch bend to a parameter, else not at all.
         let tuning = c.cast::<dyn INoteExpressionController>().is_some_and(|x| unsafe {
@@ -799,6 +927,7 @@ impl Plugin {
                 x.get_note_expression_info(0, 0, i, &mut info) == kResultOk && info.type_id == TUNING_TYPE_ID
             })
         });
+        self.note_expression_tuning = tuning;
         self.bend = (!tuning && self.midi_map.get(129).is_some_and(|&id| id != u32::MAX)).then(|| {
             let mut b = os_engine::TuningBend::default();
             b.set_range(self.bend_range);
@@ -812,7 +941,9 @@ impl Plugin {
             return true;
         }
         self.deactivate();
-        let setup = ProcessSetup { process_mode: 0, symbolic_sample_size: 0, max_samples_per_block: self.max_frames as i32, sample_rate: f64::from(rate) };
+        // Source-relative ARA voices seek independently. Synchronous processing prevents
+        // an asynchronous seek cache from emitting silence (also essential for offline export).
+        let setup = ProcessSetup { process_mode: if self.ara.is_some() {2} else {0}, symbolic_sample_size: 0, max_samples_per_block: self.max_frames as i32, sample_rate: f64::from(rate) };
         unsafe {
             if self.processor.setup_processing(&setup) != kResultOk {
                 if debug() {
@@ -873,6 +1004,7 @@ impl Plugin {
     /// UI-thread housekeeping: restart requests, rate changes, the processor's parameter output, edits waiting for a
     /// stream.
     pub fn idle(&mut self) {
+        if let Some(d)=&self.ara { d.poll(); }
         let flags = self.shared.restart.swap(0, Ordering::AcqRel);
         if flags != 0 && debug() {
             eprintln!("[os-vst3] {} restart flags {flags:#x}", self.desc.name);
@@ -890,12 +1022,13 @@ impl Plugin {
         } else if wanted != 0 && wanted != self.rate {
             self.activate(wanted);
         }
-        if flags & (RELOAD_COMPONENT | PARAM_TITLES_CHANGED) != 0 {
+        if flags & (RELOAD_COMPONENT | PARAM_TITLES_CHANGED | (1 << 5) | (1 << 6)) != 0 {
             self.refresh_param_ids();
         }
         if let Some(c) = &self.controller {
             for (id, v) in self.from_processor.drain(..) {
                 unsafe { c.set_param_normalized(id, v) };
+                if let Ok(mut events) = self.shared.events.lock() { events.push(os_host::ParamEvent::Sync(id, v)); }
             }
         }
         // Edits only reach a processor in `process`: without a stream, flush them with an empty block so the sound
@@ -930,7 +1063,7 @@ impl Plugin {
         self.auto.clear();
         self.params_out.get().clear();
         let mut data = ProcessData {
-            process_mode: 0,
+            process_mode: if self.ara.is_some() {2} else {0},
             symbolic_sample_size: 0,
             num_samples: 0,
             num_inputs: 0,
@@ -1021,70 +1154,23 @@ impl Plugin {
     /// ui/ui-scaling.md §3). On macOS editors measure in points and follow their window's backing scale themselves (no
     /// content scaling there), so their sizes are turned into pixels at `scale` here.
     pub fn open_editor(&mut self, parent: *mut c_void, scale: f32) -> Result<(u32, u32), String> {
-        if !self.can_edit {
-            return Err(format!("{} has no editor", self.desc.name));
-        }
-        self.close_editor();
-        self.editor_scale = if cfg!(target_os = "macos") && scale > 0.0 { scale } else { 1.0 };
-        let c = self.controller.as_ref().ok_or("no edit controller")?;
-        unsafe {
-            let view = owned::<dyn IPlugView>(c.create_view(c"editor".as_ptr())).ok_or("the plug-in could not create its editor")?;
-            if view.is_platform_type_supported(PLATFORM_TYPE.as_ptr()) != kResultTrue {
-                return Err("the editor cannot be shown in a window".into());
-            }
-            view.set_frame(self.frame.raw());
-            // Content scale before attaching, so the editor opens at its final size (optional interface).
-            if scale > 0.0 && !cfg!(target_os = "macos") {
-                if let Some(s) = view.cast::<dyn IPlugViewContentScaleSupport>() {
-                    s.set_scale_factor(scale);
-                }
-            }
-            if view.attached(parent, PLATFORM_TYPE.as_ptr()) != kResultOk {
-                view.set_frame(std::ptr::null_mut());
-                return Err("the plug-in refused the editor window".into());
-            }
-            let mut r = ViewRect::default();
-            view.get_size(&mut r);
-            self.view = Some(view);
-            self.editor = true;
-            if let Ok(mut s) = self.shared.size.lock() {
-                *s = None;
-            }
-            Ok(self.to_px(r.right - r.left, r.bottom - r.top))
-        }
+        if !self.can_edit { return Err(format!("{} has no editor", self.desc.name)); }
+        self.editor_state.lock().map_err(|_| "editor stopped")?.open_editor(parent, scale)
     }
-
-    /// The editor's size in pixels (when open): what it asked for last, else what it reports.
     pub fn editor_size(&self) -> Option<(u32, u32)> {
-        let v = self.view.as_ref()?;
-        if let Some((w, h)) = self.shared.size.lock().ok().and_then(|s| *s) {
-            return Some(self.to_px(w, h));
-        }
-        let mut r = ViewRect::default();
-        (unsafe { v.get_size(&mut r) } == kResultOk).then(|| self.to_px(r.right - r.left, r.bottom - r.top))
+        self.editor_state.lock().ok()?.editor_size()
     }
-
-    /// An editor size as the plug-in gives it (points on macOS) in pixels.
-    fn to_px(&self, w: i32, h: i32) -> (u32, u32) {
-        let px = |v: i32| (v.max(0) as f32 * self.editor_scale).round() as u32;
-        (px(w), px(h))
-    }
-
     pub fn close_editor(&mut self) {
-        // A menu the editor asked the host to pop up goes first: its targets are the editor's (spec §9).
-        context_menu::drop_popup(&self.shared);
-        if let Some(v) = self.view.take() {
-            unsafe {
-                v.removed();
-                v.set_frame(std::ptr::null_mut());
-            }
-        }
-        self.frame.get().clear_run_loop();
-        self.editor = false;
+        if let Ok(mut editor) = self.editor_state.lock() { editor.close_editor(); }
     }
 
     /// The instance's state in the layout FL Studio's plugin wrapper keeps ([`fl_state`], spec §8).
     pub fn save_state(&self) -> Option<Vec<u8>> {
+        if let Some(doc)=&self.ara {
+            return ara::State { plugin_path:self.desc.path.clone(), class_id:self.desc.id.clone(),
+                source_path:self.ara_source.clone()?, factory_id:doc.factory_id(), archive_id:doc.archive_id(),
+                frames:doc.frames(), rate:doc.sample_rate(), fingerprint:doc.fingerprint(), owner:self.ara_owner, archive:doc.archive().ok()? }.encode().ok();
+        }
         unsafe {
             let s = Stream::create(Vec::new());
             if self.component.get_state(s.shared()) != kResultOk {
@@ -1111,6 +1197,8 @@ impl Plugin {
     /// Restores `save_state` bytes; also a `.vstpreset` (what Lemon Studio saved before, and preset files; one of
     /// another class is refused) and a bare component state (imports, other hosts' chunks).
     pub fn load_state(&mut self, data: &[u8]) -> bool {
+        if self.ara.is_some() || ara::State::is(data) { return false; }
+        let timing = debug().then(std::time::Instant::now);
         let p = if data.starts_with(b"VST3") {
             match preset::Preset::parse(data) {
                 Some(p) if p.class_id.eq_ignore_ascii_case(&self.desc.id) => p,
@@ -1126,6 +1214,7 @@ impl Plugin {
             if self.component.set_state(s.shared()) != kResultOk {
                 return false;
             }
+            if let Some(at)=timing {eprintln!("[os-vst3] state component {} us",at.elapsed().as_micros());}
             if let (Some(c), true) = (&self.controller, self.separate) {
                 let s = Stream::create(p.component);
                 c.set_component_state(s.shared());
@@ -1135,6 +1224,9 @@ impl Plugin {
                 }
             }
         }
+        if let Some(at)=timing {eprintln!("[os-vst3] state controller {} us",at.elapsed().as_micros());}
+        self.refresh_param_ids();
+        if let Some(at)=timing {eprintln!("[os-vst3] state metadata {} us",at.elapsed().as_micros());}
         true
     }
 
@@ -1184,8 +1276,9 @@ impl Plugin {
             let e = self.queue[i];
             if (e.time as usize) < n {
                 if self.takes_notes {
-                    if let Some(event) = self.note_ids.event(e) {
+                    while let Some(event) = self.note_ids.event(e) {
                         ev.push(event);
+                        if !matches!(e.kind,NoteKind::Off) {break;}
                     }
                     match e.kind {
                         NoteKind::On => self.ledger.start(e.key, -1),
@@ -1199,6 +1292,8 @@ impl Plugin {
             }
         }
         self.queue.truncate(kept);
+        self.mpe_queue.retain_mut(|e|{if e.sample_offset<n as i32{ev.push(*e);false}else{e.sample_offset-=n as i32;true}});
+        ev.sort();
         self.fill_params();
         self.fill_auto(n as u32);
         self.params_out.get().clear();
@@ -1221,7 +1316,7 @@ impl Plugin {
                     let s = unsafe { base.add(k * max) };
                     unsafe { std::ptr::write_bytes(s, 0, n) };
                     // The sidechain: the key's two sides, a mono bus their average.
-                    if let Some((kl, kr)) = key.filter(|_| b == 1) {
+                    if let Some((kl, kr)) = key.filter(|_| self.key_bus == Some(b)) {
                         // SAFETY: as above, `n` frames.
                         let d = unsafe { std::slice::from_raw_parts_mut(s, n) };
                         match (ch, c) {
@@ -1244,14 +1339,14 @@ impl Plugin {
             let start = self.ptrs.len();
             for c in 0..ch {
                 let host = if b == 0 { [ol, or].get(c).copied() } else { None };
-                let p = host.unwrap_or_else(|| unsafe { base.add(k * max) });
+                let p = host.unwrap_or_else(|| unsafe { let p = base.add(k * max); std::ptr::write_bytes(p, 0, n); p });
                 k += 1;
                 self.ptrs.push(p as *mut c_void);
             }
             self.bus_out.push(AudioBusBuffers { num_channels: ch as i32, silence_flags: 0, buffers: unsafe { self.ptrs.as_mut_ptr().add(start) } });
         }
         let mut data = ProcessData {
-            process_mode: 0,
+            process_mode: if self.ara.is_some() {2} else {0},
             symbolic_sample_size: 0,
             num_samples: n as i32,
             num_inputs: self.bus_in.len() as i32,
@@ -1261,19 +1356,19 @@ impl Plugin {
             input_param_changes: self.params_in.static_ptr(),
             output_param_changes: self.params_out.static_ptr(),
             input_events: if self.takes_notes { self.events.static_ptr() } else { null_static() },
-            output_events: if self.capture { self.events_out.static_ptr() } else { null_static() },
+            output_events: null_static(),
             context: &mut self.context,
         };
         unsafe { self.processor.process(&mut data) };
-        if self.capture {
-            let room = MAX_NOTES_OUT.saturating_sub(self.notes_out.len());
-            self.notes_out.extend(notes_of(&self.events_out.get().take()).take(room));
-        }
         if self.outs.first() == Some(&1) {
             right.copy_from_slice(left);
         }
         self.take_outputs();
-        let loud = left.iter().chain(right.iter()).any(|v| v.abs() > 1e-5);
+        let stride = self.max_frames as usize;
+        let first_aux = self.ins.iter().sum::<usize>() + self.outs.first().copied().unwrap_or(0);
+        let auxiliary_sounding = self.outs.iter().skip(1).any(|&channels| channels > 0)
+            && self.scratch[first_aux * stride..].chunks(stride).any(|ch| ch[..n].iter().any(|v| v.abs() > 1e-5));
+        let loud = auxiliary_sounding || left.iter().chain(right.iter()).any(|v| v.abs() > 1e-5);
         self.sounding = self.tail == INFINITE_TAIL || loud;
         self.steady += n as i64;
         // Quiet output ends the released voices (not with an infinite tail: such a plug-in may sound later).
@@ -1295,15 +1390,20 @@ impl Plugin {
     }
 }
 
-/// Note id of each key's latest note on (-1 = none), and the next id to give; the MIDI channel each key's latest note
-/// on went on (its note off goes on the same one).
+/// Note id of each key's latest note on (-1 = none), and the next id to give.
 struct NoteIds {
     ids: [i32; 128],
     next: i32,
-    chs: [u8; 128],
+    active: Vec<(u8, i32)>,
 }
 
 impl NoteIds {
+    fn allocate(&mut self) -> i32 {
+        let id = self.next;
+        self.next = (id + 1) & 0x7fff_ffff;
+        id
+    }
+
     /// The VST 3 event of a queued note (spec §5). A note on gets a note id (so its tuning can address it); a note off
     /// names only its key (id -1), so it ends that key's note as before; a tuning goes to the key's latest note and is
     /// dropped when the key has none.
@@ -1311,15 +1411,17 @@ impl NoteIds {
         let key = usize::from(n.key.min(127));
         let (type_, event) = match n.kind {
             NoteKind::On => {
-                let id = self.next;
-                self.next = (id + 1) & 0x7fff_ffff;
+                let id = self.allocate();
                 self.ids[key] = id;
-                self.chs[key] = n.ch & 15;
-                let on = NoteOnEvent { channel: i16::from(n.ch & 15), pitch: i16::from(n.key), tuning: 0.0, velocity: n.velocity, length: 0, note_id: id };
+                self.active.push((n.key,id));
+                let on = NoteOnEvent { channel: 0, pitch: i16::from(n.key), tuning: 0.0, velocity: n.velocity, length: 0, note_id: id };
                 (NOTE_ON_EVENT, EventData { note_on: on })
             }
             NoteKind::Off => {
-                (NOTE_OFF_EVENT, EventData { note_off: NoteOffEvent { channel: i16::from(self.chs[key]), pitch: i16::from(n.key), velocity: 0.0, note_id: -1, tuning: 0.0 } })
+                let at=self.active.iter().rposition(|&(k,_)|k==n.key)?;
+                let (_,id)=self.active.remove(at);
+                self.ids[key]=self.active.iter().rfind(|&&(k,_)|k==n.key).map_or(-1,|&(_,id)|id);
+                (NOTE_OFF_EVENT, EventData { note_off: NoteOffEvent { channel: 0, pitch: i16::from(n.key), velocity: 0.0, note_id: id, tuning: 0.0 } })
             }
             NoteKind::Tune => {
                 let id = self.ids[key];
@@ -1335,50 +1437,54 @@ impl NoteIds {
     }
 }
 
-/// Most notes put out kept until they are taken.
-const MAX_NOTES_OUT: usize = 4096;
-
-/// The notes among a processor's output events: note ons (a velocity of 0 is a note off) and offs.
-fn notes_of(events: &[Event]) -> impl Iterator<Item = os_host::NoteOut> + '_ {
-    events.iter().filter_map(|e| {
-        let offset = e.sample_offset.max(0) as u32;
-        // SAFETY: the union member read is the one the event's type names.
-        let (on, key, channel, velocity) = match e.type_ {
-            NOTE_ON_EVENT => {
-                let n = unsafe { e.event.note_on };
-                (n.velocity > 0.0, n.pitch, n.channel, n.velocity)
-            }
-            NOTE_OFF_EVENT => {
-                let n = unsafe { e.event.note_off };
-                (false, n.pitch, n.channel, n.velocity)
-            }
-            _ => return None,
-        };
-        Some(os_host::NoteOut { offset, key: key.clamp(0, 127) as u8, channel: channel.clamp(0, 15) as u8, velocity, on })
-    })
-}
-
 impl os_host::Plugin for Plugin {
+    fn advance_silent(&mut self, _rate: u32, frames: usize) {
+        let song = self.song.take();
+        self.set_context(song);
+        self.steady = self.steady.saturating_add(frames as i64);
+    }
+    fn smart_disable_tail(&self) -> Option<u64> {
+        if self.ara.is_some() || self.rate == 0 || !self.queue.is_empty()
+            || !self.mpe_queue.is_empty() || !self.auto.is_empty()
+            || self.shared.restart.load(Ordering::Acquire) != 0
+            || self.wanted_rate.load(Ordering::Acquire) != 0
+            || !self.shared.to_processor.try_lock().is_ok_and(|q| q.is_empty())
+            || !self.editor_state.try_lock().is_ok_and(|editor| !editor.editor) { return None; }
+        // VST3 getTailSamples is an audio-thread query; parameters may change it.
+        let tail = unsafe { self.processor.get_tail_samples() };
+        (tail != INFINITE_TAIL).then_some(u64::from(tail))
+    }
+    fn programs(&self)->Vec<(u32,u32,String)>{
+        let Some(c)=&self.controller else{return Vec::new()};
+        let units=c.cast::<dyn IUnitInfo>();
+        let mut programs=Vec::new();
+        unsafe {
+            for i in 0..c.get_parameter_count() {
+                let mut param:ParameterInfo=std::mem::zeroed();
+                if c.get_parameter_info(i,&mut param)!=kResultOk || param.flags & 0x8000==0 || param.step_count<0 {continue;}
+                let list=units.as_ref().and_then(|u|(0..u.get_unit_count()).find_map(|j|{
+                    let mut unit:UnitInfo=std::mem::zeroed();
+                    (u.get_unit_info(j,&mut unit)==kResultOk && unit.id==param.unit_id && unit.program_list_id>=0).then_some(unit.program_list_id)
+                }));
+                for j in 0..=param.step_count.min(16383) {
+                    let value=f64::from(j)/f64::from(param.step_count.max(1));
+                    let mut buf=[0u16;128];
+                    let name=if units.as_ref().zip(list).is_some_and(|(u,l)|u.get_program_name(l,j,buf.as_mut_ptr())==kResultOk){
+                        String::from_utf16_lossy(&buf[..buf.iter().position(|&x|x==0).unwrap_or(128)])
+                    }else{self.param_text(param.id,value).unwrap_or_default()};
+                    programs.push((param.id,j as u32,if name.is_empty(){format!("Program {}",j+1)}else{name}));
+                }
+            }
+        }
+        programs
+    }
+    fn select_program(&mut self,id:u32,index:u32)->bool{
+        let Some(&(_,steps))=self.param_ids.iter().find(|&&(p,_)|p==id) else{return false};
+        index<=steps as u32 && self.set_param(id,f64::from(index)/f64::from(steps.max(1)))
+    }
+    fn mpe_support(&self)->u8{if [0,2].iter().all(|&i|self.mpe_map[i]!=u32::MAX){2}else if (1..16).all(|ch|[74,129].iter().all(|&cc|self.midi_map.get(ch*130+cc).is_some_and(|&id|id!=u32::MAX&&self.midi_map.get(cc)!=Some(&id)))){1}else{0}}
     fn desc(&self) -> &Descriptor {
         &self.desc
-    }
-
-    fn capture_notes(&mut self, on: bool) {
-        self.capture = on;
-        self.notes_out.clear();
-        self.events_out.get().take();
-    }
-
-    fn take_notes_out(&mut self) -> Vec<os_host::NoteOut> {
-        std::mem::take(&mut self.notes_out)
-    }
-
-    fn puts_out_notes(&self) -> bool {
-        self.note_outputs
-    }
-
-    fn help_url(&self) -> Option<String> {
-        Some(self._module.url.trim().to_owned()).filter(|u| !u.is_empty())
     }
 
     fn activate(&mut self, rate: u32) -> bool {
@@ -1389,12 +1495,64 @@ impl os_host::Plugin for Plugin {
         Plugin::idle(self)
     }
 
+    fn take_ui_job(&mut self) -> Option<os_host::UiJob> {
+        // Lifecycle/reconfiguration stays serialized. Ordinary controller updates
+        // are VST3 UI-thread calls and need not exclude processor::process.
+        if self.from_processor.is_empty() || self.ara.is_some()
+            || self.shared.restart.load(Ordering::Acquire) != 0
+            || self.wanted_rate.load(Ordering::Acquire) != 0 { return None; }
+        let controller = self.controller.clone()?;
+        let values: Vec<_> = self.from_processor.drain(..).collect();
+        let module = self._module.clone();
+        let shared = self.shared.clone();
+        Some(Box::new(move || {
+            for &(id, value) in &values { unsafe { controller.set_param_normalized(id, value); } }
+            if let Ok(mut events) = shared.events.lock() {
+                events.extend(values.into_iter().map(|(id, value)| os_host::ParamEvent::Sync(id, value)));
+            }
+            shared.attention.raise();
+            drop(controller);
+            drop(module);
+        }))
+    }
+
     fn has_editor(&self) -> bool {
         self.can_edit
     }
 
+    fn param_values_job(&self) -> Option<os_host::ParamValuesJob> {
+        self.param_values_job_range(0..self.param_ids.len())
+    }
+
+    fn param_values_job_range(&self, range: std::ops::Range<usize>) -> Option<os_host::ParamValuesJob> {
+        // IEditController is a UI-thread interface, independent of process().
+        // Some controllers make even getParamNormalized expensive: never hold
+        // the audio instance lock across a complete parameter-bank read.
+        if self.ara.is_some() { return None; }
+        let controller = self.controller.clone()?;
+        let ids: Vec<_> = self.param_ids.get(range).unwrap_or(&[]).iter().map(|p| p.0).filter(|&id| id != u32::MAX).collect();
+        let module = self._module.clone();
+        Some(Box::new(move || {
+            let values = ids.into_iter().map(|id| (id, unsafe { controller.get_param_normalized(id) })).collect();
+            drop(controller);
+            drop(module);
+            values
+        }))
+    }
+
+    fn editor_job(&mut self, action: os_host::EditorAction) -> Option<os_host::EditorJob> {
+        if self.ara.is_some() || !self.can_edit { return None; }
+        let editor = self.editor_state.clone();
+        Some(Box::new(move || {
+            let mut editor = editor.lock().map_err(|_| "editor stopped".to_string())?;
+            match action {
+                os_host::EditorAction::Open { parent, scale } => editor.open_editor(parent, scale),
+                os_host::EditorAction::Close => { editor.close_editor(); Ok((0, 0)) }
+            }
+        }))
+    }
     fn editor_open(&self) -> bool {
-        self.editor
+        self.editor_state.lock().is_ok_and(|editor| editor.editor)
     }
 
     fn open_editor(&mut self, parent: *mut c_void, scale: f32) -> Result<(u32, u32), String> {
@@ -1403,6 +1561,21 @@ impl os_host::Plugin for Plugin {
 
     fn editor_size(&self) -> Option<(u32, u32)> {
         Plugin::editor_size(self)
+    }
+
+    fn editor_resizable(&self) -> bool {
+        self.editor_state.lock().is_ok_and(|editor| editor.editor && editor.resizable)
+    }
+
+    fn resize_editor(&mut self, width: u32, height: u32) -> Option<(u32, u32)> {
+        let editor = self.editor_state.lock().ok()?;
+        let view = editor.view.as_ref()?;
+        let size = editor::resize(view, width, height, editor.editor_scale)?;
+        if let Ok(mut pending) = self.shared.size.lock() {
+            *pending = Some(size);
+        }
+        self.shared.attention.raise();
+        Some(editor.to_px(size.0, size.1))
     }
 
     fn close_editor(&mut self) {
@@ -1475,6 +1648,9 @@ impl os_host::Plugin for Plugin {
         true
     }
 
+    fn take_playback_requests(&mut self)->Vec<os_host::PlaybackRequest> {self.ara.as_ref().map(|d|d.take_playback_requests()).unwrap_or_default()}
+    fn take_state_changed(&mut self)->bool {self.ara.as_ref().is_some_and(|d|d.take_changed())}
+
     fn take_param_events(&mut self) -> Vec<os_host::ParamEvent> {
         self.shared.events.lock().map(|mut v| std::mem::take(&mut *v)).unwrap_or_default()
     }
@@ -1486,7 +1662,7 @@ impl os_host::Plugin for Plugin {
 
     /// The menu the plug-in asked the host to pop up (spec §9), at its view point in pixels.
     fn take_menu(&mut self) -> Option<os_host::Menu> {
-        context_menu::take(&self.shared, self.editor_scale)
+        context_menu::take(&self.shared, self.editor_state.lock().ok()?.editor_scale)
     }
 
     fn menu_done(&mut self, id: u64, pick: Option<usize>) {
@@ -1498,22 +1674,15 @@ impl os_host::Plugin for Plugin {
     }
 }
 
-impl Plugin {
-    /// A note on, on MIDI channel `ch` (0..15).
-    fn start(&mut self, offset: u32, key: u8, velocity: f32, ch: u8) {
-        if let Some(m) = self.bend.as_mut().and_then(|b| b.note_on(key)) {
-            os_engine::Instrument::midi(self, offset, m);
-        }
-        self.queue.push(Note { time: offset, kind: NoteKind::On, key, velocity: velocity.clamp(0.0, 1.0), ch });
-    }
-}
-
 impl os_engine::Instrument for Plugin {
+    fn parallel_processing(&self) -> bool { true }
     fn active(&self) -> bool {
+        if let Some(p)=&self.ara_playback{return p.count()>0;}
         self.sounding
     }
 
     fn voices(&self) -> usize {
+        if let Some(p)=&self.ara_playback{return p.count();}
         self.ledger.count()
     }
 
@@ -1522,6 +1691,13 @@ impl os_engine::Instrument for Plugin {
     /// (spec: audio/voices.md §3). Note offs still waiting for that block stay queued: Stop resets, and Play resets
     /// again before any block has run.
     fn reset(&mut self) {
+        self.mpe_queue.retain_mut(|e|{e.sample_offset=0;e.type_==NOTE_OFF_EVENT});
+        while let Some((_, id, key)) = self.draw_voices.pop() {
+            self.mpe_event(0, os_engine::mpe::Event::Off { channel: 0, key, id, velocity: 0. });
+        }
+        for (_,ch,key) in self.mpe_voices.clone(){os_engine::Instrument::midi(self,0,[0xb0|ch,120,0]);let _=key;}
+        self.mpe.reset();
+        if let Some(p)=&mut self.ara_playback {p.clear();}
         self.queue.retain(|n| matches!(n.kind, NoteKind::Off));
         self.sounding = false;
         let mut sent = [false; 128];
@@ -1532,7 +1708,7 @@ impl os_engine::Instrument for Plugin {
         let held: Vec<u8> = self.ledger.held().collect();
         for key in held {
             if !std::mem::replace(&mut sent[usize::from(key.min(127))], true) {
-                self.queue.push(Note { time: 0, kind: NoteKind::Off, key, velocity: 0.0, ch: 0 });
+                self.queue.push(Note { time: 0, kind: NoteKind::Off, key, velocity: 0.0 });
             }
         }
         self.ledger.clear();
@@ -1547,22 +1723,24 @@ impl os_engine::Instrument for Plugin {
     }
 
     fn note_on(&mut self, offset: u32, key: u8, velocity: f32) {
-        self.start(offset, key, velocity, 0);
-    }
-
-    /// The note's levels are dropped (VST 3 takes no pan or mod X / Y here), but not its MIDI channel.
-    fn note_start(&mut self, offset: u32, key: u8, velocity: f32, _start: f32, levels: os_engine::NoteLevels) {
-        self.start(offset, key, velocity, levels.channel);
+        if self.ara.is_some(){self.note_on_from(offset,key,velocity,0.);return;}
+        if let Some(m) = self.bend.as_mut().and_then(|b| b.note_on(key)) {
+            os_engine::Instrument::midi(self, offset, m);
+        }
+        self.queue.push(Note { time: offset, kind: NoteKind::On, key, velocity: velocity.clamp(0.0, 1.0) });
     }
 
     fn note_off(&mut self, offset: u32, key: u8) {
-        self.queue.push(Note { time: offset, kind: NoteKind::Off, key, velocity: 0.0, ch: 0 });
+        if let Some(p)=&mut self.ara_playback {p.event(offset,ara_playback::Action::KeyOff(key));return;}
+        self.queue.push(Note { time: offset, kind: NoteKind::Off, key, velocity: 0.0 });
     }
 
     /// A controller message (spec: ui/midi-settings.md §4): VST3 takes controllers, channel pressure and pitch bend as
     /// the parameters its controller maps them to (IMidiMapping); other messages, and controllers it maps nowhere, are
     /// dropped.
     fn midi(&mut self, offset: u32, bytes: [u8; 3]) {
+        if let Some(events)=self.mpe.receive(bytes){for e in events{self.mpe_event(offset,e);}return;}
+
         let (d1, d2) = (bytes[1] & 0x7F, bytes[2] & 0x7F);
         let (cc, v) = match bytes[0] & 0xF0 {
             0xB0 => (usize::from(d1), f64::from(d2) / 127.0),
@@ -1570,7 +1748,7 @@ impl os_engine::Instrument for Plugin {
             0xE0 => (129, f64::from(u16::from(d1) | u16::from(d2) << 7) / 16383.0),
             _ => return,
         };
-        let Some(&id) = self.midi_map.get(cc) else { return };
+        let Some(&id) = self.midi_map.get(usize::from(bytes[0]&15)*130+cc) else { return };
         if id == u32::MAX || self.auto.len() >= MAX_AUTO {
             return;
         }
@@ -1581,13 +1759,24 @@ impl os_engine::Instrument for Plugin {
     /// Portamento glides (spec: audio/channel-voices.md): the tuning note expression of the key's sounding note, or
     /// pitch bend for a plug-in without one.
     fn tune(&mut self, offset: u32, key: u8, semitones: f32) {
+        if self.ara.is_some(){return;} // Timing and pitch are edited in the ARA document.
         match &mut self.bend {
             Some(b) => {
                 if let Some(m) = b.tune(key, semitones) {
                     os_engine::Instrument::midi(self, offset, m);
                 }
             }
-            None => self.queue.push(Note { time: offset, kind: NoteKind::Tune, key, velocity: semitones, ch: 0 }),
+            None => self.queue.push(Note { time: offset, kind: NoteKind::Tune, key, velocity: semitones }),
+        }
+    }
+
+    fn draw_pitch(&mut self, offset: u32, key: u8, base: f32, semitones: f32, range: u8) {
+        if let Some(bend) = &mut self.bend {
+            if let Some(event) = bend.draw(key, base + semitones, range) {
+                os_engine::Instrument::midi(self, offset, event);
+            }
+        } else {
+            self.tune(offset, key, base + semitones);
         }
     }
 
@@ -1606,7 +1795,69 @@ impl os_engine::Instrument for Plugin {
         self.song = Some(*info);
     }
 
+    fn note_on_from(&mut self, offset:u32,key:u8,velocity:f32,start:f32) {
+        self.voice_start(offset,key,velocity,start,os_engine::NoteLevels::default(),u32::MAX-u32::from(key));
+    }
+    fn voice_start(&mut self,offset:u32,key:u8,velocity:f32,start:f32,levels:os_engine::NoteLevels,voice:u32) {
+        if let Some(p)=&mut self.ara_playback {
+            p.event(offset,ara_playback::Action::Start{key,id:voice,start,velocity,levels});
+        } else if self.voice_pitch_supported() {
+            let id = self.note_ids.allocate();
+            self.draw_voices.push((voice, id, key));
+            self.mpe_event(offset, os_engine::mpe::Event::On { channel: 0, key, id, velocity });
+        } else {
+            self.note_on(offset, key, velocity);
+        }
+    }
+    fn voice_pitch_supported(&self) -> bool {
+        self.ara.is_none() && self.note_expression_tuning
+    }
+    fn voice_pitch(&mut self, offset: u32, voice: u32, base: f32, semitones: f32) {
+        let Some(&(_, id, _)) = self.draw_voices.iter().find(|entry| entry.0 == voice) else {
+            return;
+        };
+        let value = (0.5 + f64::from(base + semitones) / 240.).clamp(0., 1.);
+        self.mpe_queue.push(Event {
+            bus_index: 0, sample_offset: offset as i32, ppq_position: 0., flags: 0,
+            type_: NOTE_EXPRESSION_VALUE_EVENT,
+            event: EventData { note_expression_value: NoteExpressionValueEvent {
+                type_id: TUNING_TYPE_ID, note_id: id, value,
+            } },
+        });
+    }
+    fn voice_tune(&mut self, offset: u32, key: u8, voice: u32, semitones: f32) {
+        if self.draw_voices.iter().any(|entry| entry.0 == voice) {
+            self.voice_pitch(offset, voice, semitones, 0.);
+        } else {
+            self.tune(offset, key, semitones);
+        }
+    }
+    fn voice_release(&mut self, offset: u32, key: u8, voice: u32) {
+        if let Some(at) = self.draw_voices.iter().position(|entry| entry.0 == voice) {
+            let (_, id, key) = self.draw_voices.swap_remove(at);
+            self.mpe_event(offset, os_engine::mpe::Event::Off { channel: 0, key, id, velocity: 0. });
+        } else {
+            self.note_off(offset, key);
+        }
+    }
+    fn voice_gains(&self)->bool {self.ara.is_some()}
+    fn voice_gain(&mut self,offset:u32,voice:u32,gain:f32) {
+        if let Some(p)=&mut self.ara_playback {p.event(offset,ara_playback::Action::Gain(voice,gain));}
+    }
+    fn voice_choke(&mut self,offset:u32,key:u8,voice:u32) {
+        if let Some(p)=&mut self.ara_playback {
+            p.event(offset,ara_playback::Action::Stop(voice));
+        } else {
+            self.voice_release(offset, key, voice);
+        }
+    }
+    fn set_split_outputs(&mut self, split: bool) { self.aux.split = split; }
+    fn extra_outputs(&self) -> usize { self.aux.count() }
+    fn extra_output(&mut self, port: usize, left: &mut [f32], right: &mut [f32]) -> bool {
+        self.aux.read(port, left, right)
+    }
     fn process(&mut self, rate: u32, left: &mut [f32], right: &mut [f32]) {
+        self.aux.begin(left.len());
         left.fill(0.0);
         right.fill(0.0);
         if self.rate != rate {
@@ -1615,6 +1866,17 @@ impl os_engine::Instrument for Plugin {
             self.shared.attention.raise();
             os_host::wake();
             return;
+        }
+        if let Some(mut playback)=self.ara_playback.take() {
+            if playback.idle() && os_host::Plugin::editor_open(self) && self.song.is_none() {
+                self.start_processing();
+                for (l,r) in left.chunks_mut(self.max_frames as usize).zip(right.chunks_mut(self.max_frames as usize)) {
+                    self.set_context(None);self.process_chunk(l,r,None,None);
+                }
+                self.ara_playback=Some(playback);self.song=None;return;
+            }
+            playback.process(rate,left,right,|frame,l,r|{if self.render_ara_at(rate,frame,l,r).is_err(){l.fill(0.);r.fill(0.);}});
+            self.ara_playback=Some(playback);self.song=None;return;
         }
         self.start_processing();
         // Stable sort: notes at the same time keep their order (a note off before the next note on).
@@ -1626,6 +1888,15 @@ impl os_engine::Instrument for Plugin {
             let n = (left.len() - at).min(max);
             self.set_context(song.map(|s| s.advanced(at as u64, rate)));
             self.process_chunk(&mut left[at..at + n], &mut right[at..at + n], None, None);
+            let mut channel = self.ins.iter().sum::<usize>() + self.outs.first().copied().unwrap_or(0);
+            for (port, &channels) in self.outs.iter().skip(1).enumerate() {
+                if channels > 0 {
+                    let l = channel*max;
+                    let r = (channel+usize::from(channels>1))*max;
+                    self.aux.route(port, at, (&self.scratch[l..l+n], &self.scratch[r..r+n]), (&mut left[at..at+n], &mut right[at..at+n]));
+                }
+                channel += channels;
+            }
             at += n;
         }
         self.debug_level(rate, left, right);
@@ -1691,6 +1962,7 @@ impl Drop for Plugin {
     fn drop(&mut self) {
         self.close_editor();
         self.deactivate();
+        if let Some(doc)=&mut self.ara {doc.unbind();}
         unsafe {
             if let Some((a, b)) = self.points.take() {
                 a.disconnect(shared_of(&b));
@@ -1711,3 +1983,45 @@ impl Drop for Plugin {
 mod mock;
 #[cfg(test)]
 mod tests;
+
+impl Plugin {
+ fn mpe_event(&mut self,offset:u32,e:os_engine::mpe::Event){
+  use os_engine::mpe::Event as E;
+  let (type_,event)=match e{
+   E::On{channel,key,id,velocity}=>{self.mpe_voices.push((id,channel,key));self.ledger.start(key,id);(NOTE_ON_EVENT,EventData{note_on:NoteOnEvent{channel:i16::from(channel),pitch:i16::from(key),tuning:0.,velocity,length:0,note_id:id}})},
+   E::Off{channel,key,id,velocity}=>{self.mpe_voices.retain(|v|v.0!=id);self.ledger.release_voice(id);(NOTE_OFF_EVENT,EventData{note_off:NoteOffEvent{channel:i16::from(channel),pitch:i16::from(key),velocity,note_id:id,tuning:0.}})},
+   E::Expression{id,lane,value}=>{let typ=self.mpe_map[lane as usize];if typ!=u32::MAX{let value=if lane==0{f64::from(value)/if typ==2{240.}else{self.mpe_voices.iter().find(|v|v.0==id).map_or(96.,|v|f64::from(self.mpe.bend_range(v.1))*2.)}+0.5}else{f64::from(value)};(NOTE_EXPRESSION_VALUE_EVENT,EventData{note_expression_value:NoteExpressionValueEvent{type_id:typ,note_id:id,value:value.clamp(0.,1.)}})}else{
+    let Some(&(_,channel,key))=self.mpe_voices.iter().find(|v|v.0==id)else{return;};let cc=match lane{0=>129,1=>128,_=>74};let param=self.midi_map.get(usize::from(channel)*130+cc).copied().unwrap_or(u32::MAX);
+    if param!=u32::MAX&&self.midi_map.get(cc).copied()!=Some(param){let value=if lane==0{f64::from(value)/(f64::from(self.mpe.bend_range(channel))*2.)+0.5}else{f64::from(value)};if self.auto.len()<MAX_AUTO{self.auto.push((offset,param,value.clamp(0.,1.)));}return;}
+    if lane!=1{return;}(3,EventData{poly_pressure:vst3_sys::vst::PolyPressureEvent{channel:i16::from(channel),pitch:i16::from(key),pressure:value,note_id:id}})
+   }}
+  };self.mpe_queue.push(Event{bus_index:0,sample_offset:offset as i32,ppq_position:0.,flags:0,type_,event});
+ }
+}
+
+/// ARA documents use source-relative sample positions. Keep that coordinate system
+/// while preserving the real host tempo, signature and transport state.
+fn ara_render_context(host: Option<os_engine::TransportInfo>, frame:u64, rate:u32)->os_engine::TransportInfo {
+    let fallback=os_engine::TransportInfo{playing:false,tempo:120.,frame:0,beats:0.,bar_start:0.,bar:0,numerator:4,denominator:4,looping:None};
+    let mut context=host.unwrap_or(fallback);
+    let tempo=if context.tempo.is_finite()&&context.tempo>0. {context.tempo}else{120.};
+    let beats=frame as f64/f64::from(rate.max(1))*tempo/60.;
+    let bar_len=f64::from(context.numerator.max(1))*4./f64::from(context.denominator.max(1));
+    context.frame=frame;context.tempo=tempo;context.beats=beats;
+    context.bar=(beats/bar_len).floor() as i32;context.bar_start=f64::from(context.bar)*bar_len;
+    // Project cycle positions are not source-relative document positions.
+    context.looping=None;
+    context
+}
+
+#[cfg(test)]
+mod ara_timing_tests {
+    #[test] fn ara_uses_host_tempo_signature_and_stopped_state() {
+        let host=os_engine::TransportInfo{playing:true,tempo:90.,frame:999999,beats:99.,bar_start:98.,bar:28,numerator:7,denominator:8,looping:Some((10.,20.))};
+        let a=super::ara_render_context(Some(host),48000*3,48000);
+        assert_eq!((a.tempo,a.numerator,a.denominator,a.frame),(90.,7,8,144000));
+        assert_eq!((a.beats,a.bar_start,a.bar),(4.5,3.5,1));assert!(a.playing);assert_eq!(a.looping,None);
+        assert!(!super::ara_render_context(Some(os_engine::TransportInfo{playing:false,..host}),0,48000).playing);
+        assert!(!super::ara_render_context(None,0,48000).playing);
+    }
+}

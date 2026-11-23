@@ -345,6 +345,22 @@ impl DelayParams {
         self.raw_version.fetch_add(1, Ordering::AcqRel);
     }
 
+    pub fn clean_echo(&self) -> bool {
+        self.raw.read().is_ok_and(|raw| raw.ends_with(dsp::CLEAN_ECHO_TAG))
+    }
+
+    pub fn toggle_clean_echo(&self) {
+        if let Ok(mut raw) = self.raw.write() {
+            if raw.ends_with(dsp::CLEAN_ECHO_TAG) {
+                let end = raw.len() - dsp::CLEAN_ECHO_TAG.len();
+                raw.truncate(end);
+            } else {
+                raw.extend_from_slice(dsp::CLEAN_ECHO_TAG);
+            }
+            self.raw_version.fetch_add(1, Ordering::Release);
+        }
+    }
+
     pub fn raw_copy(&self) -> Vec<u8> {
         self.raw.read().map(|b| b.clone()).unwrap_or_else(|_| default_state())
     }
@@ -432,7 +448,7 @@ pub fn plugin_state_from_fl(fl: &[u8]) -> Vec<u8> {
 
 /// The original's saved state for a plugin state blob (see [`plugin_state_from_fl`]); `None` when it is not one.
 pub fn fl_from_plugin_state(blob: &[u8]) -> Option<Vec<u8>> {
-    let (_, json) = os_hostlink::state::json(blob);
+    let json = if blob.len() > 8 && blob[0] != b'{' { &blob[8..] } else { blob };
     let v: serde_json::Value = serde_json::from_str(std::str::from_utf8(json).ok()?).ok()?;
     let raw = normalized(from_hex(v.get("fields")?.get(STATE_FIELD)?.as_str()?.trim_matches('"'))?);
     let params = v.get("params")?;

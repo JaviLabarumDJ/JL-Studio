@@ -345,7 +345,7 @@ impl Logic {
             Some(Target::Edge(i)) => self.param_hint(self.edge_param(*i)),
             Some(Target::DisplayTab(i)) => ["Display", "Display: bands"][*i].into(),
             Some(Target::Show(k)) => view::SHOW_NAMES[*k].into(),
-            Some(Target::Header(i)) => ["Copy to B", "Swap A / B", "Options", "Show info"][(*i).min(3)].into(),
+            Some(Target::Header(i)) => ["Store in spare state", "Flip with spare state (A/B compare)", "Options", "Show info"][(*i).min(3)].into(),
             Some(Target::Logo) => "Show info".into(),
         }
     }
@@ -545,7 +545,7 @@ impl Logic {
                 m.sep(Cmd::None);
                 m.add(MenuItem::item("Copy value"), Cmd::CopyValue(*k));
                 m.add(MenuItem::item("Paste value").enabled(self.copied.is_some()), Cmd::PasteValue(*k));
-                m.add(MenuItem::item("Enter value..."), Cmd::TypeIn(*k));
+                m.add(MenuItem::item("Type in value..."), Cmd::TypeIn(*k));
                 m
             }
             MenuReq::Options => {
@@ -592,7 +592,7 @@ impl Logic {
             }
         }
         m.sep(Cmd::None);
-        m.add(MenuItem::item("Enter value..."), cmd(CurveCmd::TypeIn(i)));
+        m.add(MenuItem::item("Type in value..."), cmd(CurveCmd::TypeIn(i)));
         m
     }
 
@@ -769,7 +769,7 @@ mod win32 {
                 tracking: false,
                 slot: slot.clone(),
             });
-            let title = pw::wide("Press");
+            let title = pw::wide("ML Press");
             let hwnd = CreateWindowExW(
                 0,
                 class.as_ptr(),
@@ -917,6 +917,7 @@ mod win32 {
 
         /// Timer: a state replaced from outside, the hint for the host.
         fn poll(&mut self) {
+            if self.canvas.sync_stock_editor_theme() { self.invalidate(); }
             if self.logic.poll() {
                 self.invalidate();
             }
@@ -982,11 +983,12 @@ mod win32 {
                     }
                     1
                 }
-                Cmd::Changed | Cmd::Note | Cmd::Automate | Cmd::Audio | Cmd::Resizable | Cmd::SetSize | Cmd::Notes => 0,
+                Cmd::StateEdit | Cmd::SampleFit | Cmd::BrowseSample | Cmd::Changed | Cmd::Note | Cmd::Automate | Cmd::Audio | Cmd::Resizable | Cmd::SetSize => 0,
             }
         }
 
         fn paint(&mut self) {
+            self.canvas.sync_stock_editor_theme();
             let (hdc, ps) = pw::begin_paint(self.hwnd);
             self.logic.paint(&mut self.canvas);
             self.buf.resize((self.size.0 * self.size.1) as usize, 0);
@@ -1113,6 +1115,7 @@ mod gui {
         }
 
         fn poll(&mut self) {
+            if self.canvas.sync_stock_editor_theme() { self.dirty = true; }
             if self.logic.poll() {
                 self.dirty = true;
             }
@@ -1153,6 +1156,7 @@ mod gui {
         }
 
         fn paint(&mut self) {
+            self.canvas.sync_stock_editor_theme();
             self.dirty = false;
             self.logic.paint(&mut self.canvas);
             self.buf.resize((self.size.0 * self.size.1) as usize, 0);

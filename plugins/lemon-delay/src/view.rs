@@ -125,6 +125,7 @@ pub struct Hit {
 /// The pointer and the pressed control.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ViewState {
+    pub advanced: bool,
     pub mouse: Option<(f32, f32)>,
     pub pressed: Option<Target>,
 }
@@ -166,6 +167,17 @@ pub fn paint(c: &mut Canvas, t: &Palette, m: &dyn Model, st: &ViewState, hint: &
     let mut ui = Ui { c, t, m, st, hits: Vec::new() };
     ui.c.begin_frame(None);
     ui.c.clear(plug::BG);
+    if !st.advanced {
+        lemon::plug_panel(ui.c,Rect::new(8.,24.,768.,190.));
+        ui.c.text(Font::new(14).bold(),24.,38.,brand::MAIN,"STEREO DELAY");
+        for (i,(id,label)) in [("time","TIME"),("fb","FEEDBACK"),("wet","WET"),("dry","DRY")].iter().enumerate() {
+            let x=105.+i as f32*186.;
+            knob(&mut ui,id,x,111.,30.,label,false,false,false);
+            ui.c.text_center(Font::new(12),Rect::new(x-58.,172.,116.,24.),plug::DIM,&m.text(id));
+        }
+        draw_mode(ui.c,false);
+        return ui.hits
+    }
     for (x0, x1, y0, y1, s) in CARDS {
         lemon::plug_panel(ui.c, Rect::span(x0, x1, y0, y1));
         heading(&mut ui, x0, x1, y0 - 12.0, s);
@@ -222,7 +234,15 @@ pub fn paint(c: &mut Canvas, t: &Palette, m: &dyn Model, st: &ViewState, hint: &
         let lh = ui.c.line_height(HINT);
         ui.c.text_clip(HINT, well.x + 8.0, (well.cy() - lh / 2.0).round(), well.w - 16.0, brand::TEXT, hint);
     }
+    draw_mode(ui.c,true);
     ui.hits
+}
+pub const MODE_TAB: Rect = Rect::new(12.,245.,163.,24.);
+fn draw_mode(c:&mut Canvas,advanced:bool) {
+    for (i,label) in ["Normal","Advanced"].iter().enumerate() {
+        let r=Rect::new(MODE_TAB.x+i as f32*81.,MODE_TAB.y,81.,24.);
+        lemon::editor_mode_tab(c, r, label, (i == 1) == advanced);
+    }
 }
 
 /// A card's heading (as Lemon Limiter's and Lemon Reverb's): letter-spaced caps centred on a hairline rule at `y`,
@@ -323,16 +343,16 @@ fn slider(ui: &mut Ui, id: &str, cap: &str, disabled: bool) {
     ui.hit(hr, target);
 }
 
-/// The wordmark on the foot's line (as Lemon Limiter's and Lemon Sampler's): the lemon mark and "LEMON" in lemon
+/// The wordmark on the foot's line (as Lemon Limiter's and Lemon Sampler's): the lemon mark and "ML" in lemon
 /// beside a large grey "DELAY", right edge on the cards'; returns its left edge.
 fn logo(ui: &mut Ui) -> f32 {
     let wb = lemon::spaced_width(ui.c, MARK_BIG, "DELAY", 2.0);
-    let ws = lemon::spaced_width(ui.c, MARK_SMALL, "LEMON", 2.5);
+    let ws = lemon::spaced_width(ui.c, MARK_SMALL, "ML", 2.5);
     let (lh_b, lh_s) = (ui.c.line_height(MARK_BIG), ui.c.line_height(MARK_SMALL));
     let bx = (RIGHT - wb).round();
     lemon::spaced(ui.c, MARK_BIG, bx, (FOOT - lh_b / 2.0).round(), plug::WORDMARK, "DELAY", 2.0);
     let sx = (bx - 8.0 - ws).round();
-    lemon::spaced(ui.c, MARK_SMALL, sx, (FOOT - lh_s / 2.0).round() + 1.0, brand::MAIN, "LEMON", 2.5);
+    lemon::spaced(ui.c, MARK_SMALL, sx, (FOOT - lh_s / 2.0).round() + 1.0, brand::MAIN, "ML", 2.5);
     let left = sx - 14.0;
     lemon::lemon_mark(ui.c, left + 5.0, FOOT, 4.0, brand::MAIN);
     ui.hit(Rect::span(left - 2.0, RIGHT, FOOT - 12.0, FOOT + 12.0), Target::Logo);
@@ -371,7 +391,7 @@ pub fn name(id: &str, m: &dyn Model) -> String {
 /// The hint line for a target.
 pub fn hint(t: &Target, m: &dyn Model) -> String {
     match t {
-        Target::Logo => "Lemon Delay".into(),
+        Target::Logo => "ML Delay".into(),
         t => format!("{}: {}", name(t.id(), m), m.text(t.id())),
     }
 }

@@ -19,7 +19,6 @@ use std::sync::{Arc, Mutex};
 
 use nih_plug::prelude::*;
 use os_engine::envelope;
-use os_plugkit::levels::Levels;
 
 use params::*;
 
@@ -84,14 +83,8 @@ impl Shared {
     }
 }
 
-/// Seconds in a tick at `tempo` BPM: the plugin is not told the project's PPQ and takes FL's default of 96.
-pub fn tick_seconds(tempo: f64) -> f64 {
-    60.0 / (tempo.max(1.0) * 96.0)
-}
-
-/// The per-block settings of the voices from the parameters (spec: plugins/3x-osc.md §1, §2), `tick` the
-/// length of a tick in seconds (the LFO's shortest period).
-pub fn block(p: &Osc3Params, bend: f64, tick: f64) -> dsp::Block {
+/// The per-block settings of the voices from the parameters (spec: plugins/3x-osc.md §1, §2).
+pub fn block(p: &Osc3Params, bend: f64) -> dsp::Block {
     let v = |k: usize| p.v(k);
     let f = |k: usize| f64::from(p.v(k));
     let osc = |n: usize| {
@@ -132,12 +125,16 @@ pub fn block(p: &Osc3Params, bend: f64, tick: f64) -> dsp::Block {
                 delay: envelope::knob_seconds(v(r + R_LFO_DELAY)),
                 attack: envelope::knob_seconds(v(r + R_LFO_ATT)),
                 amount: f(r + R_LFO_AMT),
-                hz: dsp::lfo_hz(v(r + R_LFO_SPEED), tick),
+                hz: dsp::lfo_hz(v(r + R_LFO_SPEED)),
             },
         }
     };
     dsp::Block {
         osc: [osc(0), osc(1), osc(2)],
+        m1: f(COUNT)/128.,
+        adsr:std::array::from_fn(|n|{
+            let k=COUNT+1+4*n;[f(k)/1000.,f(k+1)/1000.,f(k+2)/128.,f(k+3)/1000.]
+        }),
         m2: f(MIX2) / 128.0,
         m3: f(MIX3) / 128.0,
         am: p.flag(AM_BYTE),
@@ -192,8 +189,8 @@ impl LemonTrio {
 }
 
 impl Plugin for LemonTrio {
-    const NAME: &'static str = "Lemon Trio";
-    const VENDOR: &'static str = "Lemon Studio";
+    const NAME: &'static str = "ML Trio";
+    const VENDOR: &'static str = "ML Studio";
     const URL: &'static str = "";
     const EMAIL: &'static str = "";
     const VERSION: &'static str = env!("CARGO_PKG_VERSION");
@@ -206,7 +203,7 @@ impl Plugin for LemonTrio {
     const MIDI_INPUT: MidiConfig = MidiConfig::MidiCCs;
     const SAMPLE_ACCURATE_AUTOMATION: bool = false;
 
-    type SysExMessage = Levels;
+    type SysExMessage = ();
     type BackgroundTask = ();
 
     fn params(&self) -> Arc<dyn Params> {
@@ -226,7 +223,7 @@ impl Plugin for LemonTrio {
             if path.is_empty() {
                 self.shared.set_custom(None, "", &self.params);
             } else if let Err(e) = self.shared.load(&path, &self.params) {
-                nih_log!("Lemon Trio: {e}");
+                nih_log!("ML Trio: {e}");
                 self.shared.set_custom(None, &path, &self.params);
             }
         }
@@ -241,8 +238,7 @@ impl Plugin for LemonTrio {
 
     fn process(&mut self, buffer: &mut Buffer, _aux: &mut AuxiliaryBuffers, ctx: &mut impl ProcessContext<Self>) -> ProcessStatus {
         self.take_custom();
-        let tick = tick_seconds(ctx.transport().tempo.unwrap_or(140.0));
-        let mut blk = block(&self.params, self.bend, tick);
+        let mut blk = block(&self.params, self.bend);
         if let Ok(mut q) = self.shared.previews.try_lock() {
             for (key, vel, on) in q.drain(..) {
                 if on {
@@ -274,16 +270,6 @@ impl Plugin for LemonTrio {
                 NoteEvent::Choke { note, .. } => self.engine.choke(note),
                 // Portamento and slide notes (spec: audio/channel-voices.md): the host's tuning of a key's voices.
                 NoteEvent::PolyTuning { note, voice_id, tuning, .. } => self.engine.tune(note, voice_id, f64::from(tuning)),
-                // A note's own pan, and the channel's volume and pan from Lemon Studio: the voices' final levels (spec:
-                // plugins/lemon-3x-osc.md §6.1).
-                NoteEvent::PolyPan { note, voice_id, pan, .. } => self.engine.pan(note, voice_id, pan),
-                NoteEvent::MidiSysEx { message: Levels(volume, pan), .. } => self.engine.set_levels(volume, pan),
-                // A note's mod X / Y: the host's per-note modulation of the filter knobs, in mod units.
-                NoteEvent::PolyModulation { voice_id, poly_modulation_id, normalized_offset, .. } => match poly_modulation_id {
-                    params::MOD_X_POLY => self.engine.modulate(voice_id, 0, normalized_offset),
-                    params::MOD_Y_POLY => self.engine.modulate(voice_id, 1, normalized_offset),
-                    _ => {}
-                },
                 NoteEvent::MidiPitchBend { value, .. } => {
                     // ±2 semitones, as Lemon Sampler.
                     self.bend = f64::from(value * 2.0 - 1.0) * 200.0;
@@ -311,7 +297,7 @@ impl Plugin for LemonTrio {
 // plugins by them (spec: plugins/plugin-formats.md, identity).
 impl ClapPlugin for LemonTrio {
     const CLAP_ID: &'static str = "org.openstudio.open-3x-osc";
-    const CLAP_DESCRIPTION: Option<&'static str> = Some("Lemon Studio's three-oscillator synthesizer");
+    const CLAP_DESCRIPTION: Option<&'static str> = Some("ML Studio's three-oscillator synthesizer");
     const CLAP_MANUAL_URL: Option<&'static str> = None;
     const CLAP_SUPPORT_URL: Option<&'static str> = None;
     const CLAP_FEATURES: &'static [ClapFeature] = &[ClapFeature::Instrument, ClapFeature::Synthesizer, ClapFeature::Stereo];
@@ -337,12 +323,12 @@ mod tests {
     #[test]
     fn default_block_is_the_default_patch() {
         let p = Osc3Params::default();
-        let b = block(&p, 0.0, 0.0);
+        let b = block(&p, 0.0);
         let d = dsp::Block::default();
         assert_eq!((b.osc, b.m2, b.m3, b.am, b.hq, b.rand), (d.osc, d.m2, d.m3, d.am, d.hq, d.rand));
         assert_eq!((b.filter, b.cutoff, b.resonance), (0, 256.0, 0.0));
         assert!(b.filter_off());
         assert!(b.targets.iter().all(|t| t.env.is_none() && t.lfo.amount == 0.0));
-        assert!((b.targets[1].lfo.hz - 0.5).abs() < 1e-3);
+        assert!((b.targets[1].lfo.hz - 0.505).abs() < 1e-9);
     }
 }

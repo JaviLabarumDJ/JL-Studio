@@ -1,13 +1,12 @@
 [package]
 name = "lemon-parametric-eq-2"
-description = "Lemon Parametric EQ: Lemon Studio's 7-band parametric EQ as a VST3 / CLAP plugin"
+description = "Lemon Parametric EQ: ML Studio's 7-band parametric EQ as a VST3 / CLAP plugin"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [lib]
 crate-type = ["cdylib", "lib"]
-doctest = false
 
 [features]
 # Compiled into Lemon Studio: no exported plugin entry points (they would clash with the other built-in plugins).
@@ -17,6 +16,7 @@ linked = []
 nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", default-features = false, features = ["vst3"] }
 os-engine.workspace = true
 os-hostlink.workspace = true
+os-paths.workspace = true
 os-plugkit = { path = "../../crates/os-plugkit" }
 os-ui = { path = "../../crates/os-ui" }
 os-theme = { path = "../../crates/os-theme" }

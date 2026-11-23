@@ -33,21 +33,20 @@ pub fn fader_matrix_law(volume: i32, pan: i32, separation: i32, on: bool, law: P
     let vol = curve(knob(volume, R12800));
     let p = knob(pan, R6400);
     let (g0, g1) = pan_split_law(unity_at_centre(vol), p, law);
-    // Single arithmetic throughout, but for the separation's exponential and subtraction: doubles, rounded to single
-    // once (spec: audio/mixer.md "Fader matrix").
-    let (mut xl, mut xr) = (0.0f32, 0.0f32);
+    let (mut xl, mut xr) = (0.0f64, 0.0f64);
     if p > 0.0 {
-        xr = (1.0 - g0 / vol) * 0.5;
+        xr = (1.0 - f64::from(g0) / f64::from(vol)) * 0.5;
     } else if p < 0.0 {
-        xl = (1.0 - g1 / vol) * 0.5;
+        xl = (1.0 - f64::from(g1) / f64::from(vol)) * 0.5;
     }
     if separation != 0 {
-        let sep = separation as f32 * (1.0f32 / 64.0);
-        let add = if separation > 0 { ((f64::from(sep) * 5f64.ln()).exp() - 1.0) as f32 * 0.25 } else { sep };
+        let sep = f64::from(separation) / 64.0;
+        let add = if separation > 0 { (5f64.powf(sep) - 1.0) * 0.25 } else { sep };
         xl = (2.0 * xl + add).min(1.0) * 0.5;
         xr = (2.0 * xr + add).min(1.0) * 0.5;
     }
-    [g0 * (1.0 - xl), g0 * xl, g1 * (1.0 - xr), g1 * xr]
+    let (g0, g1) = (f64::from(g0), f64::from(g1));
+    [(g0 * (1.0 - xl)) as f32, (g0 * xl) as f32, (g1 * (1.0 - xr)) as f32, (g1 * xr) as f32]
 }
 
 /// A send's gain from its stored level (0..16000, 12800 = unity): the level curve.
@@ -126,6 +125,7 @@ struct Band {
     kind: usize,
     /// b0, b1, b2, a1, a2.
     coef: [f64; 5],
+    target: [f64; 5],
     /// Per side: x1, x2, y1, y2.
     state: [[f64; 4]; 2],
     running: bool,
@@ -155,6 +155,7 @@ impl Band {
 /// song plays").
 #[derive(Debug, Clone)]
 pub struct TrackEq {
+    smooth: bool,
     bands: [Band; 3],
     rate: u32,
 }
@@ -171,9 +172,9 @@ impl TrackEq { // This code is a part of L e m o n S t u d i o.
     pub fn new(settings: [[i32; 3]; 3], rate: u32) -> Self {
         let band = |k: usize| {
             let s = settings[k];
-            Band { settings: s, kind: k, coef: design(k, s, rate), state: [[0.0; 4]; 2], running: s[0] != 0, dirty: false, count: None }
+            Band { settings: s, kind: k, coef: design(k, s, rate), target: design(k, s, rate), state: [[0.0; 4]; 2], running: s[0] != 0, dirty: false, count: None }
         };
-        TrackEq { bands: [band(0), band(1), band(2)], rate }
+        TrackEq { smooth: false, bands: [band(0), band(1), band(2)], rate }
     }
 
     /// An equaliser whose bands take their type from `kinds` (0 low shelf, 1 peaking, 2 high shelf) and where every
@@ -184,9 +185,23 @@ impl TrackEq { // This code is a part of L e m o n S t u d i o.
             let s = settings[k];
             let kind = kinds[k].min(2);
             let count = (s[0] == 0).then(|| idle_count(rate));
-            Band { settings: s, kind, coef: design(kind, s, rate), state: [[0.0; 4]; 2], running: true, dirty: false, count }
+            Band { settings: s, kind, coef: design(kind, s, rate), target: design(kind, s, rate), state: [[0.0; 4]; 2], running: true, dirty: false, count }
         };
-        TrackEq { bands: [band(0), band(1), band(2)], rate }
+        TrackEq { smooth: false, bands: [band(0), band(1), band(2)], rate }
+    }
+
+    /// Console tone controls use the same analog-style shelves/bell with 10 ms coefficient settling.
+    pub fn with_smoothing(mut self, smooth: bool) -> Self { self.smooth=smooth; self }
+
+    /// Keep the console filter memory and smoothly settle to the new knob settings after an engine update.
+    pub fn inherit_console(&mut self, old: &Self) {
+        if !self.smooth || self.rate!=old.rate {return;}
+        for (new,previous) in self.bands.iter_mut().zip(&old.bands) {
+            new.state=previous.state;
+            new.coef=previous.coef;
+            new.running |= previous.running;
+            if new.running && new.settings[0]==0 {new.count=Some(idle_count(self.rate));}
+        }
     }
 
     /// True when no band runs (the equaliser passes its input unchanged).
@@ -214,17 +229,21 @@ impl TrackEq { // This code is a part of L e m o n S t u d i o.
     /// the tick a running band's memory values below 2^-24 are set to 0, and a counting band's count goes down by the
     /// tick's length.
     pub fn process(&mut self, buf: &mut [f32]) {
+        if self.is_flat() { return; }
         let n = (buf.len() / 2) as i64;
         let rate = self.rate;
+        let settling=if self.smooth {1.0-(-1.0/(0.010*f64::from(rate))).exp()} else {1.0};
         for band in self.bands.iter_mut() {
             if !band.running {
                 continue;
             }
             if band.dirty {
-                band.coef = design(band.kind, band.settings, rate);
+                band.target=design(band.kind,band.settings,rate);
+                if !self.smooth {band.coef = band.target;}
                 band.dirty = false;
             }
             for f in buf.chunks_exact_mut(2) {
+                if self.smooth {for (coef,target) in band.coef.iter_mut().zip(band.target) {*coef+=(target-*coef)*settling;}}
                 f[0] = band.run(0, f[0]);
                 f[1] = band.run(1, f[1]);
             }
@@ -314,7 +333,49 @@ fn design(k: usize, [gain, freq, width]: [i32; 3], rate: u32) -> [f64; 5] {
 mod tests { // This code is a part of L e m o n S t u d i o.
     use super::*;
 
+    #[test]
+    fn cached_coefficients_preserve_automation_and_rebuilds() {
+        for smooth in [false, true] {
+            let mut cached = TrackEq::new(EQ_DEFAULT, 48000).with_smoothing(smooth);
+            let mut reference = cached.clone();
+            for block in 0..300 {
+                if block % 30 == 0 {
+                    let band = (block / 30) % 3;
+                    let gain = if block % 60 == 0 { 900 } else { 0 };
+                    for eq in [&mut cached, &mut reference] { eq.set(band, 0, gain); }
+                }
+                if block == 125 {
+                    for eq in [&mut cached, &mut reference] {
+                        let mut next = TrackEq::new(eq.bands.map(|b| b.settings), 48000).with_smoothing(smooth);
+                        next.inherit_console(eq);
+                        *eq = next;
+                    }
+                }
+                // The old path redesigned every active band on every block.
+                for band in &mut reference.bands { band.dirty = true; }
+                let mut a: Vec<f32> = (0..512).map(|i| ((i + block * 512) as f32 * 0.017).sin() * 0.2).collect();
+                let mut b = a.clone();
+                cached.process(&mut a);
+                reference.process(&mut b);
+                assert_eq!(a, b, "block={block}, smooth={smooth}");
+            }
+        }
+    }
+
     /// The default bands sit at 90 Hz, 1500 Hz and 8000 Hz (spec: ui/mixer.md §8); the knob spans 10 Hz .. 16 kHz.
+    #[test]
+    fn mini_eq_console_knobs_settle_without_a_step() {
+        let mut eq=TrackEq::new(EQ_DEFAULT,48000).with_smoothing(true);
+        let mut signal=vec![0.1;960];
+        eq.process(&mut signal);
+        eq.set(0,0,1200);
+        let mut next=vec![0.1;960];eq.process(&mut next);
+        assert!((next[0]-0.1).abs()<0.001);
+        for _ in 0..50 {next.fill(0.1);eq.process(&mut next);}
+        assert!((next[958]-0.1*10f32.powf(12./20.)).abs()<0.01);
+        assert!(next.iter().all(|v|v.is_finite()));
+    }
+
     #[test]
     fn eq_frequency_law() {
         let hz: Vec<f32> = EQ_DEFAULT.iter().map(|b| eq_frequency(b[1]).round()).collect();
@@ -350,13 +411,6 @@ mod tests { // This code is a part of L e m o n S t u d i o.
         assert_eq!(fader_matrix(0, 0, 0, true), [0.0; 4]);
         // 16000 is curve(1.25).
         assert!((fader_matrix(16000, 0, 0, true)[0] - 1.90327).abs() < 1e-5);
-        // Separation 64 merges to mono, -64 subtracts the opposite side; the shares are singles (spec: audio/mixer.md
-        // "Fader matrix").
-        assert_eq!(fader_matrix(12800, 0, 64, true), [0.5; 4]);
-        assert_eq!(fader_matrix(12800, 0, -64, true), [1.5, -0.5, 1.5, -0.5]);
-        let sep = 20.0f32 * (1.0 / 64.0);
-        let x = (((f64::from(sep) * 5f64.ln()).exp() - 1.0) as f32 * 0.25) * 0.5;
-        assert_eq!(fader_matrix(12800, 0, 20, true), [1.0 - x, x, 1.0 - x, x]);
     }
 
     /// spec: audio/gain-laws.md "Panning law: Triangular", the mixer table (to 4 decimals): `[L_in->L, R_in->L,

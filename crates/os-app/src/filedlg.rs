@@ -40,9 +40,10 @@ impl Filter {
         Filter { name: name.into(), exts: exts.iter().map(|e| e.to_ascii_lowercase()).collect() }
     }
 
-    /// The type combo's text: "Lemon Studio project (*.flp)".
+    /// The type combo's text: "FLP project (*.flp)".
     pub fn label(&self) -> String {
-        if self.exts.is_empty() { self.name.clone() } else { format!("{} (*.{})", self.name, self.exts.join(", *.")) }
+        let name=crate::prefs::language::Language::current().text(&self.name);
+        if self.exts.is_empty() { name.to_owned() } else { format!("{} (*.{})", name, self.exts.join(", *.")) }
     }
 
     fn matches(&self, name: &str) -> bool {
@@ -105,6 +106,8 @@ pub enum Outcome {
 }
 
 pub struct FileDlg {
+    pub preview:bool,
+    pub preview_last:Option<PathBuf>,
     pub mode: Mode,
     pub title: String,
     /// The last folder used is remembered per purpose for the session ("project", "audio", ...).
@@ -138,6 +141,7 @@ pub struct FileDlg {
     pub filter_open: bool,
     /// Last row click (row, time), for double clicks.
     pub last_click: Option<(usize, Instant)>,
+    pub renaming: Option<(PathBuf,String)>,
     pub then: Then,
 }
 
@@ -147,8 +151,30 @@ const DOUBLE: std::time::Duration = std::time::Duration::from_millis(450);
 static LAST: std::sync::Mutex<Vec<(&'static str, PathBuf)>> = std::sync::Mutex::new(Vec::new());
 
 impl FileDlg {
+    #[cfg(windows)]
+    pub fn explorer_action(&mut self, background:bool, verb:Option<&str>) {
+        let path=if background {Some(self.dir.clone())} else {self.sel.and_then(|i|self.entries.get(i)).map(|e|self.dir.join(&e.name))};
+        let Some(path)=path else {return};
+        let result=crate::browser_files::shell_action(&path,background,verb);
+        self.reread();
+        self.sel=path.file_name().and_then(|n|self.entries.iter().position(|e|std::ffi::OsStr::new(&e.name)==n));
+        self.list_focus=true;
+        self.last_click=None;
+        self.status=result.err();
+    }
+    pub fn begin_rename(&mut self) {
+        let Some(e)=self.sel.and_then(|i|self.entries.get(i)) else{return};
+        self.renaming=Some((self.dir.join(&e.name),self.name.text.clone()));
+        self.name.set(&e.name);self.name.select_all();
+        self.focus=Focus::Name;self.list_focus=false;
+        self.status=Some("Rename in the name field; Enter applies, Escape cancels".into());
+    }
+    pub fn cancel_rename(&mut self)->bool {
+        if let Some((_,name))=self.renaming.take(){self.name.set(&name);self.status=None;true}else{false}
+    }
     pub fn new(mode: Mode, title: &str, purpose: &'static str, then: Then) -> FileDlg {
         FileDlg {
+            preview:true,preview_last:None,
             mode,
             title: title.into(),
             purpose,
@@ -172,6 +198,7 @@ impl FileDlg {
             status: None,
             filter_open: false,
             last_click: None,
+            renaming: None,
             then,
         }
     }
@@ -233,6 +260,7 @@ impl FileDlg {
     }
 
     fn show(&mut self, dir: PathBuf) {
+        self.cancel_rename();
         self.dir = dir;
         self.path.set(&self.dir.display().to_string());
         self.status = None;
@@ -436,6 +464,20 @@ impl FileDlg {
     /// Enter or the main button.
     pub fn accept(&mut self) -> Outcome {
         self.status = None;
+        if let Some((source,_))=&self.renaming {
+            let name=self.name.text.trim();
+            if name.is_empty() || name=="." || name==".." || name.chars().any(|c|c.is_control() || r#"<>:"/\|?*"#.contains(c)) || name.ends_with(['.',' ']) {
+                self.status=Some("Enter a single valid file or folder name".into());return Outcome::Stay;
+            }
+            let destination=self.dir.join(name);
+            if &destination==source {self.cancel_rename();return Outcome::Stay;}
+            if destination.exists(){self.status=Some("That name already exists; nothing was replaced".into());return Outcome::Stay;}
+            match std::fs::rename(source,&destination) {
+                Ok(())=>{self.cancel_rename();self.reread();self.status=Some("Renamed. References in open projects are not changed.".into());}
+                Err(e)=>self.status=Some(format!("Could not rename: {e}")),
+            }
+            return Outcome::Stay;
+        }
         if self.list_focus {
             if let Some(e) = self.sel.and_then(|i| self.entries.get(i)).filter(|e| e.dir).cloned() {
                 if self.mode != Mode::Folder {
@@ -500,6 +542,7 @@ impl FileDlg {
 
     /// New folder: "New folder", "New folder 2", ... in the folder shown, then selected.
     pub fn new_folder(&mut self) {
+        self.cancel_rename();
         let Some(name) = (1..1000).map(|k| if k == 1 { "New folder".to_string() } else { format!("New folder {k}") }).find(|n| !self.dir.join(n).exists()) else { return };
         match std::fs::create_dir(self.dir.join(&name)) {
             Ok(()) => {
@@ -536,7 +579,7 @@ impl FileDlg {
         }
         let dirs = self.entries.iter().filter(|e| e.dir).count();
         let files = self.entries.len() - dirs;
-        let n = |k: usize, one: &str, many: &str| format!("{k} {}", if k == 1 { one } else { many });
+        let n = |k: usize, one: &str, many: &str| format!("{k} {}", crate::prefs::language::Language::current().text(if k == 1 { one } else { many }));
         if self.mode == Mode::Folder { n(dirs, "folder", "folders") } else { format!("{}, {}", n(dirs, "folder", "folders"), n(files, "file", "files")) }
     }
 
@@ -696,7 +739,7 @@ fn user_dirs(home: Option<&Path>) -> Vec<(PlaceKind, &'static str, PathBuf)> {
 /// Windows: every drive letter in use.
 #[cfg(windows)]
 fn drives() -> Vec<(String, PathBuf)> {
-    (b'A'..=b'Z').map(|c| PathBuf::from(format!("{}:\\", c as char))).filter(|p| p.is_dir()).map(|p| (p.display().to_string(), p)).collect()
+    os_paths::windows_drive_roots().map(|p| (p.display().to_string(), p)).collect()
 }
 
 /// Linux: the file system and what is mounted under /media/<user>, /run/media/<user> and /mnt.
@@ -730,6 +773,19 @@ fn sub_dirs(root: &Path) -> Vec<(String, PathBuf)> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn workflow_features_rename_collision_cancel_and_folder() {
+        let d=tmp("rename");std::fs::write(d.join("source.wav"),b"source").unwrap();std::fs::write(d.join("keep.wav"),b"keep").unwrap();
+        let mut f=FileDlg::new(Mode::Save,"Save","test-rename",Then::Nothing).start(Some(&d)).opened();
+        f.select(f.entries.iter().position(|e|e.name=="source.wav").unwrap());f.begin_rename();
+        f.name.set("keep.wav");assert_eq!(f.accept(),Outcome::Stay);assert_eq!(std::fs::read(d.join("keep.wav")).unwrap(),b"keep");
+        f.name.set("../escape.wav");f.accept();assert!(f.renaming.is_some());
+        assert!(f.cancel_rename());assert!(d.join("source.wav").exists());
+        f.begin_rename();f.name.set("renamed.wav");assert_eq!(f.accept(),Outcome::Stay);assert!(!d.join("source.wav").exists());assert_eq!(std::fs::read(d.join("renamed.wav")).unwrap(),b"source");
+        std::fs::create_dir(d.join("folder")).unwrap();f.reread();f.select(f.entries.iter().position(|e|e.name=="folder").unwrap());f.begin_rename();f.name.set("renamed folder");f.accept();assert!(d.join("renamed folder").is_dir());
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
     fn tmp(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("os-filedlg-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
@@ -745,7 +801,7 @@ mod tests {
         std::fs::write(d.join("b.flp"), b"x").unwrap();
         std::fs::write(d.join("A.flp"), b"xyz").unwrap();
         std::fs::write(d.join("notes.txt"), b"").unwrap();
-        let f = FileDlg::new(Mode::Open, "Open", "test-list", Then::Nothing).filter("Lemon Studio project", &["flp"]).start(Some(&d)).opened();
+        let f = FileDlg::new(Mode::Open, "Open", "test-list", Then::Nothing).filter("FLP project", &["flp"]).start(Some(&d)).opened();
         let names: Vec<_> = f.entries.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, ["beats", "A.flp", "b.flp"]);
         assert_eq!(f.filters.last().unwrap().name, "All files");
@@ -766,7 +822,7 @@ mod tests {
         let d = tmp("save");
         std::fs::write(d.join("song.flp"), b"x").unwrap();
         std::fs::create_dir(d.join("sub")).unwrap();
-        let mut f = FileDlg::new(Mode::Save, "Save", "test-save", Then::Nothing).filter("Lemon Studio project", &["flp"]).start(Some(&d)).name("Untitled.flp").opened();
+        let mut f = FileDlg::new(Mode::Save, "Save", "test-save", Then::Nothing).filter("FLP project", &["flp"]).start(Some(&d)).name("Untitled.flp").opened();
         assert!(f.name.all, "the name starts selected");
         f.name.insert("tune");
         assert_eq!(f.name.text, "tune");

@@ -178,6 +178,7 @@ pub struct Window {
     max_request: usize,
     waker: Waker,
     keys: Keymap,
+    key_releases: bool,
     /// An invisible cursor for held drags.
     blank: u32,
     /// XInput 2 is there: held drags ask for raw motion (XWayland may not send any).
@@ -225,6 +226,7 @@ impl Window {
             | EventMask::POINTER_MOTION
             | EventMask::LEAVE_WINDOW
             | EventMask::KEY_PRESS
+            | EventMask::KEY_RELEASE
             | EventMask::STRUCTURE_NOTIFY;
         (|| -> Result<(), Box<dyn std::error::Error>> {
             // The plugin look's background until the first frame is put: the server fills the window with it at once,
@@ -262,6 +264,7 @@ impl Window {
             max_request,
             waker,
             keys,
+            key_releases: false,
             blank,
             xi,
             raw_seen: false,
@@ -279,6 +282,9 @@ impl Window {
     /// No input is waiting: a good moment to paint (once per burst of events).
     pub fn idle(&self) -> bool {
         self.queue.is_empty()
+    }
+    pub fn key_releases(&mut self) {
+        self.key_releases = true;
     }
 
     /// Ctrl, Shift, Alt held at the last event.
@@ -427,7 +433,12 @@ impl Window {
             Event::KeyPress(e) if e.event == self.win => {
                 self.state = u16::from(e.state);
                 let sym = self.keys.sym(e.detail, self.state);
-                Some(Input::Key { sym, text: keysym_char(sym) })
+                Some(Input::Key { sym, text: keysym_char(sym), pressed: true })
+            }
+            Event::KeyRelease(e) if e.event == self.win && self.key_releases => {
+                self.state = u16::from(e.state);
+                let sym = self.keys.sym(e.detail, self.state);
+                Some(Input::Key { sym, text: None, pressed: false })
             }
             _ => None,
         }
@@ -538,7 +549,7 @@ impl Window {
         let _ = self.c.flush();
     }
 
-    fn show(&self, (win, gc): (u32, u32), c: &Canvas) {
+    fn show(&self, (win, gc): (u32, u32), c: &mut Canvas) {
         let (w, h) = (c.pixmap.width(), c.pixmap.height());
         let mut px = vec![0u32; (w * h) as usize];
         c.copy_to_xrgb(&mut px);
@@ -582,11 +593,12 @@ impl Window {
         self.grab(pop.0);
         let mut hover: Option<usize> = None;
         let paint = |canvas: &mut Canvas, hover: Option<usize>| {
+            canvas.sync_stock_editor_theme();
             canvas.begin_frame(None);
             kmenu::paint(canvas, pal, &def.items, &layout, def.style, 0.0, 0.0, hover, def.current);
         };
         paint(&mut canvas, hover);
-        self.show(pop, &canvas);
+        self.show(pop, &mut canvas);
         let rect = [px, py, px + w, py + h];
         let inside = |r: &[i32; 4], (sx, sy): (i32, i32)| sx >= r[0] && sx < r[2] && sy >= r[1] && sy < r[3];
         let item_at = |(sx, sy): (i32, i32)| layout.item_at(&def.items, (sx - px) as f32 / scale, (sy - py) as f32 / scale);
@@ -596,7 +608,7 @@ impl Window {
         let result = loop {
             let Some(e) = self.event() else { break PopRes::Cancel };
             match e {
-                Event::Expose(e) if e.window == pop.0 => self.show(pop, &canvas),
+                Event::Expose(e) if e.window == pop.0 => self.show(pop, &mut canvas),
                 Event::MotionNotify(e) => {
                     let cur = (i32::from(e.root_x), i32::from(e.root_y));
                     self.pointer = (e.root_x, e.root_y);
@@ -610,7 +622,7 @@ impl Window {
                     if hov != hover {
                         hover = hov;
                         paint(&mut canvas, hover);
-                        self.show(pop, &canvas);
+                        self.show(pop, &mut canvas);
                     }
                     // Submenu: opens while its row is hovered, until the pointer moves on to another row of this menu.
                     if let Some((i, sub)) = hov.and_then(|i| Some((i, def.sub(i)?))) {
@@ -658,7 +670,7 @@ impl Window {
                             }
                             hover = Some(i);
                             paint(&mut canvas, hover);
-                            self.show(pop, &canvas);
+                            self.show(pop, &mut canvas);
                         }
                         keysym::RETURN | keysym::KP_ENTER => {
                             if let Some(i) = hover.filter(|&i| def.items[i].clickable() && def.sub(i).is_none()) {
@@ -696,6 +708,7 @@ impl Window {
         let paint = |canvas: &mut Canvas, s: &[char], caret: usize, all: bool| {
             let (lw, lh) = (w as f32 / scale, h as f32 / scale);
             let f = Font::new(14);
+            canvas.sync_stock_editor_theme();
             canvas.begin_frame(None);
             canvas.clear(Color::rgb(0xffffff));
             for r in [Rect::new(0.0, 0.0, lw, 1.0), Rect::new(0.0, lh - 1.0, lw, 1.0), Rect::new(0.0, 0.0, 1.0, lh), Rect::new(lw - 1.0, 0.0, 1.0, lh)] {
@@ -716,12 +729,12 @@ impl Window {
             }
         };
         paint(&mut canvas, &s, caret, all);
-        self.show(boxw, &canvas);
+        self.show(boxw, &mut canvas);
         let r = [x, y, x + w, y + h];
         let result = loop {
             let Some(e) = self.event() else { break None };
             match e {
-                Event::Expose(e) if e.window == boxw.0 => self.show(boxw, &canvas),
+                Event::Expose(e) if e.window == boxw.0 => self.show(boxw, &mut canvas),
                 Event::ButtonPress(e) => {
                     let (sx, sy) = (i32::from(e.root_x), i32::from(e.root_y));
                     if sx < r[0] || sx >= r[2] || sy < r[1] || sy >= r[3] {
@@ -774,7 +787,7 @@ impl Window {
                         _ => {}
                     }
                     paint(&mut canvas, &s, caret, all);
-                    self.show(boxw, &canvas);
+                    self.show(boxw, &mut canvas);
                 }
                 _ => {}
             }

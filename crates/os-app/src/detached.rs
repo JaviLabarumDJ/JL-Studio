@@ -1,0 +1,385 @@
+//! Native editor windows sharing the main App and audio engine.
+use std::rc::Rc;
+use std::num::NonZeroU32;
+use std::time::Instant;
+use winit::{event::{WindowEvent,ElementState,MouseButton,MouseScrollDelta},event_loop::ActiveEventLoop,window::{Window,WindowId},keyboard::ModifiersState,dpi::{LogicalSize,PhysicalPosition,PhysicalSize}};
+use crate::{app::{App,Win,Action},layout::{self,MainWin}};
+use os_ui::Canvas;
+use crate::{app::Scroll, help, views::settings::SAct};
+#[derive(Default)]
+pub struct Windows { header_samples:Option<(u16,Vec<String>)>, stems:Option<(u16,u32,Vec<std::path::PathBuf>)>, panes:Vec<Pane>, screens:Vec<[i32;4]>, main:Option<crate::app::ViewContext>, changed:bool, layout_generation:u64, last_palette:Option<std::sync::Arc<os_theme::Palette>> }
+struct Pane {
+    kind:Win, window:Rc<Window>, surface:softbuffer::Surface<Rc<Window>,Rc<Window>>, canvas:Canvas,
+    cursor: Option<crate::CursorStyle>,
+    eq_visible: bool,
+    guide_press: Option<help::Hit>,
+    guide_scroll: Option<(f32, f32, f32)>,
+    motion:Option<(f32,f32)>, hover:Option<Action>, refresh_editors:bool, frame:MainWin, mouse:(f32,f32), mods:ModifiersState, last:Instant, painted:Instant,
+}
+fn key(w:Win)-> &'static str {match w {Win::Guide=>"native_user_guide",Win::Visualizer=>"native_visualizer",Win::Score=>"native_score_editor",Win::Browser=>"native_browser",Win::Mixer=>"native_mixer",Win::PianoRoll=>"native_piano",_=>"native_playlist"}}
+fn title(w:Win)-> &'static str {match w {Win::Guide=>"ML Studio - User Guide",Win::Visualizer=>"ML Studio - Visualizer",Win::Score=>"ML Studio - Score Editor",Win::Browser=>"ML Studio - Browser",Win::Mixer=>"ML Studio - Mixer",Win::PianoRoll=>"ML Studio - Piano roll",_=>"ML Studio - Playlist"}}
+impl Windows {
+    pub fn flush_stems(&mut self,app:&mut App){
+        if let Some((row,paths))=self.header_samples.take(){crate::playlist_tracks::drops::samples(app,paths,row);self.changed=true;}
+        if let Some((track,tick,files))=self.stems.take(){app.import_stems(files,track,tick);self.changed=true;}
+    }
+    pub fn browser_window(&self) -> Option<&Window> { self.panes.iter().find(|p| p.kind == Win::Browser).map(|p| p.window.as_ref()) }
+    fn save_main(&mut self,app:&mut App){if self.main.is_none(){self.main=Some(app.take_view_context());}}
+    pub fn restore_main(&mut self,app:&mut App)->bool {
+        if let Some(c)=self.main.take(){app.restore_view_context(c);if self.changed {app.invalidate();}self.changed=false;return true;}false
+    }
+
+    pub fn owns(&self,id:WindowId)->bool {self.panes.iter().any(|p|p.window.id()==id)}
+    pub fn prepare_drag(&mut self,app:&mut App) {
+        if !app.project_windows_ready(){return;}
+        let external=app.state.sample_drop.external&&app.state.sample_drop.surface.is_some();
+        let target=if external{app.state.sample_drop.surface}else{app.state.native_input};
+        if (!external&&app.drag.is_none())||!self.panes.iter().any(|p|Some(p.kind)==target){return;}
+        self.save_main(app);
+        if let Some(p)=self.panes.iter_mut().find(|p|Some(p.kind)==target) {
+            if external {if let (Some((at,_)),Ok(pos))=(crate::screen_state(&p.window),p.window.inner_position()){let scale=crate::ui_scale(&p.window) as f32;p.mouse=((at.0-pos.x) as f32/scale,(at.1-pos.y) as f32/scale);}}
+            app.state.native_view=Some(p.kind);app.mouse=p.mouse;set_rack_parent(app,&p.window);app.hover=p.hover.clone();
+            if external && p.kind == Win::Browser { crate::views::browser::library::hover(app, p.mouse.0, p.mouse.1); }
+            app.paint(&mut p.canvas,None);
+            if external{crate::drop_preview::poll(app);p.window.request_redraw();}
+        }
+    }
+    pub(crate) fn theme_changed(&mut self) -> bool {
+        let current = os_theme::current();
+        if self.last_palette.as_ref().is_some_and(|previous| std::sync::Arc::ptr_eq(previous, &current)) {
+            return false;
+        }
+        self.last_palette = Some(current);
+        true
+    }
+    pub fn save(&self) {for p in &self.panes {layout::save_native(key(p.kind),p.frame);}}
+    pub fn sync(&mut self,app:&mut App,el:&ActiveEventLoop,cache:&mut crate::CursorCache) {
+        // Keep the saved layout pending until hosting finishes. Creating a pane paints it
+        // immediately, which can otherwise open native Mixer editors halfway through loading.
+        if !app.project_windows_ready(){return;}
+        let screens=crate::screens(el);let changed=screens!=self.screens;self.screens=screens.clone();
+        if self.layout_generation!=app.state.native_layout_generation {
+            self.layout_generation=app.state.native_layout_generation;
+            for p in &mut self.panes {if let Some((_,f))=app.state.native_frames.iter().find(|(w,_)|*w==p.kind){
+                let f=layout::on_screens(*f,&screens);p.window.set_maximized(false);p.window.set_outer_position(frame_position(f));let _=p.window.request_inner_size(frame_size(f));p.window.set_maximized(f.max);p.frame=f;
+            }}
+        }
+        self.panes.retain(|p|{let keep=if p.kind==Win::Guide {help::detached_open(&app.state)} else {app.state.native_detached.contains(&p.kind)&&app.state.shown(p.kind)};if !keep {#[cfg(windows)] if p.kind==Win::Mixer {app.plugins.close_racks();}layout::save_native(key(p.kind),p.frame);}keep});
+        let mut created=Vec::new();
+        let mut kinds = app.state.native_detached.clone();
+        if help::detached_open(&app.state) { kinds.push(Win::Guide); }
+        for kind in kinds {
+            if (kind!=Win::Guide && !app.state.shown(kind))||self.panes.iter().any(|p|p.kind==kind){continue;}
+            let initial=app.state.native_frames.iter().find(|(w,_)|*w==kind).map(|(_,f)|*f).or_else(||layout::native_win(key(kind))).unwrap_or(MainWin{pos:(100,100),size:match kind {Win::Browser=>(380,680),Win::Guide=>(1050,770),_=>(1100,800)},max:false});
+            let frame=layout::on_screens(initial,&screens);
+            let attrs=Window::default_attributes().with_title(title(kind)).with_inner_size(frame_size(frame)).with_position(frame_position(frame)).with_min_inner_size(LogicalSize::new(kind.min_size().0 as f64,kind.min_size().1 as f64)).with_maximized(frame.max).with_visible(false);
+            let made=(||->Result<Pane,String>{
+                let window=Rc::new(el.create_window(attrs).map_err(|e|e.to_string())?);
+                let context=softbuffer::Context::new(window.clone()).map_err(|e|e.to_string())?;
+                let surface=softbuffer::Surface::new(&context,window.clone()).map_err(|e|e.to_string())?;
+                let size=window.inner_size();let canvas=Canvas::new(size.width.max(1),size.height.max(1),crate::ui_scale(&window) as f32).map_err(|e|e.to_string())?;
+                Ok(Pane{kind,window,surface,canvas,cursor:None,eq_visible:false,guide_press:None,guide_scroll:None,motion:None,hover:None,refresh_editors:false,frame,mouse:(-1.,-1.),mods:ModifiersState::empty(),last:Instant::now(),painted:Instant::now()})
+            })();
+            match made {Ok(p)=>{created.push(p.window.id());self.panes.push(p);},Err(e)=>{if kind==Win::Guide {help::fallback_to_docked(app);} else {app.state.native_detached.retain(|w|*w!=kind);} app.state.message=Some(format!("Could not detach window: {e}"));}}
+        }
+        // Each applied theme publishes a new shared palette. Pick up the
+        // latest edit on this event-loop turn, including Cancel and Undo.
+        let theme_changed = !self.panes.is_empty() && self.theme_changed();
+        for p in &mut self.panes {
+            if p.kind!=Win::Guide {app.state.native_frames.retain(|(w,_)|*w!=p.kind);app.state.native_frames.push((p.kind,p.frame));}
+            if changed {
+                let next=layout::on_screens(p.frame,&screens);
+                if next!=p.frame {p.window.set_maximized(false);p.window.set_outer_position(frame_position(next));let _=p.window.request_inner_size(frame_size(next));p.frame=next;}
+            }
+            if theme_changed || p.painted.elapsed().as_millis()>=if p.kind==Win::Guide {250} else if app.animating()||p.motion.is_some(){16}else{100} {p.window.request_redraw();}
+        }
+        for id in created {self.event(app,el,id,WindowEvent::RedrawRequested,cache);}
+        if std::mem::take(&mut app.state.guide.focus_window)
+            && let Some(pane) = self.panes.iter().find(|pane| pane.kind == Win::Guide)
+        {
+            pane.window.set_minimized(false);
+            pane.window.focus_window();
+        }
+        if std::mem::take(&mut app.state.playlist.visuals.focus) && let Some(pane) = self.panes.iter().find(|pane| pane.kind == Win::Visualizer) {
+            pane.window.set_minimized(false);
+            pane.window.focus_window();
+        }
+        app.detached_eq_visible = self.panes.iter().any(|p| {
+            matches!(p.kind,Win::Mixer|Win::Playlist) && p.eq_visible && p.window.is_minimized() != Some(true)
+        });
+    }
+    pub fn event(&mut self,app:&mut App,_el:&ActiveEventLoop,id:WindowId,event:WindowEvent,cache:&mut crate::CursorCache) {
+        if self.panes.iter().any(|p| p.window.id() == id && p.kind == Win::Guide) {
+            self.guide_event(app, id, event);
+            return;
+        }
+        // Existing panes also receive queued redraw/resize events while a new project
+        // loads. Do not repaint plugins or overwrite the incoming project's saved frame.
+        if !app.project_windows_ready(){return;}
+        if app.loading() && matches!(event,WindowEvent::MouseInput{state:ElementState::Pressed,..}|WindowEvent::KeyboardInput{..}|WindowEvent::MouseWheel{..}|WindowEvent::DroppedFile(_)){return;}
+        // Mouse input is consumed once per frame, not at the mouse polling rate.
+        if let WindowEvent::CursorMoved{position,..}=&event {
+            if let Some(p)=self.panes.iter_mut().find(|p|p.window.id()==id){let scale=crate::ui_scale(&p.window) as f32;p.motion=Some((position.x as f32/scale,position.y as f32/scale));}
+            return;
+        }
+        self.save_main(app);
+        let Some(p)=self.panes.iter_mut().find(|p|p.window.id()==id)else{return};
+        let scale=crate::ui_scale(&p.window) as f32;
+        if matches!(event,WindowEvent::Moved(_)|WindowEvent::Resized(_)) {
+            if !p.window.is_maximized() && p.window.is_minimized()!=Some(true) {if let Some((pos,size))=crate::frame_of(&p.window){p.frame.pos=pos;p.frame.size=size;}}
+            p.frame.max=p.window.is_maximized();
+            app.state.native_frames.retain(|(w,_)|*w!=p.kind);app.state.native_frames.push((p.kind,p.frame));
+        }
+        if matches!(event,WindowEvent::CloseRequested) {app.state.hide(p.kind);self.changed=true;return;}
+        if matches!(event,WindowEvent::Focused(true)|WindowEvent::MouseInput{state:ElementState::Pressed,..}|WindowEvent::KeyboardInput{..}|WindowEvent::MouseWheel{..}) {if app.state.native_input!=Some(p.kind){self.changed|=app.state.playlist.popup.is_some()||app.state.menu_open.is_some();app.state.playlist.popup=None;app.state.menu_open=None;}app.state.raise(p.kind);app.state.native_input=Some(p.kind);app.auto_close.main_focused=true;}
+        if matches!(event,WindowEvent::Focused(false)) {p.motion=None;app.typing_release_all();}
+        if p.kind==Win::Browser && matches!(event,WindowEvent::CursorLeft{..}|WindowEvent::Focused(false)) {
+            p.motion=None;p.mouse=(-1.,-1.);
+            if app.state.browser_library.open {crate::views::browser::library::leave(app);p.window.request_redraw();}
+        }
+        if !needs_layout(&event,app.drag.is_some()||app.pressed.is_some()) {
+            if matches!(event,WindowEvent::Moved(_)|WindowEvent::ScaleFactorChanged{..}) {p.refresh_editors=true;}
+            if matches!(event,WindowEvent::Resized(_)|WindowEvent::ScaleFactorChanged{..}) {p.window.request_redraw();}
+            return;
+        }
+        let size=p.window.inner_size();if size.width==0||size.height==0{return;}
+        if p.canvas.pixmap.width()!=size.width||p.canvas.pixmap.height()!=size.height||p.canvas.scale!=scale {p.canvas.resize(size.width,size.height,scale);}
+        app.state.native_view=Some(p.kind);app.state.display_scale=p.window.scale_factor() as f32;app.mouse=p.mouse;
+        set_rack_parent(app,&p.window);app.hover=p.hover.clone();app.paint(&mut p.canvas,None);
+        if p.kind == Win::Mixer {
+            p.eq_visible = app.mixer_eq_region().is_some();
+        }
+        let redraw=matches!(event,WindowEvent::RedrawRequested);
+        if let Some(pos)=p.motion.take(){p.mouse=pos;app.mouse_move(pos.0,pos.1);if app.drag.is_some(){self.changed=true;}}
+        p.refresh_editors|=matches!(event,WindowEvent::Moved(_)|WindowEvent::ScaleFactorChanged{..});
+        self.changed|=matches!(event,WindowEvent::MouseInput{..}|WindowEvent::MouseWheel{..}|WindowEvent::KeyboardInput{..}|WindowEvent::DroppedFile(_)|WindowEvent::Focused(_));
+        match event {
+            WindowEvent::RedrawRequested=>{
+                p.painted=Instant::now();
+                if let (Some(w),Some(h))=(NonZeroU32::new(size.width),NonZeroU32::new(size.height)) {
+                    if p.surface.resize(w,h).is_ok() {if let Ok(mut buf)=p.surface.buffer_mut(){
+                        p.canvas.copy_to_xrgb(&mut buf);
+                        let _=buf.present();p.window.set_visible(true);
+                    }}
+                }
+            }
+            WindowEvent::Focused(false)=>{
+                app.cancel_effect_drag();
+                app.mouse_up();
+            }
+            WindowEvent::CursorMoved{position,..}=>{p.mouse=(position.x as f32/scale,position.y as f32/scale);app.mouse_move(p.mouse.0,p.mouse.1);}
+            WindowEvent::ModifiersChanged(m)=>{p.mods=m.state();app.ctrl=crate::ctrl(p.mods);app.shift=p.mods.shift_key();app.alt=p.mods.alt_key();}
+            WindowEvent::MouseInput{state,button,..}=>{
+                app.state.native_input=Some(p.kind);
+                if state==ElementState::Released {app.mouse_up();}else {
+                    let hit=app.hits.iter().rev().find(|h|h.rect.contains(p.mouse.0,p.mouse.1)).map(|h|h.action.clone());
+                    match (button,hit) {
+                        (MouseButton::Left,Some(Action::WinDrag(_)))=>{if p.last.elapsed().as_millis()<350{p.window.set_maximized(!p.window.is_maximized());}else{let _=p.window.drag_window();}p.last=Instant::now();}
+                        (MouseButton::Left,Some(Action::MaxWin(_)))=>p.window.set_maximized(!p.window.is_maximized()),
+                        (MouseButton::Left,Some(Action::MinWin(_)))=>p.window.set_minimized(true),
+                        (MouseButton::Left,_)=>app.mouse_down(),(MouseButton::Right,_)=>app.mouse_down_right(),(MouseButton::Middle,_)=>app.mouse_down_middle(),_=>{}
+                    }
+                }
+            }
+            WindowEvent::MouseWheel{delta,..}=>{app.state.native_input=Some(p.kind);let (x,y)=match delta{MouseScrollDelta::LineDelta(x,y)=>(x,y),MouseScrollDelta::PixelDelta(p)=>(p.x as f32/40.,p.y as f32/40.)};app.wheel(x,y,p.mods.shift_key(),crate::ctrl(p.mods));}
+            WindowEvent::KeyboardInput{event,..}=>{
+                app.state.native_input=Some(p.kind);
+                crate::keyboard_input(app, event, p.mods);
+            }
+            WindowEvent::HoveredFile(path)=>{crate::drop_preview::hover_file(app,path,Some(p.kind));p.window.request_redraw();},
+            WindowEvent::HoveredFileCancelled=>{crate::drop_preview::clear(app);p.window.request_redraw();},
+            WindowEvent::DroppedFile(path)=>{
+                crate::drop_preview::clear(app);
+                app.state.native_input=Some(p.kind);
+                let at=crate::screen_state(&p.window).map(|v|v.0);
+                #[cfg(target_os="linux")] let at=at.or_else(crate::plugin_window::pointer);
+                if let (Some((cx,cy)),Ok(origin))=(at,p.window.inner_position()){
+                    app.mouse=((cx-origin.x) as f32/scale,(cy-origin.y) as f32/scale);
+                }
+                if p.kind==Win::Playlist && !app.modal_open() && crate::views::browser::file_icon(&path.to_string_lossy())==crate::icons::Icon::FileAudio
+                    && let Some(row)=crate::playlist_tracks::drops::header_at(app){
+                    self.header_samples.get_or_insert_with(||(row,Vec::new())).1.push(path.to_string_lossy().into_owned());
+                }else if p.kind==Win::Playlist && !app.modal_open() && crate::views::browser::file_icon(&path.to_string_lossy())==crate::icons::Icon::FileAudio
+                    && let Some((track,tick))=app.playlist_drop_position(){
+                    self.stems.get_or_insert_with(||(track,tick,Vec::new())).2.push(path);
+                }else{app.drop_file_at_plugin(path,None);}
+            }
+            _=>{}
+        }
+        #[cfg(windows)] if p.kind==Win::Mixer && redraw && p.refresh_editors {for h in app.plugins.hosted.values(){if let Some(e)=&h.rack_editor{e.refresh();}}}
+        let style = crate::cursor_style(app, &p.window, app.cursor());
+        if p.cursor != Some(style) {
+            crate::apply_window_cursor(&p.window, _el, style, cache);
+            p.cursor = Some(style);
+        }
+        p.hover=app.hover.clone();
+        if redraw {p.refresh_editors=false;}
+    }
+
+    fn guide_event(&mut self, app: &mut App, id: WindowId, event: WindowEvent) {
+        if matches!(event, WindowEvent::CloseRequested) {
+            help::close_detached(app);
+            return;
+        }
+        if !help::detached_open(&app.state) {
+            return;
+        }
+        let Some(pane) = self.panes.iter_mut().find(|pane| pane.window.id() == id) else { return };
+        let scale = crate::ui_scale(&pane.window) as f32;
+        if matches!(event, WindowEvent::Moved(_) | WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. }) {
+            if !pane.window.is_maximized() && pane.window.is_minimized() != Some(true)
+                && let Some((pos, size)) = crate::frame_of(&pane.window)
+            {
+                pane.frame.pos = pos;
+                pane.frame.size = size;
+            }
+            pane.frame.max = pane.window.is_maximized();
+            pane.window.request_redraw();
+            return;
+        }
+        let size = pane.window.inner_size();
+        if size.width == 0 || size.height == 0 || pane.window.is_minimized() == Some(true) {
+            return;
+        }
+        if pane.canvas.pixmap.width() != size.width || pane.canvas.pixmap.height() != size.height || pane.canvas.scale != scale {
+            pane.canvas.resize(size.width, size.height, scale);
+        }
+        let height = help::detached_body_height(pane.canvas.size());
+        let mut repaint = true;
+        match event {
+            WindowEvent::ModifiersChanged(modifiers) => {
+                pane.mods = modifiers.state();
+                repaint = false;
+            }
+            WindowEvent::Focused(false) => {
+                pane.guide_press = None;
+                pane.guide_scroll = None;
+            }
+            WindowEvent::CursorLeft { .. } => {
+                pane.mouse = (-1., -1.);
+                pane.hover = None;
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                pane.mouse = (position.x as f32 / scale, position.y as f32 / scale);
+                if let Some((start, scroll, ratio)) = pane.guide_scroll {
+                    app.state.guide.scroll_by(scroll + (pane.mouse.1 - start) * ratio - app.state.guide.scroll, height);
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let amount = match delta {
+                    MouseScrollDelta::LineDelta(x, y) => -(x + y) * 63.,
+                    MouseScrollDelta::PixelDelta(p) => -(p.x + p.y) as f32 / scale,
+                };
+                help::scroll_detached(app, amount, height);
+            }
+            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                app.shift = pane.mods.shift_key();
+                let key = crate::normalize_shortcut_key(app, event.logical_key, event.physical_key, pane.mods);
+                help::guide_key(app, &key, crate::ctrl(pane.mods), pane.mods.alt_key(), true, height);
+            }
+            WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
+                self.main = Some(app.take_view_context());
+                paint_guide(app, pane);
+                let action = app.top_hit(pane.mouse.0, pane.mouse.1).map(|hit| hit.action.clone());
+                let target = match action {
+                    Some(Action::Settings(SAct::Help(hit))) => Some(hit),
+                    _ => None,
+                };
+                if state == ElementState::Pressed {
+                    pane.guide_press = target;
+                    if action == Some(Action::Scrollbar(Scroll::Guide)) && let Some(bar) = app.bar(Scroll::Guide) {
+                        let y = pane.mouse.1 - bar.track.y;
+                        let position = app.state.guide.scroll.clamp(0., bar.max);
+                        let thumb = bar.thumb_at(position);
+                        let next = if (thumb..=thumb + bar.thumb).contains(&y) {
+                            position
+                        } else {
+                            ((y - bar.thumb / 2.) * bar.ratio()).clamp(0., bar.max)
+                        };
+                        app.state.guide.scroll = next;
+                        pane.guide_scroll = Some((pane.mouse.1, next, bar.ratio()));
+                    }
+                } else {
+                    pane.guide_scroll = None;
+                    if let Some(hit) = pane.guide_press.take().filter(|hit| Some(*hit) == target) {
+                        help::guide_act(app, hit, true);
+                        self.changed |= matches!(hit, help::Hit::Detach | help::Hit::ShowWhere);
+                    }
+                }
+            }
+            WindowEvent::RedrawRequested => {
+                self.main = Some(app.take_view_context());
+                paint_guide(app, pane);
+                pane.painted = Instant::now();
+                if let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
+                    && pane.surface.resize(w, h).is_ok()
+                    && let Ok(mut buffer) = pane.surface.buffer_mut()
+                {
+                    pane.canvas.copy_to_xrgb(&mut buffer);
+                    let _ = buffer.present();
+                    pane.window.set_visible(true);
+                }
+                repaint = false;
+            }
+            _ => repaint = false,
+        }
+        if repaint {
+            pane.window.request_redraw();
+        }
+    }
+}
+
+fn paint_guide(app: &mut App, pane: &mut Pane) {
+    app.state.native_view = Some(Win::Guide);
+    app.mouse = pane.mouse;
+    app.hover = pane.hover.clone();
+    app.paint(&mut pane.canvas, None);
+    let next = app.top_hit(pane.mouse.0, pane.mouse.1).map(|hit| hit.action.clone());
+    if next != pane.hover {
+        pane.hover = next;
+        app.hover = pane.hover.clone();
+        app.paint(&mut pane.canvas, None);
+    }
+}
+
+// Match main.rs::frame_of: macOS stores points, Windows/Linux store pixels.
+fn frame_position(frame:MainWin)->winit::dpi::Position {
+    if cfg!(target_os="macos") {winit::dpi::LogicalPosition::new(frame.pos.0 as f64,frame.pos.1 as f64).into()}
+    else {PhysicalPosition::new(frame.pos.0,frame.pos.1).into()}
+}
+fn frame_size(frame:MainWin)->winit::dpi::Size {
+    if cfg!(target_os="macos") {LogicalSize::new(frame.size.0 as f64,frame.size.1 as f64).into()}
+    else {PhysicalSize::new(frame.size.0,frame.size.1).into()}
+}
+
+fn set_rack_parent(app:&mut App,window:&Window){
+    #[cfg(windows)] {use winit::raw_window_handle::{HasWindowHandle,RawWindowHandle};app.rack_parent=match window.window_handle().map(|h|h.as_raw()){Ok(RawWindowHandle::Win32(h))=>h.hwnd.get(),_=>0};}
+    #[cfg(target_os="macos")] {use winit::raw_window_handle::{HasWindowHandle,RawWindowHandle};app.rack_parent=match window.window_handle().map(|h|h.as_raw()){Ok(RawWindowHandle::AppKit(h))=>h.ns_view.as_ptr() as isize,_=>0};}
+    #[cfg(not(any(windows,target_os="macos")))] let _=(app,window);
+}
+
+// Focus/position/monitor notifications need no hit testing or rasterization.
+fn needs_layout(event:&WindowEvent,drag:bool)->bool {
+    matches!(event,WindowEvent::RedrawRequested|WindowEvent::MouseInput{..}|WindowEvent::MouseWheel{..}|WindowEvent::KeyboardInput{..}|WindowEvent::DroppedFile(_)|WindowEvent::HoveredFile(_)|WindowEvent::HoveredFileCancelled|WindowEvent::ModifiersChanged(_))
+        ||(drag&&matches!(event,WindowEvent::Focused(false)))
+}
+#[cfg(test)] mod monitor_tests {
+    use super::*;
+    #[test] fn detached_frame_uses_platform_units() {
+        let frame=MainWin{pos:(-1500,80),size:(1100,700),max:true};
+        for scale in [1.,1.25,2.] {
+            let k=if cfg!(target_os="macos"){scale}else{1.};
+            assert_eq!(frame_position(frame).to_physical::<i32>(scale),PhysicalPosition::new((-1500.*k) as i32,(80.*k) as i32));
+            assert_eq!(frame_size(frame).to_physical::<u32>(scale),PhysicalSize::new((1100.*k) as u32,(700.*k) as u32));
+        }
+    }
+    #[test] fn monitor_switch_notifications_do_not_paint() {
+        for _ in 0..1000 {
+            assert!(!needs_layout(&WindowEvent::Focused(true),false));
+            assert!(!needs_layout(&WindowEvent::Focused(false),false));
+            assert!(!needs_layout(&WindowEvent::Moved(PhysicalPosition::new(2000,100)),false));
+        }
+        assert!(needs_layout(&WindowEvent::RedrawRequested,false));
+        assert!(needs_layout(&WindowEvent::Focused(false),true),"finish an active drag in its own view");
+    }
+}
