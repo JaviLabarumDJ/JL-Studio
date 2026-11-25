@@ -27,6 +27,7 @@ pub const MAX_PACKAGE: u64 = 512 * 1024 * 1024;
 const MAX_DOCUMENT: usize = 24 * 1024 * 1024;
 const CHUNK: usize = 128 * 1024;
 const PROTOCOL: u32 = 3;
+const IROH_ALPN: &[u8] = b"mlstudio-collab/3";
 
 pub fn random_id() -> Result<String> {
     let mut b = [0; 32];
@@ -113,6 +114,8 @@ pub struct Invitation {
     certificate: String,
     secret: String,
     protocol: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub p2p: Option<iroh::EndpointAddr>,
 }
 impl Invitation {
     pub fn encode(&self) -> Result<String> {
@@ -145,6 +148,13 @@ impl Invitation {
     pub fn with_address(&self, address: String) -> Self {
         Self {
             address,
+            ..self.clone()
+        }
+    }
+    pub fn with_local_tcp(&self, address: String) -> Self {
+        Self {
+            address,
+            p2p: None,
             ..self.clone()
         }
     }
@@ -376,14 +386,89 @@ fn configure(s: &TcpStream) -> Result<()> {
     s.set_write_timeout(Some(Duration::from_secs(4)))
         .map_err(err)
 }
+struct IrohStream {
+    rt: Arc<tokio::runtime::Runtime>,
+    ep: Option<iroh::Endpoint>,
+    conn: iroh::endpoint::Connection,
+    send: iroh::endpoint::SendStream,
+    recv: iroh::endpoint::RecvStream,
+}
+impl Drop for IrohStream {
+    fn drop(&mut self) {
+        self.conn.close(0u32.into(), b"bye");
+        if let Some(ep) = self.ep.take() {
+            let _ = self.rt.block_on(async move {
+                let _ = tokio::time::timeout(Duration::from_millis(300), ep.close()).await;
+            });
+        }
+    }
+}
+impl Read for IrohStream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.rt.block_on(async {
+            match tokio::time::timeout(
+                Duration::from_secs(10),
+                tokio::io::AsyncReadExt::read(&mut self.recv, buf),
+            )
+            .await
+            {
+                Ok(res) => res,
+                Err(_) => Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "P2P read timed out",
+                )),
+            }
+        })
+    }
+}
+impl Write for IrohStream {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.rt.block_on(async {
+            match tokio::time::timeout(
+                Duration::from_secs(10),
+                tokio::io::AsyncWriteExt::write(&mut self.send, buf),
+            )
+            .await
+            {
+                Ok(res) => res,
+                Err(_) => Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "P2P write timed out",
+                )),
+            }
+        })
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.rt.block_on(async {
+            match tokio::time::timeout(
+                Duration::from_secs(10),
+                tokio::io::AsyncWriteExt::flush(&mut self.send),
+            )
+            .await
+            {
+                Ok(res) => res,
+                Err(_) => Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "P2P flush timed out",
+                )),
+            }
+        })
+    }
+}
 pub struct Host {
     pub invitation: Invitation,
     pub port: u16,
     stop: Arc<AtomicBool>,
+    iroh: Option<(Arc<tokio::runtime::Runtime>, iroh::Endpoint)>,
 }
 impl Drop for Host {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
+        if let Some((rt, ep)) = self.iroh.take() {
+            let _ = rt.block_on(async move {
+                let _ = tokio::time::timeout(Duration::from_millis(300), ep.close()).await;
+            });
+        }
     }
 }
 impl Host {
@@ -394,6 +479,32 @@ impl Host {
         package: PathBuf,
         doc: Document,
         validate: fn(&Document) -> Result<()>,
+    ) -> Result<Self> {
+        Self::start_inner(bind, address, package, doc, validate, false)
+    }
+    /// Starts a P2P-enabled session using iroh (QUIC hole punching + relay) plus a local
+    /// loopback TLS listener for the host's own client.
+    pub fn start_p2p(
+        package: PathBuf,
+        doc: Document,
+        validate: fn(&Document) -> Result<()>,
+    ) -> Result<Self> {
+        Self::start_inner(
+            "127.0.0.1:0".parse().unwrap(),
+            String::new(),
+            package,
+            doc,
+            validate,
+            true,
+        )
+    }
+    fn start_inner(
+        bind: SocketAddr,
+        address: String,
+        package: PathBuf,
+        doc: Document,
+        validate: fn(&Document) -> Result<()>,
+        enable_p2p: bool,
     ) -> Result<Self> {
         bounded(&doc)?;
         validate(&doc)?;
@@ -443,25 +554,32 @@ impl Host {
         )?));
         let count = Arc::new(AtomicUsize::new(0));
         let token = secret.clone();
+        let (tcp_session, tcp_audio, tcp_count, tcp_pkg, tcp_hash) = (
+            session.clone(),
+            audio.clone(),
+            count.clone(),
+            package.clone(),
+            hash.clone(),
+        );
         std::thread::Builder::new()
             .name("session-listener".into())
             .spawn(move || {
                 while !halted.load(Ordering::Acquire) {
                     match listener.accept() {
                         Ok((tcp, _)) => {
-                            if count.load(Ordering::Relaxed) >= 12 {
+                            if tcp_count.load(Ordering::Relaxed) >= 12 {
                                 continue;
                             }
-                            count.fetch_add(1, Ordering::Relaxed);
-                            let audio = audio.clone();
+                            tcp_count.fetch_add(1, Ordering::Relaxed);
+                            let audio = tcp_audio.clone();
                             let (config, session, stop, count, secret, path, hash) = (
                                 config.clone(),
-                                session.clone(),
+                                tcp_session.clone(),
                                 halted.clone(),
-                                count.clone(),
+                                tcp_count.clone(),
                                 token.clone(),
-                                package.clone(),
-                                hash.clone(),
+                                tcp_pkg.clone(),
+                                tcp_hash.clone(),
                             );
                             std::thread::spawn(move || {
                                 let result = serve(
@@ -483,15 +601,95 @@ impl Host {
                 }
             })
             .map_err(err)?;
+
+        let mut iroh_state = None;
+        let mut p2p_addr = None;
+        let mut final_address = address;
+        if enable_p2p {
+            let rt = Arc::new(
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
+                    .enable_all()
+                    .thread_name("collab-iroh-host")
+                    .build()
+                    .map_err(err)?,
+            );
+            let ep = rt.block_on(async {
+                let ep = iroh::Endpoint::builder(iroh::endpoint::presets::N0)
+                    .alpns(vec![IROH_ALPN.to_vec()])
+                    .bind()
+                    .await
+                    .map_err(err)?;
+                let _ = tokio::time::timeout(Duration::from_secs(4), ep.online()).await;
+                Ok::<_, String>(ep)
+            })?;
+            let addr = ep.addr();
+            final_address = format!("p2p:{}", addr.id.fmt_short());
+            p2p_addr = Some(addr);
+
+            let accept_ep = ep.clone();
+            let accept_rt = rt.clone();
+            let halted = stop.clone();
+            let token = secret.clone();
+            rt.spawn(async move {
+                while !halted.load(Ordering::Acquire) {
+                    let incoming = tokio::select! {
+                        inc = accept_ep.accept() => inc,
+                        _ = tokio::time::sleep(Duration::from_millis(200)) => continue,
+                    };
+                    let Some(incoming) = incoming else { break };
+                    if count.load(Ordering::Relaxed) >= 12 {
+                        continue;
+                    }
+                    let rt_stream = accept_rt.clone();
+                    let session = session.clone();
+                    let stop = halted.clone();
+                    let count = count.clone();
+                    let secret = token.clone();
+                    let path = package.clone();
+                    let hash = hash.clone();
+                    let audio = audio.clone();
+                    tokio::spawn(async move {
+                        let Ok(conn) = incoming.await else { return };
+                        let Ok((send, recv)) = conn.accept_bi().await else {
+                            return;
+                        };
+                        count.fetch_add(1, Ordering::Relaxed);
+                        std::thread::spawn(move || {
+                            let stream = IrohStream {
+                                rt: rt_stream,
+                                ep: None,
+                                conn,
+                                send,
+                                recv,
+                            };
+                            let result = serve_stream(
+                                stream, session, stop, &secret, &path, size, &hash, audio,
+                            );
+                            #[cfg(test)]
+                            if let Err(e) = &result {
+                                eprintln!("p2p session test: {e}");
+                            }
+                            let _ = result;
+                            count.fetch_sub(1, Ordering::Relaxed);
+                        });
+                    });
+                }
+            });
+            iroh_state = Some((rt, ep));
+        }
+
         Ok(Self {
             invitation: Invitation {
-                address,
+                address: final_address,
                 certificate: B64.encode(cert.as_ref()),
                 secret,
                 protocol: PROTOCOL,
+                p2p: p2p_addr,
             },
             port,
             stop,
+            iroh: iroh_state,
         })
     }
 }
@@ -508,7 +706,19 @@ fn serve(
 ) -> Result<()> {
     configure(&tcp)?;
     let conn = rustls::ServerConnection::new(config).map_err(err)?;
-    let mut io = rustls::StreamOwned::new(conn, tcp);
+    let io = rustls::StreamOwned::new(conn, tcp);
+    serve_stream(io, session, stop, secret, path, size, hash, audio)
+}
+fn serve_stream<S: Read + Write>(
+    mut io: S,
+    session: Arc<Mutex<Session>>,
+    stop: Arc<AtomicBool>,
+    secret: &str,
+    path: &Path,
+    size: u64,
+    hash: &str,
+    audio: Arc<Mutex<assets::Store>>,
+) -> Result<()> {
     let Request::Hello {
         protocol,
         secret: token,
@@ -614,8 +824,34 @@ fn serve(
     }
     Ok(())
 }
+enum Transport {
+    Tls(Box<rustls::StreamOwned<rustls::ClientConnection, TcpStream>>),
+    Iroh(Box<IrohStream>),
+}
+impl Read for Transport {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Tls(s) => s.read(buf),
+            Self::Iroh(s) => s.read(buf),
+        }
+    }
+}
+impl Write for Transport {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Tls(s) => s.write(buf),
+            Self::Iroh(s) => s.write(buf),
+        }
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Tls(s) => s.flush(),
+            Self::Iroh(s) => s.flush(),
+        }
+    }
+}
 pub struct Client {
-    io: rustls::StreamOwned<rustls::ClientConnection, TcpStream>,
+    io: Transport,
     pub document: Document,
     pub revision: u64,
     size: u64,
@@ -623,33 +859,66 @@ pub struct Client {
 }
 impl Client {
     pub fn connect(i: &Invitation, peer: &str, name: &str) -> Result<Self> {
-        let cert =
-            rustls::pki_types::CertificateDer::from(B64.decode(&i.certificate).map_err(err)?);
-        let mut roots = rustls::RootCertStore::empty();
-        roots.add(cert).map_err(err)?;
-        let config = rustls::ClientConfig::builder_with_provider(Arc::new(
-            rustls::crypto::ring::default_provider(),
-        ))
-        .with_safe_default_protocol_versions()
-        .map_err(err)?
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-        let mut connected = None;
-        for addr in i.address.to_socket_addrs().map_err(err)?.take(4) {
-            if let Ok(s) = TcpStream::connect_timeout(&addr, Duration::from_secs(3)) {
-                connected = Some(s);
-                break;
+        let mut io = if let Some(p2p_addr) = &i.p2p {
+            let rt = Arc::new(
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
+                    .enable_all()
+                    .thread_name("collab-iroh-client")
+                    .build()
+                    .map_err(err)?,
+            );
+            let (ep, conn, send, recv) = rt.block_on(async {
+                let ep = iroh::Endpoint::builder(iroh::endpoint::presets::N0)
+                    .bind()
+                    .await
+                    .map_err(err)?;
+                let conn = tokio::time::timeout(
+                    Duration::from_secs(12),
+                    ep.connect(p2p_addr.clone(), IROH_ALPN),
+                )
+                .await
+                .map_err(|_| "Cannot reach P2P host. Check your internet connection.")?
+                .map_err(err)?;
+                let (send, recv) = conn.open_bi().await.map_err(err)?;
+                Ok::<_, String>((ep, conn, send, recv))
+            })?;
+            Transport::Iroh(Box::new(IrohStream {
+                rt,
+                ep: Some(ep),
+                conn,
+                send,
+                recv,
+            }))
+        } else {
+            let cert =
+                rustls::pki_types::CertificateDer::from(B64.decode(&i.certificate).map_err(err)?);
+            let mut roots = rustls::RootCertStore::empty();
+            roots.add(cert).map_err(err)?;
+            let config = rustls::ClientConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_safe_default_protocol_versions()
+            .map_err(err)?
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+            let mut connected = None;
+            for addr in i.address.to_socket_addrs().map_err(err)?.take(4) {
+                if let Ok(s) = TcpStream::connect_timeout(&addr, Duration::from_secs(3)) {
+                    connected = Some(s);
+                    break;
+                }
             }
-        }
-        let tcp = connected
-            .ok_or("Cannot reach host. Check the address, firewall and port forwarding.")?;
-        configure(&tcp)?;
-        let conn = rustls::ClientConnection::new(
-            Arc::new(config),
-            rustls::pki_types::ServerName::try_from("mlstudio-session").unwrap(),
-        )
-        .map_err(err)?;
-        let mut io = rustls::StreamOwned::new(conn, tcp);
+            let tcp = connected
+                .ok_or("Cannot reach host. Check the address, firewall and port forwarding.")?;
+            configure(&tcp)?;
+            let conn = rustls::ClientConnection::new(
+                Arc::new(config),
+                rustls::pki_types::ServerName::try_from("mlstudio-session").unwrap(),
+            )
+            .map_err(err)?;
+            Transport::Tls(Box::new(rustls::StreamOwned::new(conn, tcp)))
+        };
         send(
             &mut io,
             &Request::Hello {
@@ -971,5 +1240,204 @@ mod tests {
         drop(one);
         drop(two);
         let _ = std::fs::remove_dir_all(root);
+    }
+    #[test]
+    fn invitation_backwards_compatibility_and_local_tcp_strip() {
+        let legacy_json = json!({
+            "address": "192.168.1.50:32190",
+            "certificate": "AQID",
+            "secret": random_id().unwrap(),
+            "protocol": PROTOCOL,
+        });
+        let encoded = format!(
+            "mlstudio-session:{}",
+            B64.encode(serde_json::to_vec(&legacy_json).unwrap())
+        );
+        let parsed = Invitation::parse(&encoded).unwrap();
+        assert_eq!(parsed.address, "192.168.1.50:32190");
+        assert!(parsed.p2p.is_none());
+    }
+    #[test]
+    fn p2p_iroh_two_clients_sync_package_audio_and_reconnect() {
+        let root = std::env::temp_dir().join(format!("ml-p2p-test-{}", random_id().unwrap()));
+        std::fs::create_dir_all(root.join("host_dir")).unwrap();
+        std::fs::create_dir_all(root.join("peer1")).unwrap();
+        std::fs::create_dir_all(root.join("peer2")).unwrap();
+
+        let package = root.join("host_dir").join("host.zip");
+        std::fs::write(&package, b"p2p package contents 123456").unwrap();
+
+        let host = Host::start_p2p(package, Document::new(), valid).unwrap();
+        assert!(host.invitation.p2p.is_some());
+        assert!(host.invitation.address.starts_with("p2p:"));
+
+        // Encode & parse invitation just like copy/paste between users.
+        let encoded = host.invitation.encode().unwrap();
+        let invite = Invitation::parse(&encoded).unwrap();
+        assert!(invite.p2p.is_some());
+
+        // Local loopback invite strips p2p so host's own client uses 127.0.0.1.
+        let local_invite = host
+            .invitation
+            .with_local_tcp(format!("127.0.0.1:{}", host.port));
+        assert!(local_invite.p2p.is_none());
+
+        let peer_local_id = random_id().unwrap();
+        let mut local_client = Client::connect(&local_invite, &peer_local_id, "HostLocal").unwrap();
+
+        // Two remote clients connect via iroh P2P.
+        let peer1_id = random_id().unwrap();
+        let peer2_id = random_id().unwrap();
+        let mut one = Client::connect(&invite, &peer1_id, "RemoteOne").unwrap();
+        let mut two = Client::connect(&invite, &peer2_id, "RemoteTwo").unwrap();
+
+        // Download package over P2P and verify integrity.
+        two.download(&root.join("peer2").join("received.zip"), &AtomicBool::new(false))
+            .unwrap();
+        assert_eq!(
+            std::fs::read(root.join("peer2").join("received.zip")).unwrap(),
+            b"p2p package contents 123456"
+        );
+
+        // Sync edits & playback across P2P and local loopback.
+        let proposal = Proposal {
+            seq: 1,
+            changes: vec![Change {
+                key: "pattern/1".into(),
+                before: None,
+                after: Some(json!([60, 64, 67])),
+            }],
+        };
+        let pb = Playback {
+            playing: true,
+            song: true,
+            tick: 192.0,
+            tempo: 145.0,
+            ppq: 96,
+            pattern: 1,
+        };
+        let u1 = local_client
+            .poll_playback(Some(proposal.clone()), Some(pb))
+            .unwrap();
+        assert_eq!(u1.accepted, Some(true));
+
+        let u2 = two.poll(None).unwrap();
+        assert_eq!(u2.revision, 1);
+        assert_eq!(u2.changes.len(), 1);
+        assert_eq!(u2.playback.as_ref().map(|p| p.tempo), Some(145.0));
+
+        // Audio asset upload from peer1 -> host -> download to peer2 over P2P.
+        let store1 = assets::Store::new(root.join("peer1").join("assets")).unwrap();
+        let store2 = assets::Store::new(root.join("peer2").join("assets")).unwrap();
+        let audio_bytes = vec![42u8; 200_000];
+        let mut hasher = Sha256::new();
+        hasher.update(&audio_bytes);
+        let hex: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        let asset_id = format!("{hex}.wav");
+        let total = audio_bytes.len() as u64;
+        for (i, chunk) in audio_bytes.chunks(CHUNK).enumerate() {
+            store1
+                .write(&asset_id, total, (i * CHUNK) as u64, chunk)
+                .unwrap();
+        }
+        one.upload_audio(&asset_id, &store1, &AtomicBool::new(false))
+            .unwrap();
+        two.download_audio(&asset_id, &store2, &AtomicBool::new(false))
+            .unwrap();
+        assert_eq!(std::fs::read(store2.root.join(&asset_id)).unwrap(), audio_bytes);
+
+        // Reconnect deduplication over P2P.
+        drop(one);
+        let mut one = Client::connect(&invite, &peer1_id, "RemoteOne").unwrap();
+        let p_dup = Proposal {
+            seq: 1,
+            changes: vec![Change {
+                key: "pattern/2".into(),
+                before: None,
+                after: Some(json!([48])),
+            }],
+        };
+        assert_eq!(one.poll(Some(p_dup.clone())).unwrap().accepted, Some(true));
+        drop(one);
+        let mut one = Client::connect(&invite, &peer1_id, "RemoteOne").unwrap();
+        assert_eq!(one.poll(Some(p_dup)).unwrap().revision, 2);
+
+        // Wrong secret rejected over P2P.
+        let wrong = Invitation {
+            secret: random_id().unwrap(),
+            ..invite.clone()
+        };
+        assert!(Client::connect(&wrong, &random_id().unwrap(), "Intruder").is_err());
+
+        drop(local_client);
+        drop(one);
+        drop(two);
+        drop(host);
+        let _ = std::fs::remove_dir_all(root);
+    }
+    #[test]
+    fn p2p_iroh_concurrent_conflict_and_atomic_rejection() {
+        let root = std::env::temp_dir().join(format!("ml-p2p-conflict-{}", random_id().unwrap()));
+        std::fs::create_dir_all(&root).unwrap();
+        let package = root.join("host.zip");
+        std::fs::write(&package, b"conflict test").unwrap();
+
+        let host = Host::start_p2p(package, Document::new(), valid).unwrap();
+        let invite = Invitation::parse(&host.invitation.encode().unwrap()).unwrap();
+        let mut a = Client::connect(&invite, &random_id().unwrap(), "PeerA").unwrap();
+        let mut b = Client::connect(&invite, &random_id().unwrap(), "PeerB").unwrap();
+
+        let edit_a = Proposal {
+            seq: 1,
+            changes: vec![Change {
+                key: "mixer/1/pan".into(),
+                before: None,
+                after: Some(json!(0.5)),
+            }],
+        };
+        let edit_b = Proposal {
+            seq: 1,
+            changes: vec![Change {
+                key: "mixer/1/pan".into(),
+                before: None,
+                after: Some(json!(-0.5)),
+            }],
+        };
+        assert_eq!(a.poll(Some(edit_a)).unwrap().accepted, Some(true));
+        let res_b = b.poll(Some(edit_b)).unwrap();
+        assert_eq!(res_b.accepted, Some(false));
+        assert!(res_b.rejection.is_some());
+        assert_eq!(res_b.revision, 1);
+        assert_eq!(b.document.get("mixer/1/pan"), Some(&json!(0.5)));
+
+        drop(a);
+        drop(b);
+        drop(host);
+        let _ = std::fs::remove_dir_all(root);
+    }
+    #[test]
+    fn p2p_iroh_unreachable_host_fails_cleanly() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let random_id_key = rt.block_on(async {
+            let ep = iroh::Endpoint::builder(iroh::endpoint::presets::N0)
+                .bind()
+                .await
+                .unwrap();
+            let id = ep.id();
+            ep.close().await;
+            id
+        });
+        let unreachable = Invitation {
+            address: format!("p2p:{}", random_id_key.fmt_short()),
+            certificate: "AQID".into(),
+            secret: random_id().unwrap(),
+            protocol: PROTOCOL,
+            p2p: Some(iroh::EndpointAddr::new(random_id_key)),
+        };
+        let res = Client::connect(&unreachable, &random_id().unwrap(), "Guest");
+        assert!(res.is_err());
     }
 }
