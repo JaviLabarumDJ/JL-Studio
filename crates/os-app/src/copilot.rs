@@ -436,6 +436,57 @@ fn gemini_tools() -> Vec<Value> {
     vec![json!({ "functionDeclarations": decls })]
 }
 
+fn post_json_with_retry(
+    agent: &ureq::Agent,
+    url: &str,
+    auth_bearer: Option<&str>,
+    goog_key: Option<&str>,
+    body_str: &str,
+    event_tx: &mpsc::Sender<WorkerEvent>,
+) -> Result<Value, String> {
+    let delays = [2u64, 4, 8];
+    for attempt in 0..=delays.len() {
+        let mut req = agent.post(url).set("Content-Type", "application/json");
+        if let Some(tok) = auth_bearer {
+            req = req.set("Authorization", &format!("Bearer {tok}"));
+        }
+        if let Some(key) = goog_key {
+            req = req.set("x-goog-api-key", key);
+        }
+        match req.send_string(body_str) {
+            Ok(r) => {
+                return serde_json::from_reader(r.into_reader())
+                    .map_err(|e| format!("JSON inválido del modelo: {e}"));
+            }
+            Err(ureq::Error::Status(code, r)) => {
+                let detail = r.into_string().unwrap_or_default();
+                let transient = matches!(code, 429 | 500 | 502 | 503 | 504);
+                if transient && attempt < delays.len() {
+                    let wait = delays[attempt];
+                    let _ = event_tx.send(WorkerEvent::Status(format!(
+                        "Modelo ocupado ({code}), reintentando en {wait}s..."
+                    )));
+                    std::thread::sleep(Duration::from_secs(wait));
+                    continue;
+                }
+                return Err(format!("Error HTTP ({code}): {detail}"));
+            }
+            Err(e) => {
+                if attempt < delays.len() {
+                    let wait = delays[attempt];
+                    let _ = event_tx.send(WorkerEvent::Status(format!(
+                        "Error de red, reintentando en {wait}s..."
+                    )));
+                    std::thread::sleep(Duration::from_secs(wait));
+                    continue;
+                }
+                return Err(format!("Error de conexión: {e}"));
+            }
+        }
+    }
+    unreachable!()
+}
+
 fn run_agent_loop(
     backend: Backend,
     model: &str,
@@ -484,20 +535,8 @@ fn run_agent_loop(
                     })
                 };
 
-                let mut req = agent.post(&url).set("Content-Type", "application/json");
-                if backend == Backend::OpenAi && !api_key.is_empty() {
-                    req = req.set("Authorization", &format!("Bearer {api_key}"));
-                }
-                let raw_resp = match req.send_string(&body.to_string()) {
-                    Ok(r) => r,
-                    Err(ureq::Error::Status(code, r)) => {
-                        let detail = r.into_string().unwrap_or_default();
-                        return Err(format!("Error HTTP {code}: {detail}"));
-                    }
-                    Err(e) => return Err(format!("Error de conexión: {e}")),
-                };
-                let resp: Value = serde_json::from_reader(raw_resp.into_reader())
-                    .map_err(|e| format!("JSON inválido del modelo: {e}"))?;
+                let auth = (backend == Backend::OpenAi && !api_key.is_empty()).then_some(api_key);
+                let resp = post_json_with_retry(&agent, &url, auth, None, &body.to_string(), event_tx)?;
 
                 let msg = if backend == Backend::Ollama {
                     resp["message"].clone()
@@ -565,21 +604,14 @@ fn run_agent_loop(
                     "contents": contents,
                     "tools": tools,
                 });
-                let raw_resp = match agent
-                    .post(&url)
-                    .set("Content-Type", "application/json")
-                    .set("x-goog-api-key", api_key.trim())
-                    .send_string(&body.to_string())
-                {
-                    Ok(r) => r,
-                    Err(ureq::Error::Status(code, r)) => {
-                        let detail = r.into_string().unwrap_or_default();
-                        return Err(format!("Error Gemini ({code}): {detail}"));
-                    }
-                    Err(e) => return Err(format!("Error de conexión Gemini: {e}")),
-                };
-                let resp: Value = serde_json::from_reader(raw_resp.into_reader())
-                    .map_err(|e| format!("JSON inválido de Gemini: {e}"))?;
+                let resp = post_json_with_retry(
+                    &agent,
+                    &url,
+                    None,
+                    Some(api_key.trim()),
+                    &body.to_string(),
+                    event_tx,
+                )?;
 
                 let candidate_content = resp["candidates"][0]["content"].clone();
                 let parts = candidate_content["parts"].as_array().cloned().unwrap_or_default();
