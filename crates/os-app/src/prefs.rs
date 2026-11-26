@@ -91,7 +91,7 @@ pub struct Slider {
 pub const MAIN_GUI_SCALING: Combo = Combo {
     key: "main_gui_scaling",
     label: "Main GUI scaling",
-    choices: &["System", "100%", "125%", "150%", "175%", "200%", "250%", "300%", "350%", "400%"],
+    choices: &["System", "75%", "85%", "90%", "100%", "110%", "125%", "150%", "175%", "200%", "250%", "300%", "350%", "400%"],
     default: 0,
 };
 
@@ -100,7 +100,7 @@ pub const MAIN_GUI_SCALING: Combo = Combo {
 pub const POPUPS_SCALING: Combo = Combo {
     key: "popups_scaling",
     label: "Pop-ups scaling",
-    choices: &["Main", "100%", "125%", "150%", "175%", "200%", "250%", "300%", "350%", "400%"],
+    choices: &["Main", "75%", "85%", "90%", "100%", "110%", "125%", "150%", "175%", "200%", "250%", "300%", "350%", "400%"],
     default: 0,
 };
 
@@ -111,7 +111,7 @@ pub const POPUPS_SCALING: Combo = Combo {
 pub const TOOLBARS_SCALING: Combo = Combo {
     key: "toolbars_scaling",
     label: "Toolbars scaling",
-    choices: &["Main", "100%", "125%", "150%", "175%", "200%", "250%", "300%", "350%", "400%"],
+    choices: &["Main", "75%", "85%", "90%", "100%", "110%", "125%", "150%", "175%", "200%", "250%", "300%", "350%", "400%"],
     default: 0,
 };
 
@@ -1002,16 +1002,16 @@ mod tests {
 junk
 main_gui_scaling=150%
 ");
-        assert_eq!(index_in(&s, &MAIN_GUI_SCALING), 3);
+        assert_eq!(index_in(&s, &MAIN_GUI_SCALING), 7);
         assert!(check_in(&s, &AUTO_CHECK_UPDATES), "missing: the default");
         assert!(!check_in(&Store::parse("auto_check_updates=0"), &AUTO_CHECK_UPDATES));
         let s = Store::parse("auto_check_updates=yes
-main_gui_scaling=90%
+main_gui_scaling=60%
 main_gui_scaling = 200% 
 ");
         assert!(check_in(&s, &AUTO_CHECK_UPDATES));
-        assert_eq!(index_in(&s, &MAIN_GUI_SCALING), 5, "the last line counts");
-        assert_eq!(index_in(&Store::parse("main_gui_scaling=90%"), &MAIN_GUI_SCALING), 0);
+        assert_eq!(index_in(&s, &MAIN_GUI_SCALING), 9, "the last line counts");
+        assert_eq!(index_in(&Store::parse("main_gui_scaling=60%"), &MAIN_GUI_SCALING), 0);
     }
 
     #[test]
@@ -1020,8 +1020,8 @@ main_gui_scaling = 200%
         assert!(!toggle(&AUTO_CHECK_UPDATES) && !check(&AUTO_CHECK_UPDATES));
         set_check(&AUTO_CHECK_UPDATES, true);
         assert!(check(&AUTO_CHECK_UPDATES));
-        set_choice(&MAIN_GUI_SCALING, 2);
-        assert_eq!((index(&MAIN_GUI_SCALING), choice(&MAIN_GUI_SCALING)), (2, "125%"));
+        set_choice(&MAIN_GUI_SCALING, 6);
+        assert_eq!((index(&MAIN_GUI_SCALING), choice(&MAIN_GUI_SCALING)), (6, "125%"));
         set_choice(&MAIN_GUI_SCALING, 99);
         assert_eq!(choice(&MAIN_GUI_SCALING), "125%");
         assert_eq!(find_combo("Main GUI scaling"), Some(&MAIN_GUI_SCALING));
@@ -1179,7 +1179,7 @@ main_gui_scaling = 200%
         assert_eq!(p.items[0].mark, crate::playlist::Mark::Radio(true));
         assert!(p.items[1..].iter().all(|it| it.mark == crate::playlist::Mark::Radio(false)));
         assert!((p.y - r.bottom()).abs() < 2.0, "under its box");
-        let item = hit_rect(&app, &Action::PlPopup(2));
+        let item = hit_rect(&app, &Action::PlPopup(6));
         click(&mut app, &mut c, item);
         assert!(app.state.playlist.popup.is_none());
         assert_eq!(choice(&MAIN_GUI_SCALING), "125%");
@@ -1187,7 +1187,7 @@ main_gui_scaling = 200%
         // The menu marks the new choice.
         let r = combo(&app);
         click(&mut app, &mut c, r);
-        assert_eq!(app.state.playlist.popup.as_ref().unwrap().items[2].mark, crate::playlist::Mark::Radio(true));
+        assert_eq!(app.state.playlist.popup.as_ref().unwrap().items[6].mark, crate::playlist::Mark::Radio(true));
         app.state.playlist.popup = None;
         // Both preferences start folded and can be changed independently.
         app.state.settings.folded.clear();
@@ -1226,7 +1226,7 @@ main_gui_scaling = 200%
         click(&mut app, &mut c, r);
         let main = hit_rect(&app, &Action::PlPopup(1));
         assert_eq!(main.h, 19.0, "Main at 100 %");
-        let item = hit_rect(&app, &Action::PlPopup(5));
+        let item = hit_rect(&app, &Action::PlPopup(9));
         click(&mut app, &mut c, item);
         assert_eq!((choice(&POPUPS_SCALING), app.state.message.as_deref()), ("200%", Some("Pop-ups scaling: 200%")));
         // At 200 % on a 100 % window: item rows 12k + 7 = 31 px, the panel's border 2 px, text twice as wide.
@@ -1240,7 +1240,7 @@ main_gui_scaling = 200%
         click(&mut app, &mut c, first);
         assert_eq!(choice(&POPUPS_SCALING), "Main", "the click finds the scaled entry");
         // Menu bar dropdowns too.
-        set_choice(&POPUPS_SCALING, 3);
+        set_choice(&POPUPS_SCALING, 7);
         app.state.settings.open = false;
         app.state.menu_open = Some(0);
         app.paint(&mut c, None);

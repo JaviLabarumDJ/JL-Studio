@@ -1877,7 +1877,7 @@ mod tests {
         let Ok(mut c) = Canvas::new(4600, 1080, 1.0) else { return };
         let mut app = App::new(None);
         app.state.bar.layout = crate::toolbar::Layout::classic();
-        set_choice(&TOOLBARS_SCALING, 5);
+        set_choice(&TOOLBARS_SCALING, 9);
         app.paint(&mut c, None);
         // The metronome (580, 4, 30 x 33 in the band's px), pressed near its bottom-right corner, where the Main layout
         // has another button.
@@ -1905,7 +1905,7 @@ mod tests {
         assert!((save.y - file.bottom() - (save0.y - main.bottom())).abs() <= 1., "the menu stays anchored to the resized toolbar");
         app.state.menu_open = None;
         app.state.playlist.popup = None;
-        set_choice(&TOOLBARS_SCALING, 5);
+        set_choice(&TOOLBARS_SCALING, 9);
         app.paint(&mut c, None);
         // The tempo: the first decimal steps by 0.1.
         let tempo = hit(&app, &Action::Tempo);
