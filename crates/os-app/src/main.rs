@@ -47,6 +47,7 @@ mod audio_bench;
 #[cfg(test)]
 mod open_bench;
 mod browser;
+mod browser_index;
 #[cfg(any(windows, target_os = "macos"))]
 mod sample_drag;
 mod browser_files;

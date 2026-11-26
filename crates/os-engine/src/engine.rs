@@ -1718,7 +1718,7 @@ impl Engine {
                         slot_on: m.slot_on,
                         slot_mix: m.slot_mix.map(mix_level),
                         routes,
-                        latency: (m.latency_out, m.latency_in),
+                        latency: m.latency(),
                         ..MixTrack::unity()
                     };
                     // At the start of the song every gain is at its target.
@@ -2444,8 +2444,9 @@ impl Engine {
             return;
         }
         self.fade_len = ((f64::from(self.rate) * PAUSE_FADE_SECONDS).round() as u32).max(1);
-        // Out from where a fade in has got to.
-        self.fade_out = self.fade_len - self.fade_in.min(self.fade_len);
+        // Out from where a fade in has got to: at least a frame, as a fade in that has not started yet is at silence
+        // and a fade out of none would be no pause at all (fuzz campaign).
+        self.fade_out = (self.fade_len - self.fade_in.min(self.fade_len)).max(1);
         self.fade_in = 0;
     }
 

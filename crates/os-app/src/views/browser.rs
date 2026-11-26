@@ -443,20 +443,8 @@ pub fn list_dir(s: &State, dir: &Path) -> Rc<Vec<Entry>> {
             let rd=entries;
             rd.flatten()
                 .filter_map(|e| {
+                    let md = crate::browser_index::listed_metadata(&e)?;
                     let name = e.file_name().to_string_lossy().into_owned();
-                    let low = name.to_ascii_lowercase();
-                    let md = e.metadata().ok()?;
-                    #[cfg(windows)]
-                    {
-                        use std::os::windows::fs::MetadataExt;
-                        // FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM
-                        if md.file_attributes() & 0x6 != 0 {
-                            return None;
-                        }
-                    }
-                    if name.starts_with('.') || low == "desktop.ini" || low == "thumbs.db" {
-                        return None;
-                    }
                     Some(Entry { name, path: e.path(), dir: md.is_dir(), size: md.len(), modified: md.modified().ok() })
                 })
                 .collect()

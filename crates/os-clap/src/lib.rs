@@ -592,6 +592,14 @@ fn param_mod(time: u32, param: u32, id: i32, key: u8, amount: f64) -> clap_event
     }
 }
 
+fn split_nih_json(data: &[u8]) -> (bool, &[u8]) {
+    if data.len() > 8 && data[8] == b'{' {
+        (true, &data[8..])
+    } else {
+        (false, data)
+    }
+}
+
 /// A plugin instance.
 pub struct Plugin {
     pub desc: Descriptor,
@@ -607,6 +615,9 @@ pub struct Plugin {
     /// The render extension (offline or realtime), if the plugin has one.
     render: *const clap_plugin_render,
     offline: bool,
+    /// Linked into this program ([`Library::from_entry`]): a Lemon plugin, whose state the host frames itself
+    /// ([`Plugin::load_state`]).
+    linked: bool,
     /// The voice-info extension (the plugin's polyphony), if it has one.
     voice_info: *const clap_plugin_voice_info,
     /// The voices it plays, from the notes sent and the voice ends it reports (spec: audio/voices.md §2).
@@ -868,6 +879,7 @@ impl Plugin {
             ) && dialects & (CLAP_NOTE_DIALECT_MIDI | CLAP_NOTE_DIALECT_MIDI_MPE) != 0;
             let ranges = params::read_ranges(params, plugin);
             Ok(Plugin {
+                linked: lib._lib.is_none(),
                 desc,
                 plugin,
                 gui,
@@ -1425,6 +1437,26 @@ impl Plugin {
             r.1 += n;
             n as i64
         }
+        // A Lemon plugin's state is nih-plug's JSON after an 8-byte length, and nih-plug believes
+        // that length: it reserves it before reading. Refuse a lying length and accept raw JSON or
+        // accurately framed JSON.
+        let framed;
+        let data = if self.linked {
+            if data.first() == Some(&b'{') {
+                framed = [&(data.len() as u64).to_le_bytes()[..], data].concat();
+                &framed[..]
+            } else if data.len() > 8 && data[8] == b'{' {
+                let claimed = u64::from_le_bytes(data[..8].try_into().unwrap());
+                if claimed != (data.len() - 8) as u64 {
+                    return false;
+                }
+                data
+            } else {
+                return false;
+            }
+        } else {
+            data
+        };
         let mut r = Reader(data, 0);
         let stream = clap_istream { ctx: &mut r as *mut Reader as *mut c_void, read: Some(read) };
         unsafe { (*self.state).load.is_some_and(|f| f(self.plugin, &stream)) }
@@ -2516,6 +2548,23 @@ mod tests {
         let entry = &lemon_parametric_eq_2::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void;
         let lib = unsafe { Library::from_entry(entry, Path::new("Lemon Parametric EQ.clap")) }.expect("linked EQ");
         os_host::Library::create(lib.clone() as Arc<dyn os_host::Library>, &lib.plugins[0].id).unwrap()
+    }
+
+    /// A Lemon plugin's state is framed by the host: a length that lies (a file's or a client's) is refused instead of
+    /// being reserved, and its JSON loads with or without the length before it.
+    #[test]
+    fn a_linked_plugins_state_length_is_the_hosts() {
+        let eq = lemon_eq();
+        let mut p = eq.lock().unwrap();
+        let saved = p.save_state().expect("a state");
+        let (prefixed, json) = split_nih_json(&saved);
+        assert!(prefixed);
+        let mut lying = u64::MAX.to_le_bytes().to_vec();
+        lying.extend_from_slice(json);
+        assert!(!p.load_state(&lying));
+        assert!(!p.load_state(&[43, 83, 189, 186, 181, 152, 1, 19, 105]));
+        assert!(p.load_state(&saved));
+        assert!(p.load_state(json));
     }
 
     /// A note's own levels (`use_note_levels`): the pan as a pan note expression with the note's id right after its
