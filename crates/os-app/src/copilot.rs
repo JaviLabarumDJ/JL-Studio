@@ -8,7 +8,8 @@ use std::time::Duration;
 use crate::app::App;
 use crate::dialog::Body;
 
-const MAX_TOOL_STEPS: usize = 16;
+const MAX_TOOL_STEPS: usize = 32;
+const SPECIALIST_TOOL_STEPS: usize = 20;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Backend {
@@ -53,7 +54,7 @@ impl Backend {
     pub fn default_model(self) -> &'static str {
         match self {
             Backend::Ollama => "qwen2.5:7b",
-            Backend::Gemini => "gemini-2.5-flash",
+            Backend::Gemini => "gemini-2.5-pro",
             Backend::OpenAi => "gpt-4o-mini",
         }
     }
@@ -341,13 +342,42 @@ pub fn tick(app: &mut App) {
 }
 
 fn system_prompt() -> &'static str {
-    "Eres el Piloto de Producción Musical de JL Studio (un DAW compatible con FL Studio). \
-Siempre empieza leyendo el proyecto con `lemon_state` y `lemon_audio_analyze` antes de editar. \
-Para componer acordes, bajos, arpegios o ritmos usa `lemon_compose` (es mucho más rápido y limpio que añadir notas sueltas). \
-Para rutear grupos, sidechain o gain staging usa `lemon_mix_setup`. \
-Para cargar instrumentos/efectos usa `lemon_plugins`. \
-Si el usuario pide un análisis completo, revisa tempo, pistas sin rutear, niveles/clipping, Master Assistant y densidad de notas, y da recomendaciones concretas (o aplícalas si te lo pidió). \
-Responde siempre en español, de forma clara y concisa indicando exactamente qué analizaste o modificaste."
+    "Eres el Director Musical y Productor Ejecutivo de JL Studio (un DAW profesional compatible con FL Studio). \
+Tienes un equipo de 4 especialistas bajo tu mando a los que puedes delegar bloques complejos con `lemon_delegate`: \
+1) `drums`: busca samples REALES en las librerías del usuario con `lemon_samples` (Kick, Clap, Closed Hat, Open Hat, Perc, Riser/Crash — NUNCA uses osciladores crudos para batería si hay samples disponibles), los carga con `lemon_channel(op: 'load_sample')`, programa grooves profesionales con `lemon_compose(op: 'drum_pattern')` y humanización, y asigna cada uno a su pista del mixer. \
+2) `melody`: carga sintetizadores reales (`Lemon 3x Osc`, `Citrus`, `Lemon Wave`, etc. con `lemon_plugins`), ajusta sus parámetros con `lemon_parameter` para que suenen cálidos, filtrados y con pegada (NUNCA dejes un sinte con el preset crudo por defecto si puedes moldear su filtro/envolvente), y compone líneas de bajo (`rolling`/`offbeat`), acordes/stabs y arpegios. \
+3) `arrangement`: organiza el tema completo en la Playlist (`lemon_clips`) en formato Extended Mix profesional (Intro DJ, Build-up con snare roll y riser, Drop 1, Breakdown atmosférico, Build-up 2, Drop 2, Outro DJ) y crea automatizaciones de tensión (`lemon_automation`). \
+4) `mixing`: hace el ruteo, `sidechain` (Kick -> Bajo y Kick -> Stabs con `lemon_mix_setup`), carga `Lemon Parametric EQ`, `Lemon Soft Clipper`, `Lemon Reverb` y `Lemon Delay` en los inserts adecuados, ajusta niveles con `gain_stage` dejando -4 a -6 dB de headroom, y verifica con `lemon_audio_analyze` que nada sature. \
+\nREGLAS DE ORO: \
+- Para cualquier petición de crear o producir un tema completo, empieza leyendo `lemon_state` y `lemon_transport(op: 'song')` + BPM, y luego coordina a tu equipo llamando a `lemon_delegate` en orden: `drums` -> `melody` -> `arrangement` -> `mixing`. \
+- Si el usuario pide algo puntual (ej. solo analizar o solo un patrón), puedes hacerlo directo o delegar al especialista correspondiente. \
+- Responde siempre en español, detallando con precisión los samples reales cargados, sintetizadores, patrones, efectos, ruteos y verificación final."
+}
+
+fn specialist_prompt(role: &str) -> &'static str {
+    match role {
+        "drums" => "Eres el Especialista de Batería y Groove de JL Studio. Tu única misión es construir una sección rítmica profesional y con pegada real: \
+1) Usa `lemon_samples` para buscar samples reales (.wav/.flac/.mp3) de Kick, Clap, Closed Hat, Open Hat y Percusión en las carpetas del usuario (ej. query: 'kick', 'clap', 'closed hat', 'open hat', 'perc'). \
+2) Cárgales con `lemon_channel(op: 'load_sample', path: ...)` en canales separados y asígnales pistas de mixer distintas (ej. tracks 1..5). \
+3) Programa patrones separados o combinados con `lemon_compose(op: 'drum_pattern', style: 'kick_4x4' | 'clap_2_4' | 'offbeat_hat' | 'closed_hat_16th' | 'perc_groove' | 'snare_roll', humanize: 10)` en los patrones que indique el Director. \
+Devuelve un resumen exacto de qué samples cargaste, en qué filas/pistas del mixer y en qué patrones.",
+        "melody" => "Eres el Especialista de Bajo, Síntesis y Armonía de JL Studio. Tu misión es crear bajos con peso y melodías/stabs memorables: \
+1) Lista plugins con `lemon_plugins(op: 'list')` y carga sintetizadores (`Lemon 3x Osc`, `Citrus`, `Lemon Wave`) en nuevos canales, asignándoles pistas del mixer libres. \
+2) Lee sus parámetros con `lemon_parameter(op: 'read')` y ajusta cutoff/envolvente/nivel con `lemon_parameter(op: 'set')` para que el bajo y los stabs suenen limpios y musicales (nunca un pitido agudo sin filtrar). \
+3) Usa `lemon_compose` (`bassline` estilo `rolling`/`offbeat`, `chord_progression`, `arp`) con `humanize: 8` en la tonalidad y patrones indicados. \
+Devuelve un resumen exacto de canales, pistas de mixer, parámetros ajustados y patrones.",
+        "arrangement" => "Eres el Especialista de Arreglo y Tensión de JL Studio. Tu misión es montar un arreglo profesional en la Playlist: \
+1) Inspecciona canales y patrones con `lemon_state`. \
+2) Coloca clips en la Playlist con `lemon_clips(op: 'add', ...)` construyendo secciones reales (Intro DJ, Build-up, Drop 1, Breakdown, Build-up 2, Drop 2, Outro DJ) sin solapar clips erróneamente y cubriendo toda la duración pedida. \
+3) Si hay parámetros automatizables o volumen/filtro, crea curvas de tensión con `lemon_automation`. \
+Devuelve la estructura exacta por compases.",
+        "mixing" => "Eres el Ingeniero de Mezcla y Mastering de JL Studio. Tu misión es que el tema suene limpio, potente y sin clipping: \
+1) Inspecciona canales, inserts y efectos con `lemon_state` y `lemon_audio_analyze`. \
+2) Configura `sidechain` (`lemon_mix_setup` op: 'sidechain') del Kick hacia el Bajo y hacia los Synths/Stabs. \
+3) Carga `Lemon Parametric EQ`, `Lemon Soft Clipper`, `Lemon Reverb` y `Lemon Delay` en las pistas apropiadas (`lemon_plugins` op: 'add_effect'). \
+4) Ajusta los faders con `lemon_mix_setup(op: 'gain_stage')` para mantener balance y headroom (-4 a -6 dB), y vuelve a ejecutar `lemon_audio_analyze` al final para confirmar.",
+        _ => system_prompt(),
+    }
 }
 
 fn invoke_ui_tool(
@@ -376,9 +406,26 @@ fn invoke_ui_tool(
     }
 }
 
-fn openai_tools() -> Vec<Value> {
-    crate::ai_commands::tools()
-        .into_iter()
+fn director_tools() -> Vec<Value> {
+    let mut t = crate::ai_commands::tools();
+    t.push(json!({
+        "name": "lemon_delegate",
+        "description": "Delegate a focused production block to a specialist AI sub-agent with direct DAW tool access. Roles: 'drums' (searches real samples & programs grooves), 'melody' (loads/shapes synths, bassline, chords, arp), 'arrangement' (builds Extended Mix in Playlist & automations), 'mixing' (sidechain, EQ, FX, gain staging, Master check).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "role": {"type": "string", "enum": ["drums", "melody", "arrangement", "mixing"]},
+                "task": {"type": "string"}
+            },
+            "required": ["role", "task"]
+        }
+    }));
+    t
+}
+
+fn openai_tools(include_delegate: bool) -> Vec<Value> {
+    let list = if include_delegate { director_tools() } else { crate::ai_commands::tools() };
+    list.into_iter()
         .map(|t| {
             json!({
                 "type": "function",
@@ -413,8 +460,9 @@ fn sanitize_gemini_schema(v: Value) -> Value {
     }
 }
 
-fn gemini_tools() -> Vec<Value> {
-    let decls: Vec<Value> = crate::ai_commands::tools()
+fn gemini_tools(include_delegate: bool) -> Vec<Value> {
+    let list = if include_delegate { director_tools() } else { crate::ai_commands::tools() };
+    let decls: Vec<Value> = list
         .into_iter()
         .map(|t| {
             let schema = sanitize_gemini_schema(t["inputSchema"].clone());
@@ -487,12 +535,81 @@ fn post_json_with_retry(
     unreachable!()
 }
 
+fn dispatch_tool(
+    backend: Backend,
+    model: &str,
+    api_key: &str,
+    base_url: &str,
+    allow_delegate: bool,
+    tool_tx: &mpsc::Sender<ToolReq>,
+    event_tx: &mpsc::Sender<WorkerEvent>,
+    name: &str,
+    args: Value,
+) -> String {
+    if allow_delegate && name == "lemon_delegate" {
+        let role = args["role"].as_str().unwrap_or("drums");
+        let task = args["task"].as_str().unwrap_or("");
+        let badge = match role {
+            "drums" => "🥁 Especialista de Batería",
+            "melody" => "🎹 Especialista de Bajo/Melodía",
+            "arrangement" => "🎛️ Especialista de Arreglo",
+            "mixing" => "🎚️ Ingeniero de Mezcla",
+            _ => "🎧 Especialista",
+        };
+        let _ = event_tx.send(WorkerEvent::Status(format!("{badge} trabajando...")));
+        let _ = event_tx.send(WorkerEvent::ToolLog(format!("▸ Delegando en {badge}")));
+        let sub_history = vec![(ChatRole::User, task.to_string())];
+        return match run_agent_with_prompt(
+            backend,
+            model,
+            api_key,
+            base_url,
+            &sub_history,
+            specialist_prompt(role),
+            false,
+            SPECIALIST_TOOL_STEPS,
+            tool_tx,
+            event_tx,
+        ) {
+            Ok(summary) => json!({"role": role, "status": "completed", "summary": summary}).to_string(),
+            Err(err) => json!({"role": role, "status": "error", "error": err}).to_string(),
+        };
+    }
+    invoke_ui_tool(tool_tx, event_tx, name, args)
+}
+
 fn run_agent_loop(
     backend: Backend,
     model: &str,
     api_key: &str,
     base_url: &str,
     history_msgs: &[(ChatRole, String)],
+    tool_tx: &mpsc::Sender<ToolReq>,
+    event_tx: &mpsc::Sender<WorkerEvent>,
+) -> Result<String, String> {
+    run_agent_with_prompt(
+        backend,
+        model,
+        api_key,
+        base_url,
+        history_msgs,
+        system_prompt(),
+        true,
+        MAX_TOOL_STEPS,
+        tool_tx,
+        event_tx,
+    )
+}
+
+fn run_agent_with_prompt(
+    backend: Backend,
+    model: &str,
+    api_key: &str,
+    base_url: &str,
+    history_msgs: &[(ChatRole, String)],
+    sys_prompt: &str,
+    allow_delegate: bool,
+    max_steps: usize,
     tool_tx: &mpsc::Sender<ToolReq>,
     event_tx: &mpsc::Sender<WorkerEvent>,
 ) -> Result<String, String> {
@@ -503,7 +620,7 @@ fn run_agent_loop(
 
     match backend {
         Backend::Ollama | Backend::OpenAi => {
-            let mut msgs = vec![json!({"role": "system", "content": system_prompt()})];
+            let mut msgs = vec![json!({"role": "system", "content": sys_prompt})];
             for (r, txt) in history_msgs {
                 let role = match r {
                     ChatRole::User => "user",
@@ -511,14 +628,14 @@ fn run_agent_loop(
                 };
                 msgs.push(json!({"role": role, "content": txt}));
             }
-            let tools = openai_tools();
+            let tools = openai_tools(allow_delegate);
             let url = if backend == Backend::Ollama {
                 format!("{}/api/chat", base_url.trim_end_matches('/'))
             } else {
                 format!("{}/chat/completions", base_url.trim_end_matches('/'))
             };
 
-            for _ in 0..MAX_TOOL_STEPS {
+            for _ in 0..max_steps {
                 let _ = event_tx.send(WorkerEvent::Status("Esperando respuesta del modelo...".into()));
                 let body = if backend == Backend::Ollama {
                     json!({
@@ -565,7 +682,17 @@ fn run_agent_loop(
                     } else {
                         json!({})
                     };
-                    let out = invoke_ui_tool(tool_tx, event_tx, &name, args);
+                    let out = dispatch_tool(
+                        backend,
+                        model,
+                        api_key,
+                        base_url,
+                        allow_delegate,
+                        tool_tx,
+                        event_tx,
+                        &name,
+                        args,
+                    );
                     let id = tc["id"].as_str().map(str::to_string).unwrap_or_else(|| format!("call_{idx}"));
                     msgs.push(json!({
                         "role": "tool",
@@ -595,12 +722,12 @@ fn run_agent_loop(
                     })
                 })
                 .collect();
-            let tools = gemini_tools();
+            let tools = gemini_tools(allow_delegate);
 
-            for _ in 0..MAX_TOOL_STEPS {
+            for _ in 0..max_steps {
                 let _ = event_tx.send(WorkerEvent::Status("Consultando Gemini...".into()));
                 let body = json!({
-                    "systemInstruction": {"parts": [{"text": system_prompt()}]},
+                    "systemInstruction": {"parts": [{"text": sys_prompt}]},
                     "contents": contents,
                     "tools": tools,
                 });
@@ -641,7 +768,17 @@ fn run_agent_loop(
                 for fc in fn_calls {
                     let name = fc["name"].as_str().unwrap_or("").to_string();
                     let args = fc.get("args").cloned().unwrap_or_else(|| json!({}));
-                    let out_str = invoke_ui_tool(tool_tx, event_tx, &name, args);
+                    let out_str = dispatch_tool(
+                        backend,
+                        model,
+                        api_key,
+                        base_url,
+                        allow_delegate,
+                        tool_tx,
+                        event_tx,
+                        &name,
+                        args,
+                    );
                     let out_json: Value = serde_json::from_str(&out_str).unwrap_or_else(|_| json!({"result": out_str}));
                     response_parts.push(json!({
                         "functionResponse": {

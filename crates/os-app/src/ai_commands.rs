@@ -98,7 +98,8 @@ pub fn tools() -> Vec<Value> {
  ("lemon_history","Undo or redo one DAW history step.",json!({"op":s}),vec!["op"]),
  ("lemon_scroll","Scroll an app view to a logical position; view: mixer, playlist_x, playlist_y, rack, piano_x, piano_y.",json!({"view":s,"position":n}),vec!["view","position"]),
  ("lemon_automation","Create an automation clip for a host target ID, or replace its points. op create needs target,name,value. op points needs channel (channel index), points array of {beat,value}; positions>=0, values0..1. Existing DAW undo is retained.",json!({"op":s,"target":i,"name":s,"value":n,"channel":i,"points":{"type":"array","maxItems":4096,"items":{"type":"object","properties":{"beat":n,"value":n},"required":["beat","value"],"additionalProperties":false}}}),vec!["op"]),
- ("lemon_compose","High-level musical composer for the selected pattern in one undoable step. op: chord_progression, bassline, arp, drum_pattern, humanize, clear_channel. Uses channel row (0-based), root (e.g. 'F', 'C#', 'Bb'), scale (minor, major, dorian, phrygian, harmonic_minor), octave (1..7), bars (1..16), chords (e.g. ['i','VI','III','VII']), style (four_on_floor, house, trap, hiphop, breakbeat), velocity (1..127), humanize (0..30), replace (bool).",json!({"op":s,"row":i,"root":s,"scale":s,"octave":i,"bars":i,"chords":{"type":"array","items":s},"style":s,"velocity":i,"humanize":i,"replace":b}),vec!["op","row"]),
+ ("lemon_compose","High-level musical composer for the selected pattern in one undoable step. op: chord_progression, bassline, arp, drum_pattern, humanize, clear_channel. Uses channel row (0-based), root (e.g. 'F', 'C#', 'Bb'), scale (minor, major, dorian, phrygian, harmonic_minor), octave (1..7), bars (1..16), chords (e.g. ['i','VI','III','VII']), style (kick_4x4, clap_2_4, offbeat_hat, closed_hat_16th, perc_groove, snare_roll, four_on_floor, house, trap, hiphop, breakbeat; or for bassline: rolling, offbeat, syncopated, sub), velocity (1..127), humanize (0..30), replace (bool).",json!({"op":s,"row":i,"root":s,"scale":s,"octave":i,"bars":i,"chords":{"type":"array","items":s},"style":s,"velocity":i,"humanize":i,"replace":b}),vec!["op","row"]),
+ ("lemon_samples","Search the user's installed sample libraries (Vengeance, SampleFocus, Techno bundles, etc.) for real audio files (.wav/.flac/.ogg/.mp3) matching query (e.g. 'kick', 'clap', 'hat', 'perc', 'riser', 'bass'). Returns absolute paths for lemon_channel load_sample.",json!({"query":s,"limit":i}),vec!["query"]),
  ("lemon_mix_setup","High-level mixer routing & gain staging in one undoable step. op: route_group (routes channel rows to destination track), sidechain (sidechains source track to destination track), gain_stage (sets volume 0..1 on track or sources).",json!({"op":s,"sources":{"type":"array","items":i},"destination":i,"track":i,"value":n}),vec!["op"]),
  ("lemon_audio_analyze","Analyze live mixer peak/VU meters, clipping/hot tracks, master headroom, channel routing, effects/Master Assistant status, and pattern note density.",json!({}),vec![]),
  ("lemon_checkpoint","Create an undo checkpoint (op: 'mark') or roll back all edits since a checkpoint (op: 'rollback', checkpoint: integer).",json!({"op":s,"checkpoint":i}),vec!["op"]),
@@ -849,6 +850,7 @@ fn execute(app: &mut App, name: &str, a: &Value, local: bool) -> Result<Value> {
             _ => return Err("Unknown automation operation".into()),
         },
         "lemon_compose" => return compose(app, a),
+        "lemon_samples" => return search_samples(app, a),
         "lemon_mix_setup" => return mix_setup(app, a),
         "lemon_audio_analyze" => return Ok(audio_analyze(app)),
         "lemon_checkpoint" => match text(a, "op")? {
@@ -1008,15 +1010,29 @@ fn compose(app: &mut App, a: &Value) -> Result<Value> {
             }
         }
         "bassline" => {
-            let pattern_steps = [0u32, 3, 6, 8, 11, 14];
+            let style = a["style"].as_str().unwrap_or("rolling");
+            let pattern_steps: &[u32] = match style {
+                "offbeat" => &[2, 6, 10, 14],
+                "sub" => &[0, 8],
+                "syncopated" => &[0, 3, 6, 10, 12, 15],
+                "rolling" | _ => &[0, 2, 3, 6, 8, 10, 11, 14],
+            };
             for bar in 0..bars {
                 let sym = &chords[bar as usize % chords.len()];
                 let (deg, _) = chord_degrees(sym);
                 let root_n = base_midi.saturating_add(scale[deg % 7]);
+                let oct_n = root_n.saturating_add(12);
                 let fifth_n = root_n.saturating_add(7);
                 for (i, &st) in pattern_steps.iter().enumerate() {
-                    let key = if i % 3 == 2 { fifth_n } else { root_n };
-                    push_note(bar * bar_ticks + st * step_ticks, step_ticks * 2, key, bar as usize * 6 + i);
+                    let key = if i % 4 == 3 {
+                        oct_n
+                    } else if i % 3 == 2 {
+                        fifth_n
+                    } else {
+                        root_n
+                    };
+                    let len = if style == "sub" { step_ticks * 6 } else { step_ticks * 2 - step_ticks / 4 };
+                    push_note(bar * bar_ticks + st * step_ticks, len, key, bar as usize * 8 + i);
                 }
             }
         }
@@ -1034,15 +1050,48 @@ fn compose(app: &mut App, a: &Value) -> Result<Value> {
         "drum_pattern" => {
             let style = a["style"].as_str().unwrap_or("four_on_floor");
             let key = a["root"].as_str().and_then(parse_root_note).map(|pc| 12 * (octave + 1) + pc).unwrap_or(60);
-            let steps: &[u32] = match style {
-                "trap" => &[0, 6, 10, 14],
-                "hiphop" => &[0, 3, 8, 10],
-                "breakbeat" => &[0, 6, 10, 12],
-                "house" | "four_on_floor" | _ => &[0, 4, 8, 12],
+            let steps_vel: Vec<(u32, u8)> = match style {
+                "clap_2_4" => vec![(4, base_vel), (12, base_vel)],
+                "offbeat_hat" => vec![(2, base_vel), (6, base_vel), (10, base_vel), (14, base_vel)],
+                "closed_hat_16th" => (0..16u32)
+                    .map(|st| {
+                        let v = match st % 4 {
+                            0 => (base_vel as u16 * 85 / 100) as u8,
+                            2 => base_vel,
+                            1 => (base_vel as u16 * 52 / 100) as u8,
+                            _ => (base_vel as u16 * 64 / 100) as u8,
+                        };
+                        (st, v.max(25))
+                    })
+                    .collect(),
+                "perc_groove" => vec![
+                    (0, (base_vel as u16 * 70 / 100) as u8),
+                    (3, (base_vel as u16 * 92 / 100) as u8),
+                    (6, (base_vel as u16 * 65 / 100) as u8),
+                    (7, base_vel),
+                    (10, (base_vel as u16 * 80 / 100) as u8),
+                    (13, (base_vel as u16 * 58 / 100) as u8),
+                    (14, (base_vel as u16 * 95 / 100) as u8),
+                ],
+                "snare_roll" => (0..16u32)
+                    .map(|st| (st, (48 + st * 5).min(125) as u8))
+                    .collect(),
+                "trap" => vec![(0, base_vel), (6, 95), (10, base_vel), (14, 90)],
+                "hiphop" => vec![(0, base_vel), (3, 85), (8, base_vel), (10, 95)],
+                "breakbeat" => vec![(0, base_vel), (6, 95), (10, base_vel), (12, 90)],
+                "kick_4x4" | "house" | "four_on_floor" | _ => vec![(0, base_vel), (4, base_vel), (8, base_vel), (12, base_vel)],
             };
             for bar in 0..bars {
-                for (i, &st) in steps.iter().enumerate() {
-                    push_note(bar * bar_ticks + st * step_ticks, step_ticks, key, bar as usize * 8 + i);
+                for (i, &(st, vel)) in steps_vel.iter().enumerate() {
+                    let jitter_v = if humanize > 0 { ((i as i32 * 29 + 7) % 9 - 4) * humanize / 4 } else { 0 };
+                    let jitter_t = if humanize > 0 { ((i as i32 * 19 + 3) % 5 - 2) * (step_ticks as i32 / 12) } else { 0 };
+                    let pos = bar * bar_ticks + st * step_ticks;
+                    let mut n = os_model::Note::step(ch_index, (pos as i32 + jitter_t).max(0) as u32);
+                    n.length = step_ticks.max(1);
+                    n.key = u16::from(key.min(127));
+                    n.velocity = (vel as i32 + jitter_v).clamp(1, 127) as u8;
+                    pat.notes.push(n);
+                    added += 1;
                 }
             }
         }
@@ -1183,4 +1232,55 @@ fn audio_analyze(app: &App) -> Value {
         "channel_density": channel_density,
         "master_assistant": {"loaded": master_assistant_loaded, "enabled": master_assistant_active},
     })
+}
+
+fn search_samples(app: &App, a: &Value) -> Result<Value> {
+    let query = text(a, "query")?.trim().to_ascii_lowercase();
+    let limit = a["limit"].as_u64().unwrap_or(20).clamp(1, 50) as usize;
+    let terms: Vec<&str> = query.split_whitespace().collect();
+    if terms.is_empty() {
+        return Err("Provide a sample search query (e.g. 'kick', 'clap', 'hat', 'perc')".into());
+    }
+    let roots = crate::views::browser::library_roots(&app.state);
+    let mut queue: std::collections::VecDeque<std::path::PathBuf> = roots.into_iter().collect();
+    let mut matches = Vec::new();
+    let mut scanned = 0usize;
+    while let Some(dir) = queue.pop_front() {
+        if matches.len() >= limit || scanned >= 12_000 {
+            break;
+        }
+        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        for entry in rd.flatten() {
+            scanned += 1;
+            if scanned >= 12_000 {
+                break;
+            }
+            let p = entry.path();
+            let Ok(ft) = entry.file_type() else { continue };
+            if ft.is_dir() {
+                queue.push_back(p);
+                continue;
+            }
+            let ext_ok = p.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+                matches!(e.to_ascii_lowercase().as_str(), "wav" | "flac" | "ogg" | "mp3" | "aiff" | "aif")
+            });
+            if !ext_ok {
+                continue;
+            }
+            let hay = p.to_string_lossy().to_ascii_lowercase();
+            if terms.iter().all(|t| hay.contains(t)) {
+                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+                let folder = p.parent().and_then(|d| d.file_name()).and_then(|n| n.to_str()).unwrap_or("").to_string();
+                matches.push(json!({
+                    "name": name,
+                    "folder": folder,
+                    "path": p.to_string_lossy(),
+                }));
+                if matches.len() >= limit {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(json!({"query": query, "count": matches.len(), "samples": matches}))
 }
