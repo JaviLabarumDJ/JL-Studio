@@ -254,7 +254,7 @@ impl Painter {
         let (w, h) = device(scale);
         let mut frame = Canvas::new(w, h, scale).ok()?;
         frame.set_theme_font(2, None);
-        let logo = Pixmap::decode_png(include_bytes!("../assets/ml-splash.png")).ok()?;
+        let logo = Pixmap::decode_png(include_bytes!("../assets/jl-splash.png")).ok()?;
         Some(Self { scale, frame, logo })
     }
 
@@ -924,7 +924,7 @@ mod tests {
             let first = painter.paint(&look).clone();
             let at = |p: &Pixmap, x: f32, y: f32| p.pixel((x * scale) as u32, (y * scale) as u32).unwrap();
             assert_eq!(at(&first, 0.0, 0.0).alpha(), 0);
-            assert_eq!(at(&first, 250.0, 180.0).alpha(), 0);
+            assert_eq!(at(&first, 10.0, 10.0).alpha(), 0);
             assert!(first.pixels().iter().any(|p| p.alpha() == 255 && p.blue() > 230 && p.red() < 50));
             look.progress = 1.0;
             let last = painter.paint(&look);
