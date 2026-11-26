@@ -764,7 +764,7 @@ pub fn category(d: &Descriptor) -> &'static str {
 }
 
 /// The built-in plugins' vendor in the menus.
-pub const BUILTIN_VENDOR: &str = "ML Studio";
+pub const BUILTIN_VENDOR: &str = "JL Studio";
 pub const NO_VENDOR: &str = "(unknown vendor)";
 
 /// A plugin as the menus list it.

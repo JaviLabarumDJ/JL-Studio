@@ -26,7 +26,7 @@ pub const NO_TRACKS: &str = "Empty (no tracks)";
 /// The settings file's keys: the picked template and the project file last opened or saved.
 const TEMPLATE_KEY: &str = "default_template";
 const LAST_KEY: &str = "last_project";
-const FACTORY_CATEGORY: &str = "ML Studio";
+const FACTORY_CATEGORY: &str = "JL Studio";
 const LEGACY_FACTORY_CATEGORY: &str = "Lemon Studio";
 const FACTORY_NAME: &str = "ML Mix Template";
 const FACTORY_BYTES: &[u8] = include_bytes!("../assets/templates/ML Mix Template.flp");
