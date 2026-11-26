@@ -89,7 +89,7 @@ fn tools_dir() -> Result<PathBuf, String> {
         return Err("Visualizer video export requires 64-bit Windows".into());
     }
     os_paths::user_dir().map(|p| p.join("ML Visualizer Video Tools"))
-        .ok_or_else(|| "The ML Studio profile is unavailable".into())
+        .ok_or_else(|| "The JL Studio profile is unavailable".into())
 }
 
 fn error(app: &mut App, message: &str) {
@@ -483,7 +483,7 @@ fn ensure_tools(
         .open(root.join("encoder.lock"))
         .map_err(io_error)?;
     lock.try_lock()
-        .map_err(|_| "Another ML Studio instance is setting up the video encoder")?;
+        .map_err(|_| "Another JL Studio instance is setting up the video encoder")?;
     if legacy {
         let worker = root.join(WORKER);
         if check_file(&worker, c.renderer_size, &c.renderer_sha256).is_err() {

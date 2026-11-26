@@ -814,9 +814,9 @@ fn local_plugins(s: &State, out: &mut Vec<Row>) {
         entries.sort_by_cached_key(|(entry, _)| entry.label.to_lowercase());
     }
     for (index, (label, entries)) in [
-        "ML Studio Plugins",
+        "JL Studio Plugins",
         "Third-party Plugins",
-        "ML Studio Community Plugins",
+        "JL Studio Community Plugins",
     ]
     .into_iter()
     .zip(groups)

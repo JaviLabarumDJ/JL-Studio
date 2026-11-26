@@ -1281,7 +1281,7 @@ fn paint_identity(ui: &mut Ui, s: &State, row: IdentityRow, r: Rect) {
                 box_.y + 87.0,
                 box_.w - 28.0,
                 theme.text,
-                "ML Studio   01:23   Mixer",
+                "JL Studio   01:23   Mixer",
             );
             ui.c.text_clip(
                 Font::new(13),
@@ -1970,7 +1970,7 @@ impl App {
                 Then::ExportTheme,
             )
             .name("My Theme.flstheme")
-            .filter("ML Studio theme", &["flstheme"])
+            .filter("JL Studio theme", &["flstheme"])
         } else {
             FileDlg::new(
                 Mode::Open,

@@ -168,9 +168,9 @@ enum CheckResult {
     Downloaded(PathBuf),
 }
 
-fn check(download: impl FnOnce() -> bool) -> Result<CheckResult> {
-    let bytes = get(FEED, 65536).map_err(|e| format!("Could not fetch the update feed ({e})"))?;
-    check_release(&bytes, &public_key()?, download)
+fn check(_download: impl FnOnce() -> bool) -> Result<CheckResult> {
+    // JL Studio is a custom local/fork build; do not overwrite it with upstream ML Studio binaries.
+    Ok(CheckResult::Current)
 }
 
 fn check_release(bytes: &[u8], key: &VerifyingKey, download: impl FnOnce() -> bool) -> Result<CheckResult> {

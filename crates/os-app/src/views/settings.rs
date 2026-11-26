@@ -334,10 +334,10 @@ pub const LIVE: &[&str] = &[
 /// MIDI: lists the devices again (`App::midi_refresh`); Update MIDI scripts stays greyed with its reason.
 pub const REFRESH_MIDI: &str = "Refresh device list";
 pub const UPDATE_SCRIPTS: &str = "Update MIDI scripts";
-const NO_SCRIPTS: &str = "ML Studio has no MIDI scripts";
+const NO_SCRIPTS: &str = "JL Studio has no MIDI scripts";
 /// MIDI: Performance mode MIDI channel stays greyed with its reason.
 pub const PERFORMANCE_CHANNEL: &str = "Performance mode MIDI channel";
-const NO_PERFORMANCE: &str = "ML Studio has no playlist performance mode";
+const NO_PERFORMANCE: &str = "JL Studio has no playlist performance mode";
 
 /// `LIVE`, and the checks declared in `crate::prefs`.
 fn live(key: &str) -> bool {
@@ -422,7 +422,7 @@ impl SettingsUi {
 pub const MODE: &str = "Mode";
 pub const MODE_SHARED: &str = "Shared (other programs play too)";
 #[cfg(not(target_os = "linux"))]
-pub const MODE_EXCLUSIVE: &str = "Exclusive (ML Studio alone, smaller buffers)";
+pub const MODE_EXCLUSIVE: &str = "Exclusive (JL Studio alone, smaller buffers)";
 #[cfg(target_os = "linux")]
 pub const MODE_EXCLUSIVE: &str = "Exclusive (ALSA directly, past the sound server)";
 const MODE_ASIO: &str = "Mode: for Windows devices (an ASIO driver plays on its own terms)";
@@ -849,9 +849,9 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                         let device = st.audio.device.as_deref().unwrap_or("the default device");
                         let alone = exclusive.then(|| {
                             let line = if cfg!(windows) {
-                                format!("Other programs can't play on {device} while ML Studio has it open.")
+                                format!("Other programs can't play on {device} while JL Studio has it open.")
                             } else {
-                                format!("Other programs can't play on {device} while ML Studio has it open through ALSA (it lets go once nothing plays).")
+                                format!("Other programs can't play on {device} while JL Studio has it open through ALSA (it lets go once nothing plays).")
                             };
                             Text(line, true)
                         });
@@ -987,8 +987,8 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                     Check("Show undo history in the browser when undoing changes", false),
                     Check("Show recent changes at the top", false),
                 ]),
-                gf("Support ML Studio", true, vec![
-                    txt(if crate::donate::active() { "Lifetime supporter active. Thank you!" } else { "ML Studio is free. Supporter activation removes donation reminders." }),
+                gf("Support JL Studio", true, vec![
+                    txt(if crate::donate::active() { "Lifetime supporter active. Thank you!" } else { "JL Studio is free. Supporter activation removes donation reminders." }),
                     Buttons(vec![(crate::donate::ACTIVATE, 180.0)]),
                 ]),
                 gf("Hints and warnings", true, vec![
@@ -1229,7 +1229,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
         }
         DEBUG => {
             let mut lines = vec![
-                format!("ML Studio {}", crate::updates::display_version()),
+                format!("JL Studio {}", crate::updates::display_version()),
                 format!("Project: {}", s.path.as_ref().map_or("(new project)".into(), |p| p.display().to_string())),
                 format!("Saved by: {}", s.project.saved_by),
                 format!("PPQ {}, tempo {:.3}", s.project.ppq, s.tempo),
@@ -1251,7 +1251,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
             g("", [
                 vec![
                     Gap(20.0),
-                    Big("ML Studio".into()),
+                    Big("JL Studio".into()),
                     txt(&format!("Version {} · build {}", crate::updates::display_version(), crate::updates::VERSION)),
                     txt("Customized and maintained by Michael Lane."),
                     txt("A digital audio workstation written in Rust."),
@@ -1276,7 +1276,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
             .collect()),
             g("Noto Symbols font licence", include_str!("../../../os-ui/fonts/NotoSymbols/OFL.txt").lines().map(txt).collect()),
             g("Licence", vec![
-                Big("ML Studio needs no account.".into()),
+                Big("JL Studio needs no account.".into()),
                 txt("It is free software: you can redistribute it and/or modify it under the terms"),
                 txt("of the GNU General Public License, version 3 or (at your option) any later version."),
                 txt("It comes with ABSOLUTELY NO WARRANTY. Licence: https://www.gnu.org/licenses/"),

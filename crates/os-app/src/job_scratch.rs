@@ -57,7 +57,7 @@ fn sweep(parent: &Path, kind: &str, files: &[&str], grace: Duration) {
 const REVISION_FILES: &str = ".ml-revision-files.json";
 const REVISION_LOCK: &str = ".ml-revision-in-use";
 
-/// Mark only payloads extracted and validated by this version of ML Studio.
+/// Mark only payloads extracted and validated by this version of JL Studio.
 pub(crate) fn mark_revision(dir: &Path, files: &[String]) -> io::Result<()> {
     fs::write(dir.join(REVISION_FILES), serde_json::to_vec(files)?)
 }

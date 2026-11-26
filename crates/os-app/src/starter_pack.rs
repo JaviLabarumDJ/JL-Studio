@@ -6,9 +6,9 @@ use sha2::{Digest, Sha256};
 use os_ui::{Font, Rect};
 use crate::app::{Action, App, Ui};
 
-const NAME: &str = "ML Studio Starter Pack";
+const NAME: &str = "JL Studio Starter Pack";
 const LEGACY_NAME: &str = "Lemon Studio Starter Pack";
-const VERSION_FILE: &str = "ML Studio pack version.txt";
+const VERSION_FILE: &str = "JL Studio pack version.txt";
 const LEGACY_VERSION_FILE: &str = "Lemon pack version.txt";
 
 /// Use one label for both folder names without changing stored sample paths.

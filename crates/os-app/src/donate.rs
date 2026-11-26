@@ -7,7 +7,7 @@ use serde::Deserialize;
 pub const URL: &str = "https://ko-fi.com/s/833f0d3495";
 pub const ACTIVATE: &str = "Activate supporter...";
 const PUBLIC_KEY: [u8; 32] = [0x08,0xe0,0xcc,0x73,0xa0,0x80,0x78,0xec,0xec,0x76,0x39,0x81,0xd6,0x21,0xe6,0x72,0xb3,0x45,0x1f,0xf6,0xad,0x32,0x81,0x90,0x5b,0x60,0x7f,0xa9,0x92,0x86,0xc1,0x1d];
-const FILE: &str = "Licenses/ML Studio Supporter.mlsupport";
+const FILE: &str = "Licenses/JL Studio Supporter.mlsupport";
 const MAX_SIZE: u64 = 16384;
 
 #[derive(Deserialize)]
@@ -26,7 +26,7 @@ fn verify(bytes: &[u8], public: &[u8;32]) -> Result<(), String> {
         (e.product == "ml-studio-supporter" && e.version == 1 && e.lifetime && e.minimum_eur_cents >= 1000
             && e.license.len() == 32 && e.license.bytes().all(|b| b.is_ascii_hexdigit())).then_some(())
     };
-    parse().ok_or_else(|| "This is not a valid ML Studio supporter activation. Download your .mlsupport file from your Ko-fi purchase delivery link.".into())
+    parse().ok_or_else(|| "This is not a valid JL Studio supporter activation. Download your .mlsupport file from your Ko-fi purchase delivery link.".into())
 }
 
 fn read(path: &Path) -> Result<Vec<u8>, String> {
@@ -60,7 +60,7 @@ fn install_at(source: &Path, target: &Path, public: &[u8;32]) -> Result<(),Strin
     verify(&read(target)?,public)
 }
 pub fn import(path: &Path) -> Result<(),String> {
-    let target=os_paths::user_file(FILE).ok_or("Could not find your ML Studio profile")?;
+    let target=os_paths::user_file(FILE).ok_or("Could not find your JL Studio profile")?;
     install_at(path,&target,&PUBLIC_KEY)?;
     set_active(true);
     Ok(())
@@ -69,8 +69,8 @@ pub fn import(path: &Path) -> Result<(),String> {
 pub fn prompt(app: &mut crate::app::App) {
     use crate::dialog::{Answer,Body,Kind,Msg,Then};
     if active() || app.state.dialogs.iter().any(|m| matches!(&m.body,Body::Msg(msg) if msg.then==Then::SupporterPrompt)) { return; }
-    app.show_msg(Msg::new(Kind::Info,"Support ML Studio",vec![
-        ("ML Studio will always be free.".into(),true),
+    app.show_msg(Msg::new(Kind::Info,"Support JL Studio",vec![
+        ("JL Studio will always be free.".into(),true),
         ("Donate €10 or more once to permanently remove this message after exports and the Donate button.".into(),false),
         ("Larger contributions are highly appreciated. No subscription is required.".into(),false),
         ("Already supported? Download your activation file from the Ko-fi delivery link and activate it below.".into(),false),
@@ -79,7 +79,7 @@ pub fn prompt(app: &mut crate::app::App) {
 }
 pub fn choose(app: &mut crate::app::App) {
     app.file_dialog(crate::filedlg::FileDlg::new(crate::filedlg::Mode::Open,"Activate supporter","supporter",crate::dialog::Then::SupporterFile)
-        .filter("ML Studio supporter activation",&["mlsupport"]));
+        .filter("JL Studio supporter activation",&["mlsupport"]));
 }
 
 pub fn open() -> Result<(), String> { open_url(URL) }

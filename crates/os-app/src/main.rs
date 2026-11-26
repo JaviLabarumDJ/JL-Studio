@@ -983,7 +983,7 @@ impl ApplicationHandler for Shell {
         }
         splash::step(&self.splash, splash::WINDOW, "Opening the main window");
         let attrs = Window::default_attributes()
-            .with_title("ML Studio")
+            .with_title("JL Studio")
             .with_decorations(false)
             .with_inner_size(LogicalSize::new(1920.0, 1080.0))
             // Layouts are measured at 1920x1080 and are not responsive yet; below this they break.
@@ -2378,11 +2378,11 @@ fn main() {
     let failure = result.as_deref().filter(|result| {
         result.starts_with("Automatic update was not completed:")
             || result.starts_with("Automatic update deferred:")
-            || result.starts_with("The update installed, but ML Studio could not reopen")
+            || result.starts_with("The update installed, but JL Studio could not reopen")
     });
     if let Some(result) = result.as_deref() {
         if failure.is_some() {
-            shell.app.tell(dialog::Kind::Error, "ML Studio update", dialog::spans(&[result]));
+            shell.app.tell(dialog::Kind::Error, "JL Studio update", dialog::spans(&[result]));
         } else {
             shell.app.state.message = Some(result.into());
         }

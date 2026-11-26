@@ -110,7 +110,7 @@ pub(crate) fn tick(app: &mut crate::app::App) {
 type Error = Box<dyn std::error::Error>;
 
 fn download() -> Result<(), Error> {
-    let dest = destination().ok_or("The ML Studio profile is unavailable")?;
+    let dest = destination().ok_or("The JL Studio profile is unavailable")?;
     let parent = dest
         .parent()
         .ok_or("Cannot locate the bridge component folder")?;
@@ -125,7 +125,7 @@ fn download() -> Result<(), Error> {
         .open(parent.join(".setup.lock"))?;
     setup_lock
         .try_lock()
-        .map_err(|_| "Another ML Studio session is installing the bridge")?;
+        .map_err(|_| "Another JL Studio session is installing the bridge")?;
     if installed().is_some() {
         return Ok(());
     }

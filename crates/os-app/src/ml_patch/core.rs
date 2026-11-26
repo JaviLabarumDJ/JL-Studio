@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! A bounded, acyclic stereo graph built on ML Studio's existing plugin host.
+//! A bounded, acyclic stereo graph built on JL Studio's existing plugin host.
 //! Construction, state and delay allocation belong to the UI thread. Rendering
 //! only tries locks, uses prepared buffers and never loads a plugin or allocates.
 use crate::plugins::Available;
@@ -31,7 +31,7 @@ pub fn descriptor() -> Descriptor {
         format: Format::Native,
         id: ID.into(),
         name: NAME.into(),
-        vendor: "ML Studio".into(),
+        vendor: "JL Studio".into(),
         version: "1".into(),
         features: vec!["audio-effect".into()],
         kind: Kind::Effect,

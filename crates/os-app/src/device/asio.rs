@@ -132,7 +132,7 @@ pub(crate) fn open(name: &str, rate: Option<u32>, buffer: Option<u32>, mut mix: 
     }
     let wanted = (outs as usize).min(super::MAX_OUTPUT_CHANNELS);
     let ty = driver.output_data_type().map_err(|e| e.to_string())?;
-    let (format, big) = Format::of(&ty).ok_or_else(|| format!("the driver's sample format ({ty:?}) is not one ML Studio writes"))?;
+    let (format, big) = Format::of(&ty).ok_or_else(|| format!("the driver's sample format ({ty:?}) is not one JL Studio writes"))?;
     let range = driver.buffersize_range().map_err(|e| e.to_string())?;
     let sizes = sizes(&range);
     // A length it refuses after all: its own.

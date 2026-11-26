@@ -6700,7 +6700,7 @@ pub(crate) fn export_tracks_replacing(app: &mut App, approved: &[std::path::Path
     tracks.sort_unstable();
     tracks.dedup();
     let stem = s.path.as_ref().and_then(|p| p.file_stem()).map_or_else(|| "Untitled".to_string(), |n| n.to_string_lossy().into_owned());
-    let base = s.path.as_ref().and_then(|p| p.parent()).map(|d| d.join("Rendered")).unwrap_or_else(|| std::env::temp_dir().join("ML Studio").join("Rendered"));
+    let base = s.path.as_ref().and_then(|p| p.parent()).map(|d| d.join("Rendered")).unwrap_or_else(|| std::env::temp_dir().join("JL Studio").join("Rendered"));
     let folder = |name: &str| base.join(format!("{name} tracks"));
     let numbered = approved.is_empty() && ex::auto_number();
     let dir = if numbered {
@@ -6817,7 +6817,7 @@ pub fn consolidate(app: &mut App) -> String {
     let mut audio = e.render_all(512);
     let want = (os_engine::laws::tick_to_frame(f64::from(b - a), p.ppq, p.tick_tempo(s.tempo), rate) as usize) * 2;
     audio.resize(want.max(2), 0.0);
-    let dir = s.path.as_ref().and_then(|p| p.parent()).map(|d| d.join("Rendered")).unwrap_or_else(|| std::env::temp_dir().join("ML Studio").join("Rendered"));
+    let dir = s.path.as_ref().and_then(|p| p.parent()).map(|d| d.join("Rendered")).unwrap_or_else(|| std::env::temp_dir().join("JL Studio").join("Rendered"));
     if let Err(e) = std::fs::create_dir_all(&dir) {
         return format!("Consolidate: {e}");
     }

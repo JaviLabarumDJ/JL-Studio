@@ -2030,7 +2030,7 @@ impl App {
                  Studio does not read yet.\n\nOpen the project in version 24.2 or later, save it again, then open the new copy \
                  here."
             );
-            self.tell(crate::dialog::Kind::Info, "Project not supported yet", crate::dialog::spans(&["ML Studio cannot open ", &name, &rest]));
+            self.tell(crate::dialog::Kind::Info, "Project not supported yet", crate::dialog::spans(&["JL Studio cannot open ", &name, &rest]));
         }
         match result {
             Ok((file, project)) => {
@@ -2123,7 +2123,7 @@ impl App {
         let path = self.state.path.clone();
         let name = path.as_ref().map(|p|p.with_extension("lmn")).as_ref().and_then(|p| p.file_name()).map_or_else(|| "Untitled.lmn".to_string(), |n| n.to_string_lossy().into_owned());
         let dlg = FileDlg::new(Mode::Save, "Save project as", "project", crate::dialog::Then::SaveProject(next))
-            .filter("ML Studio project", &["lmn"])
+            .filter("JL Studio project", &["lmn"])
             .start(path.as_deref().and_then(|p| p.parent()))
             .name(&name);
         self.file_dialog(dlg);
@@ -2539,7 +2539,7 @@ impl App {
             },
             Then::SupporterFile => if let Some(path)=file {
                 match crate::donate::import(&path) {
-                    Ok(()) => self.tell(crate::dialog::Kind::Info,"Thank you for supporting ML Studio",vec![("Your lifetime supporter activation is saved. The Donate button and export reminders are now removed. Keep your activation file for reinstalling or moving to another computer.".into(),false)]),
+                    Ok(()) => self.tell(crate::dialog::Kind::Info,"Thank you for supporting JL Studio",vec![("Your lifetime supporter activation is saved. The Donate button and export reminders are now removed. Keep your activation file for reinstalling or moving to another computer.".into(),false)]),
                     Err(e) => self.tell(crate::dialog::Kind::Error,"Activation could not be completed",vec![(e,false)]),
                 }
                 self.invalidate();
@@ -2948,7 +2948,7 @@ impl App {
     fn open_dialog(&mut self) {
         let start = self.state.path.as_ref().and_then(|p| p.parent().map(std::path::Path::to_path_buf));
         let dlg = crate::filedlg::FileDlg::new(crate::filedlg::Mode::Open, "Open project", "project", crate::dialog::Then::OpenProject)
-            .filter("ML Studio / legacy projects", &["lmn", "flp", "zip"])
+            .filter("JL Studio / legacy projects", &["lmn", "flp", "zip"])
             .start(start.as_deref());
         self.file_dialog(dlg);
     }
@@ -12106,7 +12106,7 @@ impl App {
         let _ = std::fs::create_dir_all(&dir);
         let start = self.state.bar.user_current().map_or_else(|| "My toolbar".to_string(), |p| p.name.clone());
         let dlg = FileDlg::new(Mode::Save, "Save toolbar preset as", "toolbar preset", crate::dialog::Then::SaveToolbarPreset)
-            .filter("ML Studio toolbar preset", &[EXT])
+            .filter("JL Studio toolbar preset", &[EXT])
             .start(Some(&dir))
             .name(&format!("{start}.{EXT}"));
         self.file_dialog(dlg);
@@ -14799,14 +14799,14 @@ mod tests {
             }
         }
         c.set_theme_font(1, None);
-        let cuprum = c.text_width(Font::new(18), "ML Studio - Playlist");
+        let cuprum = c.text_width(Font::new(18), "JL Studio - Playlist");
         c.set_theme_font(2, None);
-        let barlow = c.text_width(Font::new(18), "ML Studio - Playlist");
+        let barlow = c.text_width(Font::new(18), "JL Studio - Playlist");
         assert_ne!(cuprum, barlow, "font selection reaches layout measurement");
         let bytes: std::sync::Arc<[u8]> = std::sync::Arc::from(&include_bytes!("../../os-ui/fonts/Barlow/BarlowSemiCondensed-Regular.ttf")[..]);
         assert!(Canvas::valid_theme_font(&bytes));
         c.set_theme_font(4, Some(bytes));
-        assert_eq!(c.text_width(Font::new(18), "ML Studio - Playlist"), barlow);
+        assert_eq!(c.text_width(Font::new(18), "JL Studio - Playlist"), barlow);
     }
 
     #[test]
@@ -19965,7 +19965,7 @@ mod tests {
         app.state.vintage_2005=false;app.state.bar.editing=false;
         app.state.toolbar.hidden=true;frame(&mut app,&mut canvas,None);assert!(app.hits.iter().any(|h|h.action==Action::Donate));app.state.toolbar.hidden=false;
         app.open_settings(views::settings::GENERAL);frame(&mut app,&mut canvas,None);
-        app.settings_act(views::settings::SAct::Group("Support ML Studio"));frame(&mut app,&mut canvas,None);
+        app.settings_act(views::settings::SAct::Group("Support JL Studio"));frame(&mut app,&mut canvas,None);
         let r=hit_rect(&app,&Action::Settings(views::settings::SAct::Button(crate::donate::ACTIVATE)));
         crate::dialog::fake::live(true);
         click(&mut app,&mut canvas,r);
@@ -20895,8 +20895,8 @@ LemonStudioStyle.button-radius=8
         assert_eq!(app.state.message.as_deref(), Some("Pickup (takeover mode): on"));
         app.state.settings.scroll = views::settings::content_h(&app.state);
         frame(&mut app, &mut c, None);
-        assert!(app.hits.iter().any(|h| h.action == Action::Settings(SAct::Body) && h.hint == "ML Studio has no MIDI scripts"));
-        assert!(app.hits.iter().any(|h| h.action == Action::Settings(SAct::Body) && h.hint == "ML Studio has no playlist performance mode"));
+        assert!(app.hits.iter().any(|h| h.action == Action::Settings(SAct::Body) && h.hint == "JL Studio has no MIDI scripts"));
+        assert!(app.hits.iter().any(|h| h.action == Action::Settings(SAct::Body) && h.hint == "JL Studio has no playlist performance mode"));
         let r = hit_rect(&app, &Action::Settings(SAct::Tab(PROJECT)));
         click(&mut app, &mut c, r);
         assert!(app.hits.iter().any(|h| matches!(h.action, Action::Settings(SAct::Combo("Ask for data folder", ..)))), "Ask for data folder works");
@@ -21189,7 +21189,7 @@ LemonStudioStyle.button-radius=8
                 (Kind::Question, "Confirm", spans(&["Save the changes to ", "Demo.lmn", " before closing?"]), &[Answer::Yes, Answer::No, Answer::Cancel][..], "question"),
                 (Kind::Warning, "Confirm save as", spans(&["", "Demo.lmn", " already exists.\nDo you want to replace it?"]), &[Answer::Yes, Answer::No][..], "warning"),
                 (Kind::Error, "Error", spans(&["The file doesn't exist or has been moved."]), &[Answer::Ok][..], "error"),
-                (Kind::Info, "Project not supported yet", spans(&["ML Studio cannot open ", "Old.flp", " yet.\n\nIt was saved by version 12.3. Projects saved before version 24.2 use an older channel layout that ML Studio does not read yet."]), &[Answer::Ok][..], "info"),
+                (Kind::Info, "Project not supported yet", spans(&["JL Studio cannot open ", "Old.flp", " yet.\n\nIt was saved by version 12.3. Projects saved before version 24.2 use an older channel layout that JL Studio does not read yet."]), &[Answer::Ok][..], "info"),
             ] {
                 let then = if tag == "question" { Then::Discard(crate::dialog::Next::Close) } else { Then::Nothing };
                 let mut m = Msg::new(kind, title, text, buttons, then);
@@ -30255,7 +30255,7 @@ LemonStudioStyle.button-radius=8
             click(&mut app, &mut canvas, about);
             assert_eq!(app.state.settings.tab, settings::ABOUT);
             assert!(app.state.settings.advanced_theme.is_none());
-            assert!(settings::page(settings::ABOUT, &app.state).iter().any(|group| group.rows.iter().any(|row| matches!(row, settings::Row::Big(text) if text == "ML Studio"))));
+            assert!(settings::page(settings::ABOUT, &app.state).iter().any(|group| group.rows.iter().any(|row| matches!(row, settings::Row::Big(text) if text == "JL Studio"))));
             if let Some(dir) = std::env::var_os("OS_SHOT_DIR") {
                 canvas.pixmap.save_png(PathBuf::from(dir).join(format!("about-{}.png", design.key()))).unwrap();
             }

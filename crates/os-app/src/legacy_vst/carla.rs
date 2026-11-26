@@ -265,7 +265,7 @@ impl Engine {
         let host = Box::new(Host {
             clock: (&mut *clock as *mut Clock).cast(),
             resource_dir: resources.as_ptr(),
-            name: c"ML Studio".as_ptr(),
+            name: c"JL Studio".as_ptr(),
             parent: 0,
             buffer,
             rate,
@@ -1063,7 +1063,7 @@ fn legacy_vst2_fixed_quantum_preserves_note_and_audio_order() {
         format: os_host::Format::Vst2,
         id: "4C4D5832".into(),
         name: "Bridge Test Synth".into(),
-        vendor: "ML Studio test".into(),
+        vendor: "JL Studio test".into(),
         version: String::new(),
         features: vec![os_host::VST2_X86.into()],
         kind: os_host::Kind::Instrument,

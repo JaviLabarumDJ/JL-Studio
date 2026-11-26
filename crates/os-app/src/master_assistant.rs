@@ -52,7 +52,7 @@ pub fn slot(s: &State) -> Option<u8> {
     mixer::track(s, 0)?.slots.iter().enumerate().find_map(|(i, p)| {
         let p = p.as_ref()?;
         let ours = crate::plugins::canonical_name(&p.name) == NAME || crate::project_plugins::wrapped_slot(p)
-            .is_some_and(|r| crate::plugins::canonical_name(&r.name) == NAME && matches!(r.vendor.as_str(),"Lemon Studio"|"ML Studio"));
+            .is_some_and(|r| crate::plugins::canonical_name(&r.name) == NAME && matches!(r.vendor.as_str(),"Lemon Studio"|"ML Studio"|"JL Studio"));
         (i != 10 && ours).then_some(i as u8)
     })
 }

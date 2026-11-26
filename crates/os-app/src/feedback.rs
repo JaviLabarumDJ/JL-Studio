@@ -1,4 +1,4 @@
-//! User-initiated link to the ML Studio Discord community.
+//! User-initiated link to the JL Studio Discord community.
 pub const URL: &str = "https://discord.gg/CDYs4rQEk";
 pub fn address() -> String { URL.into() }
 pub fn open()->Result<(),String>{crate::donate::open_url(&address())}

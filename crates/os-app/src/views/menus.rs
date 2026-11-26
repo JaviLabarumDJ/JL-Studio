@@ -296,7 +296,7 @@ const OPTIONS: &[Item] = &[
     head("CPU meter"),
     it("Compact", "").on().radio(false),
     it("Classic FL-style (CPU and MB)", "").on().radio(false),
-    it("ML Studio live monitor", "").on().radio(true),
+    it("JL Studio live monitor", "").on().radio(true),
     it("AI assistant settings", "").on(),
 ];
 
@@ -673,8 +673,8 @@ fn mark_of(s: &State, menu: usize, item: &Item) -> Mark {
     if let (Mark::Radio(_), Some(v)) = (item.mark, menu_view(menu, item.label)) {
         return Mark::Radio(s.plugdb.prefs.menu_view == v);
     }
-    if menu==OPTIONS_MENU && matches!(item.label,"Compact"|"Classic FL-style (CPU and MB)"|"ML Studio live monitor") {
-        return Mark::Radio(if crate::settings_file::flag("toolbar_cpu_combined",true){item.label=="ML Studio live monitor"}else{item.label==if crate::settings_file::flag("toolbar_cpu_classic",false){"Classic FL-style (CPU and MB)"}else{"Compact"}});
+    if menu==OPTIONS_MENU && matches!(item.label,"Compact"|"Classic FL-style (CPU and MB)"|"JL Studio live monitor") {
+        return Mark::Radio(if crate::settings_file::flag("toolbar_cpu_combined",true){item.label=="JL Studio live monitor"}else{item.label==if crate::settings_file::flag("toolbar_cpu_classic",false){"Classic FL-style (CPU and MB)"}else{"Compact"}});
     }
     match (item.mark, menu == VIEW) {
         // The browser is a panel of its own, shown by its own switch.

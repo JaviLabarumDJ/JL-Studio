@@ -2756,7 +2756,7 @@ impl App {
                 crate::visualizer::open(self, track, slot);
                 return;
             }
-            self.state.message = Some("This slot's plugin is not hosted (no ML Studio version of it yet)".into());
+            self.state.message = Some("This slot's plugin is not hosted (no JL Studio version of it yet)".into());
             return;
         }
         #[cfg(not(plugin_windows))]

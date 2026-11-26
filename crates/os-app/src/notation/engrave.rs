@@ -230,7 +230,7 @@ pub(super) fn mei(req: &Request) -> Result<(String, Vec<(String, usize)>), Strin
         return Err("Too many notes in these four measures. Try a less dense passage.".into());
     }
     let mut xml = String::from(
-        r#"<mei xmlns="http://www.music-encoding.org/ns/mei" meiversion="5.0"><meiHead><fileDesc><titleStmt><title>ML Studio</title></titleStmt><pubStmt/></fileDesc></meiHead><music><body><mdiv><score>"#,
+        r#"<mei xmlns="http://www.music-encoding.org/ns/mei" meiversion="5.0"><meiHead><fileDesc><titleStmt><title>JL Studio</title></titleStmt><pubStmt/></fileDesc></meiHead><music><body><mdiv><score>"#,
     );
     let (num, den) = req.bars[0].meter;
     write!(xml, r#"<scoreDef meter.count="{num}" meter.unit="{den}">"#).unwrap();
@@ -463,7 +463,7 @@ pub(super) fn engine() -> Result<PathBuf, String> {
         return Err("Verovio was not included in this build.".into());
     }
     let home = os_paths::user_dir()
-        .ok_or("The ML Studio profile is unavailable.")?
+        .ok_or("The JL Studio profile is unavailable.")?
         .join("Score Editor");
     fs::create_dir_all(&home).map_err(show_error)?;
     static KEY: std::sync::OnceLock<String> = std::sync::OnceLock::new();

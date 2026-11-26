@@ -132,7 +132,7 @@ impl Invitation {
             .decode(
                 text.trim()
                     .strip_prefix("mlstudio-session:")
-                    .ok_or("Paste an ML Studio session invitation")?,
+                    .ok_or("Paste an JL Studio session invitation")?,
             )
             .map_err(err)?;
         let i: Self = serde_json::from_slice(&bytes).map_err(err)?;

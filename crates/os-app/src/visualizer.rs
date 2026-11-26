@@ -72,7 +72,7 @@ fn root() -> Result<PathBuf, String> {
             }
         }
     }
-    Ok(os_paths::user_dir().ok_or("Cannot find the ML Studio user folder")?.join(LABEL))
+    Ok(os_paths::user_dir().ok_or("Cannot find the JL Studio user folder")?.join(LABEL))
 }
 
 fn plain(path: &Path) -> Result<fs::Metadata, String> {
@@ -213,7 +213,7 @@ fn install(root: &Path, package: &Package, cancel: &AtomicBool, report: impl Fn(
     plain(root)?;
     let lock = OpenOptions::new().write(true).create(true).truncate(false)
         .open(root.join("install.lock")).map_err(|e| e.to_string())?;
-    lock.try_lock().map_err(|_| "Another ML Studio window is installing the visualizer")?;
+    lock.try_lock().map_err(|_| "Another JL Studio window is installing the visualizer")?;
 
     let dest = root.join(VERSION);
     if verified(&dest, package) {
@@ -263,7 +263,7 @@ fn install(root: &Path, package: &Package, cancel: &AtomicBool, report: impl Fn(
         check()?;
         let scan = scan(&payload.join(MODULE));
         if !scan.plugins.iter().any(|p| p.id == ID) {
-            return Err(format!("ML Studio could not load the visualizer: {}", scan.error));
+            return Err(format!("JL Studio could not load the visualizer: {}", scan.error));
         }
         check()?;
         fs::write(payload.join("installed.sha256"), &package.sha256).map_err(|e| e.to_string())?;
@@ -313,7 +313,7 @@ pub fn open(app: &mut App, track: u16, slot: u8) {
     }
     let size = package.size as f64 / 1_000_000.;
     let installed = package.files.values().map(|m| m.size).sum::<u64>() as f64 / 1_000_000.;
-    let note = if cfg!(target_os = "macos") { "\n\nThe upstream Mac package is unsigned. If macOS blocks it, ML Studio will report the loading error." } else { "" };
+    let note = if cfg!(target_os = "macos") { "\n\nThe upstream Mac package is unsigned. If macOS blocks it, JL Studio will report the loading error." } else { "" };
     let mut prompt = if plugin_ready {
         "AudioVisualizer is already installed. Set up MP4 export?".to_owned()
     } else {

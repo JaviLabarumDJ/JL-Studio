@@ -227,7 +227,7 @@ pub(crate) const GROUPS: &[(&str, &[(&str, &str)])] = &[
         ("Advanced Export tab", crate::export_form::ADVANCED_VISIBILITY),
         ("Auto-number duplicate exports", crate::export_form::NUMBER_VISIBILITY),
         ("User Guide menu item", crate::help::VISIBILITY),
-        ("ML Studio Helper companion", crate::studio_helper::VISIBILITY),
+        ("JL Studio Helper companion", crate::studio_helper::VISIBILITY),
         ("User Guide: Detach button", crate::help::DETACH_VISIBILITY),
         (crate::change_log::LABEL, crate::change_log::VISIBILITY),
         ("User Guide: Show me where", crate::help::SPOTLIGHT_VISIBILITY),

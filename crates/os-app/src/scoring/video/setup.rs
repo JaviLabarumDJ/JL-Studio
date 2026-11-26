@@ -83,12 +83,12 @@ fn install(cancel: &AtomicBool, report: impl Fn(u64, u64)) -> Result<(), String>
     if installed().is_some() {
         return Ok(());
     }
-    let root = root().ok_or("The ML Studio profile is unavailable")?;
+    let root = root().ok_or("The JL Studio profile is unavailable")?;
     let c = package().ok_or("No FFmpeg download is available for this platform")?;
     std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
     let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true)
         .open(root.join("encoder.lock")).map_err(|e| e.to_string())?;
-    lock.try_lock().map_err(|_| "Another ML Studio instance is setting up Playlist video")?;
+    lock.try_lock().map_err(|_| "Another JL Studio instance is setting up Playlist video")?;
     if installed().is_some() {
         return Ok(());
     }

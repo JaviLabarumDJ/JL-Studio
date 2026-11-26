@@ -23,7 +23,7 @@ pub fn root() -> Result<PathBuf> {
         let exe=std::env::current_exe()?;
         if exe.file_name().is_some_and(|s|s=="lemonstudio-development.exe") {
             if let Some(parent)=exe.parent().and_then(Path::parent) {
-                let p=parent.join("ML Studio Helper"); if p.is_dir() {return Ok(p)}
+                let p=parent.join("JL Studio Helper"); if p.is_dir() {return Ok(p)}
             }
         }
     }
@@ -120,7 +120,7 @@ fn extract(archive:&Path,dest:&Path,limit:u64)->Result<()> {
 }
 fn install(root:&Path)->Result<()> {
     directory(root)?;let lock=fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(root.join("install.lock"))?;
-    lock.try_lock().map_err(|_|"Another ML Studio instance is installing Melli")?;
+    lock.try_lock().map_err(|_|"Another JL Studio instance is installing Melli")?;
     let p=package();let models=root.join("models");directory(&models)?;
     let stage=root.join("next");let old=root.join("previous");let current=root.join("current");
     remove_owned(&stage)?;

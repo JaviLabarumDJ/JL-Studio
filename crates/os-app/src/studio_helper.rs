@@ -2,7 +2,7 @@
 //! Optional local companion. Inference and installation run outside the audio thread.
 use std::{sync::Mutex, process::{Child, Command}, time::{Instant,Duration}};
 use crate::{app::App, dialog::{Msg,Kind,Answer,Then,spans},helper_install as install};
-pub const LABEL: &str = "ML Studio Helper (Melli)";
+pub const LABEL: &str = "JL Studio Helper (Melli)";
 pub const VISIBILITY: &str = "visible_studio-helper";
 static CHILD: Mutex<Option<Child>> = Mutex::new(None);
 static HEARTBEAT: Mutex<Option<(Instant,String)>> = Mutex::new(None);

@@ -401,7 +401,7 @@ impl Reader<'_, '_> {
     }
 
     fn home(&mut self) {
-        self.title("Learn ML Studio");
+        self.title("Learn JL Studio");
         self.copy("Make a first beat, record a performance or look up a tool while you work. The whole guide is available offline.");
         let columns = if self.body.w >= 555. { 2 } else { 1 };
         let width = (self.body.w - 10. * (columns - 1) as f32) / columns as f32;

@@ -1,10 +1,10 @@
-<img src="docs/assets/ml-studio/logo.png" width="72" alt="ML Studio logo">
+<img src="docs/assets/ml-studio/logo.png" width="72" alt="JL Studio logo">
 
-# ML Studio
+# JL Studio
 
-An open-source digital audio workstation maintained by **Michael Lane**. Compose with patterns and the Piano Roll, arrange and record in the Playlist, and finish the mix with studio-style channel strips and integrated mastering.
+An open-source digital audio workstation maintained by **Javi Labarum** (`JaviLabarumDJ`), forked from **ML Studio** (by **Michael Lane**) and **[Lemon Studio](https://github.com/ItsAlphaNeon/Lemon-Studio)** (by **ItsAlphaNeon** and contributors).
 
-[Downloads and change log](https://michaellanemusic.de/ml-studio/) · [Report a bug](https://michaellanemusic.de/lemon-studio/features/feedback.html)
+Compose with patterns and the Piano Roll, arrange and record in the Playlist, collaborate in real time over zero-config P2P (`iroh` QUIC + hole punching + relay), and finish the mix with studio-style channel strips and integrated mastering.
 
 ![ML Studio with the gray toolbar, Channel Rack, Playlist, and Piano Roll](docs/assets/ml-studio/studio.webp)
 
@@ -23,7 +23,7 @@ Download ML Studio and its matching source for Windows, Apple silicon and Intel 
 
 ## Build and contribute
 
-The `michael-lane` branch contains this edition. Install the platform prerequisites from the [upstream build guide](https://github.com/ItsAlphaNeon/Lemon-Studio#getting-started), then run `cargo build --locked --release -p os-app` from this checkout.
+The `jl-studio` branch contains this edition (forked from `ml`). Install the platform prerequisites from the [upstream build guide](https://github.com/ItsAlphaNeon/Lemon-Studio#getting-started), then run `PYTHON=python3 cargo build --locked --release -p os-app --bin lemonstudio` from this checkout.
 
 For a release build, compile the Master Assistant engine in `plugins/lemon-master-assistant` with CMake and JUCE 8.0.9. Run `python packaging/bundle-master-engine.py --help` to package the resulting VST3 bundle, then set `LEMON_MASTER_BUNDLE` to the ZIP path and `LEMON_RELEASE=1` before building `os-app`.
 

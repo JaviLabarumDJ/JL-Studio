@@ -433,7 +433,7 @@ pub fn setup(app: &mut App) {
             .map(PathBuf::from)
             .ok_or("Home folder unavailable")?
             .join("Desktop");
-        let dir = desktop.join("ML Studio AI Setup");
+        let dir = desktop.join("JL Studio AI Setup");
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let path = dir.join(if exe.to_string_lossy().contains("development") {
             "Development MCP.json"
@@ -478,7 +478,7 @@ fn initialize(req: Request, r: &mut Runtime) {
     r.controls.clear();
     let mut reply = Response::result(
         req.rpc["id"].clone(),
-        json!({"protocolVersion":VERSION,"capabilities":{"tools":{"listChanged":false}},"serverInfo":{"name":"ML Studio","version":"1.0"},"instructions":"Control the current ML Studio project through semantic tools. Fetch state before editing. UI control IDs expire after a command. Preserve user work, use existing dialogs for file actions. Plugin access is limited to host-exposed parameters. AI approval and permissions always require the human."}),
+        json!({"protocolVersion":VERSION,"capabilities":{"tools":{"listChanged":false}},"serverInfo":{"name":"JL Studio","version":"1.0"},"instructions":"Control the current JL Studio project through semantic tools. Fetch state before editing. UI control IDs expire after a command. Preserve user work, use existing dialogs for file actions. Plugin access is limited to host-exposed parameters. AI approval and permissions always require the human."}),
     );
     reply.session = Some(sid);
     let _ = req.reply.send(reply);
@@ -654,7 +654,7 @@ pub fn tick(app: &mut App) {
 /// MCP stdio adapter: starts no DAW, audio device or model. Credentials stay in the user's local profile.
 pub fn bridge(args: &[String]) -> i32 {
     let Some(path) = args.first() else {
-        eprintln!("Missing ML Studio connection file");
+        eprintln!("Missing JL Studio connection file");
         return 2;
     };
     let input = std::io::stdin();
@@ -678,7 +678,7 @@ pub fn bridge(args: &[String]) -> i32 {
         let id = rpc.get("id").cloned();
         let result = (|| -> Result<Option<Value>, String> {
             let text = std::fs::read_to_string(path)
-                .map_err(|_| "Open ML Studio and enable AI control first.".to_string())?;
+                .map_err(|_| "Open JL Studio and enable AI control first.".to_string())?;
             let config: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
             let url = config["url"].as_str().ok_or("Missing endpoint")?;
             if !url
@@ -687,7 +687,7 @@ pub fn bridge(args: &[String]) -> i32 {
                 .and_then(|s| s.parse::<u16>().ok())
                 .is_some_and(|p| p > 0)
             {
-                return Err("Only a local ML Studio endpoint is allowed".into());
+                return Err("Only a local JL Studio endpoint is allowed".into());
             }
             let mut request = ureq::AgentBuilder::new()
                 .redirects(0)
@@ -707,7 +707,7 @@ pub fn bridge(args: &[String]) -> i32 {
             if !session.is_empty() {
                 request = request.set("Mcp-Session-Id", &session);
             }
-            let response=request.send_string(&line).map_err(|_|"ML Studio is off, disconnected, or needs approval. Open AI in ML Studio, then reconnect.".to_string())?;
+            let response=request.send_string(&line).map_err(|_|"JL Studio is off, disconnected, or needs approval. Open AI in JL Studio, then reconnect.".to_string())?;
             if let Some(s) = response.header("Mcp-Session-Id") {
                 session = s.into();
             }

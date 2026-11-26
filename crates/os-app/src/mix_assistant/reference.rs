@@ -4,7 +4,7 @@ use super::{Level, Project, Role, Track, quality};
 use serde::Deserialize;
 use std::{collections::BTreeMap, io::Read, path::Path};
 
-pub(crate) const FILE: &str = "ML Studio Mix References.mlmixref";
+pub(crate) const FILE: &str = "JL Studio Mix References.mlmixref";
 const HEADER: &[u8] = b"MLMIXREF/1\n";
 const MAX_BYTES: usize = 64 * 1024;
 

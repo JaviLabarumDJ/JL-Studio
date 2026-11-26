@@ -3,7 +3,7 @@
 use os_ui::{Canvas, Color, Font, Rect};
 
 pub const LABEL: &str = "FL Studio 2005";
-pub const NEON_LABEL: &str = "ML Studio 3036";
+pub const NEON_LABEL: &str = "JL Studio 3036";
 pub const NEON_VISIBILITY: &str = "visible_ml_studio_3036";
 pub const INK_LABELS: [&str;3]=["Accent", "Structure", "Highlights"];
 pub const INKS_VISIBILITY: &str="visible_3036_main_colors";

@@ -128,7 +128,7 @@ pub fn run(app: &mut App, command: Command) {
             let save=command==Command::Save;
             let dir=directory(); if let Some(dir)=&dir{let _=std::fs::create_dir_all(dir);}
             let dialog=crate::filedlg::FileDlg::new(if save {crate::filedlg::Mode::Save}else{crate::filedlg::Mode::Open},if save {"Save custom window layout"}else{"Load custom window layout"},"window layout",Then::WorkspaceLayout(save))
-                .filter("ML Studio window layout",&[EXT]).start(dir.as_deref());
+                .filter("JL Studio window layout",&[EXT]).start(dir.as_deref());
             app.file_dialog(if save {dialog.name("My workspace.lslayout")}else{dialog});
         }
         Command::Load(path) => chosen(app,&path,false),

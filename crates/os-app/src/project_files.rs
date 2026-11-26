@@ -170,7 +170,7 @@ impl App {
         let start = root.join(USER_CATEGORY);
         let _ = std::fs::create_dir_all(&start);
         let name = format!("{}.lmn", crate::backup::project_name(self.state.path.as_deref()));
-        let dlg = FileDlg::new(Mode::Save, "Save as template", "template", Then::SaveTemplate).filter("ML Studio project", &["lmn"]).start(Some(&start)).name(&name);
+        let dlg = FileDlg::new(Mode::Save, "Save as template", "template", Then::SaveTemplate).filter("JL Studio project", &["lmn"]).start(Some(&start)).name(&name);
         self.file_dialog(dlg);
     }
 
@@ -209,7 +209,7 @@ impl App {
                     && !crate::templates::is_startup_template(&pick)
                 {
                     let mut prompt = Msg::new(Kind::Question, "Use as startup template?",
-                        spans(&["Start ML Studio and new projects with ", &name, "?"]),
+                        spans(&["Start JL Studio and new projects with ", &name, "?"]),
                         &[Answer::Yes, Answer::No], Then::UseStartupTemplate(pick));
                     prompt.focus = 1;
                     self.show_msg(prompt);

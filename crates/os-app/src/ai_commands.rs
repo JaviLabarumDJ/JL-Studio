@@ -830,7 +830,7 @@ fn execute(app: &mut App, name: &str, a: &Value, local: bool) -> Result<Value> {
             }
             _ => return Err("Unknown automation operation".into()),
         },
-        _ => return Err("Unknown ML Studio tool".into()),
+        _ => return Err("Unknown JL Studio tool".into()),
     }
     app.state.piano.dirty = true;
     Ok(json!({"ok":true,"dialog_open":app.modal_open(),"message":app.state.message}))

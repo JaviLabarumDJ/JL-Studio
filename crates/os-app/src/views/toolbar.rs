@@ -24,7 +24,7 @@ pub const MORE_HINT: &str = "More windows and toolbar options";
 pub(crate) const OPEN_HIGHLIGHTS: &str = "visible_win-open-highlights";
 
 pub(crate) fn supporter_button(ui: &mut Ui, r: Rect) {
-    let hover = ui.hit(r, Action::Donate, "Support ML Studio: €10 or more removes donation reminders and this button");
+    let hover = ui.hit(r, Action::Donate, "Support JL Studio: €10 or more removes donation reminders and this button");
     ui.c.fill_rrect(r, 4.0, if hover { Color::rgb(0xf7f473) } else { Color::rgb(0xe9e554) });
     ui.c.text_center(Font::new(12), r, Color::rgb(0x14171a), "Donate");
 }
@@ -435,7 +435,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo, width: f32) {
         }
         if legacy_vintage(s) && sizes.feedback > 0.0 {
             let r = Rect::new(x, 8.0, sizes.feedback - 6.0, 24.0);
-            ui.hit(r, Action::ReportBug, "Report a bug in the ML Studio Discord community");
+            ui.hit(r, Action::ReportBug, "Report a bug in the JL Studio Discord community");
             if studio { studio_tile(ui, r, t.accent); } else { ui.c.fill_rrect(r, 3.0, t.accent); }
             ui.c.text_center(Font::new(11), r, t.sunken, "Report a bug");
         }
@@ -446,7 +446,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo, width: f32) {
         for (offset, icon, action, hint) in [
             (0., Icon::Minimize, Action::Minimize, "Minimize"),
             (32., Icon::Restore, Action::Maximize, "Restore / maximize"),
-            (64., Icon::Close, Action::Close, "Exit ML Studio"),
+            (64., Icon::Close, Action::Close, "Exit JL Studio"),
         ] {
             let r=Rect::new(width-window_w+offset,8.,30.,24.);
             let hover=ui.hit(r,action,hint);
@@ -486,7 +486,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo, width: f32) {
         ui.hit(r, Action::Bar(BarHit::Logo), "Logo - drag onto the palette to take it off");
         frame(ui, r.inset(2.0));
     } else {
-        ui.hit(r, Action::MenuItem(menus::HELP_MENU, menus::HELP_ABOUT), "About ML Studio");
+        ui.hit(r, Action::MenuItem(menus::HELP_MENU, menus::HELP_ABOUT), "About JL Studio");
     }
     icons::logo(ui.c, lx, mid, radius, if lemon { t.toolbar_edge } else { t.toolbar_line });
 }
@@ -552,7 +552,7 @@ fn action_panel(ui: &mut Ui, c: &Ctx, p: Panel) {
     let (action,label,hint) = match p {
         Panel::Ai => (Action::Ai,"AI assistant",if s.ai.enabled {"Manage or disconnect the AI assistant".to_string()} else {"Connect an AI assistant".into()}),
         Panel::Update => {let (label,hint)=crate::updates::display(); (Action::Updates,label,if hint.is_empty(){"Check for updates".into()}else{hint})},
-        Panel::Feedback => (Action::ReportBug,"Report a bug","Report a bug in the ML Studio Discord community".into()),
+        Panel::Feedback => (Action::ReportBug,"Report a bug","Report a bug in the JL Studio Discord community".into()),
         _ => return,
     };
     let hover=ui.hit(r,action,hint);
@@ -569,7 +569,7 @@ fn caption(ui: &mut Ui, c: &Ctx) {
     for (x, icon, action, hint) in [
         (4.0, Icon::Minimize, Action::Minimize, "Minimize"),
         (24.0, Icon::Restore, Action::Maximize, "Restore / maximize"),
-        (44.0, Icon::Close, Action::Close, "Exit ML Studio"),
+        (44.0, Icon::Close, Action::Close, "Exit JL Studio"),
     ] {
         let r = a.r(Rect::new(x, 11.0, 19.0, 19.0));
         let hov = ui.hit(r, action, hint);

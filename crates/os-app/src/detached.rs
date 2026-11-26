@@ -17,7 +17,7 @@ struct Pane {
     motion:Option<(f32,f32)>, hover:Option<Action>, refresh_editors:bool, frame:MainWin, mouse:(f32,f32), mods:ModifiersState, last:Instant, painted:Instant,
 }
 fn key(w:Win)-> &'static str {match w {Win::Guide=>"native_user_guide",Win::Visualizer=>"native_visualizer",Win::Score=>"native_score_editor",Win::Browser=>"native_browser",Win::Mixer=>"native_mixer",Win::PianoRoll=>"native_piano",_=>"native_playlist"}}
-fn title(w:Win)-> &'static str {match w {Win::Guide=>"ML Studio - User Guide",Win::Visualizer=>"ML Studio - Visualizer",Win::Score=>"ML Studio - Score Editor",Win::Browser=>"ML Studio - Browser",Win::Mixer=>"ML Studio - Mixer",Win::PianoRoll=>"ML Studio - Piano roll",_=>"ML Studio - Playlist"}}
+fn title(w:Win)-> &'static str {match w {Win::Guide=>"JL Studio - User Guide",Win::Visualizer=>"JL Studio - Visualizer",Win::Score=>"JL Studio - Score Editor",Win::Browser=>"JL Studio - Browser",Win::Mixer=>"JL Studio - Mixer",Win::PianoRoll=>"JL Studio - Piano roll",_=>"JL Studio - Playlist"}}
 impl Windows {
     pub fn flush_stems(&mut self,app:&mut App){
         if let Some((row,paths))=self.header_samples.take(){crate::playlist_tracks::drops::samples(app,paths,row);self.changed=true;}

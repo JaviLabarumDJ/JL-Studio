@@ -946,9 +946,9 @@ pub fn paint(ui: &mut Ui, r: Rect, f: &Form) {
             let n = node_rect(id);
             let spec = g.doc.nodes.iter().find(|n| n.id == id);
             let name = if id == 0 {
-                "From ML Studio"
+                "From JL Studio"
             } else if id == 1 {
-                "To ML Studio"
+                "To JL Studio"
             } else {
                 &spec.unwrap().name
             };
