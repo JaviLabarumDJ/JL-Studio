@@ -1164,6 +1164,7 @@ pub struct State {
     pub mixer: crate::mixer::MixerUi,
     pub headphones: crate::headphones::UiState,
     pub ai: crate::ai_control::UiState,
+    pub copilot: crate::copilot::CopilotState,
     pub voice_ui: crate::voice_assistant::UiState,
     /// Rack rows played by a hosted plugin.
     pub hosted_rows: Vec<usize>,
@@ -1603,6 +1604,7 @@ pub struct App {
     pub restart_update: bool,
     update_status: String,
     pub(crate) ai_runtime: Option<crate::ai_control::Runtime>,
+    pub(crate) copilot_runtime: Option<crate::copilot::CopilotRuntime>,
     pub(crate) voice_session: Option<crate::voice_assistant::Session>,
     pub(crate) headphone_job: Option<crate::headphones::Job>,
     pub(crate) stem_job: Option<crate::stem_separation::Job>,
@@ -1746,6 +1748,7 @@ impl App {
                 mixer: Default::default(),
                 headphones: Default::default(),
                 ai: Default::default(),
+                copilot: Default::default(),
                 voice_ui: Default::default(),
                 pattern: 1,
                 song_mode: false,
@@ -1923,6 +1926,7 @@ impl App {
             vocal_audio:None,
             headphone_job: None,
             ai_runtime: None,
+            copilot_runtime: None,
             voice_session: None,
             quit_answer: None,
             #[cfg(all(plugin_windows, target_os = "linux"))]
@@ -4991,6 +4995,7 @@ impl App {
         }
         crate::browser_preview::tick(self);
         crate::ai_control::tick(self);
+        crate::copilot::tick(self);
         crate::voice_assistant::tick(self);
         crate::updates::tick();
         crate::scoring::tick(self);
@@ -10850,7 +10855,7 @@ impl App {
             return;
         }
         if a == Action::Ai {
-            crate::voice_assistant::open(self);
+            crate::copilot::open(self);
             return;
         }
         if a == Action::ReportBug {
@@ -20996,7 +21001,7 @@ LemonStudioStyle.button-radius=8
             crate::dialog::Body::Shortcuts(_) => panic!("Manage shortcuts is on top"),
             crate::dialog::Body::TimeSig(_) => panic!("the time signature dialog is on top"),
             crate::dialog::Body::Project(_) => panic!("a project form is on top"),
-            crate::dialog::Body::Collaboration(_) | crate::dialog::Body::NoteProperties(_) | crate::dialog::Body::Normalize(_) | crate::dialog::Body::StripSilence(_) | crate::dialog::Body::Patch(_) | crate::dialog::Body::ClipFx(..) | crate::dialog::Body::VocalAlign(_) | crate::dialog::Body::Ai | crate::dialog::Body::VoiceAssistant | crate::dialog::Body::Headphones(_) | crate::dialog::Body::RoutePicker(_) | crate::dialog::Body::MixAssistant(_) | crate::dialog::Body::MixerInsert(_) => panic!("selection form is on top"),
+            crate::dialog::Body::Collaboration(_) | crate::dialog::Body::NoteProperties(_) | crate::dialog::Body::Normalize(_) | crate::dialog::Body::StripSilence(_) | crate::dialog::Body::Patch(_) | crate::dialog::Body::ClipFx(..) | crate::dialog::Body::VocalAlign(_) | crate::dialog::Body::Ai | crate::dialog::Body::Copilot | crate::dialog::Body::VoiceAssistant | crate::dialog::Body::Headphones(_) | crate::dialog::Body::RoutePicker(_) | crate::dialog::Body::MixAssistant(_) | crate::dialog::Body::MixerInsert(_) => panic!("selection form is on top"),
         }
     }
 

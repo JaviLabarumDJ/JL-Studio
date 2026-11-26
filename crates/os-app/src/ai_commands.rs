@@ -98,6 +98,10 @@ pub fn tools() -> Vec<Value> {
  ("lemon_history","Undo or redo one DAW history step.",json!({"op":s}),vec!["op"]),
  ("lemon_scroll","Scroll an app view to a logical position; view: mixer, playlist_x, playlist_y, rack, piano_x, piano_y.",json!({"view":s,"position":n}),vec!["view","position"]),
  ("lemon_automation","Create an automation clip for a host target ID, or replace its points. op create needs target,name,value. op points needs channel (channel index), points array of {beat,value}; positions>=0, values0..1. Existing DAW undo is retained.",json!({"op":s,"target":i,"name":s,"value":n,"channel":i,"points":{"type":"array","maxItems":4096,"items":{"type":"object","properties":{"beat":n,"value":n},"required":["beat","value"],"additionalProperties":false}}}),vec!["op"]),
+ ("lemon_compose","High-level musical composer for the selected pattern in one undoable step. op: chord_progression, bassline, arp, drum_pattern, humanize, clear_channel. Uses channel row (0-based), root (e.g. 'F', 'C#', 'Bb'), scale (minor, major, dorian, phrygian, harmonic_minor), octave (1..7), bars (1..16), chords (e.g. ['i','VI','III','VII']), style (four_on_floor, house, trap, hiphop, breakbeat), velocity (1..127), humanize (0..30), replace (bool).",json!({"op":s,"row":i,"root":s,"scale":s,"octave":i,"bars":i,"chords":{"type":"array","items":s},"style":s,"velocity":i,"humanize":i,"replace":b}),vec!["op","row"]),
+ ("lemon_mix_setup","High-level mixer routing & gain staging in one undoable step. op: route_group (routes channel rows to destination track), sidechain (sidechains source track to destination track), gain_stage (sets volume 0..1 on track or sources).",json!({"op":s,"sources":{"type":"array","items":i},"destination":i,"track":i,"value":n}),vec!["op"]),
+ ("lemon_audio_analyze","Analyze live mixer peak/VU meters, clipping/hot tracks, master headroom, channel routing, effects/Master Assistant status, and pattern note density.",json!({}),vec![]),
+ ("lemon_checkpoint","Create an undo checkpoint (op: 'mark') or roll back all edits since a checkpoint (op: 'rollback', checkpoint: integer).",json!({"op":s,"checkpoint":i}),vec!["op"]),
  ];
     entries.into_iter().map(|(name,description,properties,required)|json!({"name":name,"description":description,"inputSchema":{"type":"object","properties":properties,"required":required,"additionalProperties":false}})).collect()
 }
@@ -109,7 +113,7 @@ fn state(app: &App) -> Value {
  "patterns":s.project.patterns.iter().map(|p|json!({"number":p.number,"name":p.name,"notes":p.notes.len()})).collect::<Vec<_>>(),
  "playlist_tracks":s.project.arrangement().map(|a|a.tracks.iter().enumerate().map(|(i,t)|json!({"track":i,"name":t.name,"frozen":t.frozen.is_some(),"comp":t.comp})).collect::<Vec<_>>()),
  "clip_count":pl::clips(s).len(),"automation":s.project.automations.iter().map(|a|json!({"channel":a.channel,"targets":a.targets,"points":a.points.len()})).collect::<Vec<_>>(),
- "hosted_plugins":app.plugins.hosted.iter().map(|(k,p)|json!({"key":k,"name":p.name})).collect::<Vec<_>>(),"dialog_open":app.modal_open(),"message":s.message,"limitations":["Native plugin editor controls require host-exposed parameters","No AI model or autonomous audio listening is bundled","Use Make Unique to route shared audio clips independently"]})
+ "hosted_plugins":app.plugins.hosted.iter().map(|(k,p)|json!({"key":k,"name":p.name})).collect::<Vec<_>>(),"dialog_open":app.modal_open(),"message":s.message,"limitations":["Native plugin editor controls require host-exposed parameters","Use lemon_audio_analyze for live mixer peak/headroom diagnostics","Use Make Unique to route shared audio clips independently"]})
 }
 pub fn call(app: &mut App, name: &str, a: &Value) -> Result<Value> {
     let result = execute(app, name, a, false);
@@ -121,6 +125,20 @@ pub fn call(app: &mut App, name: &str, a: &Value) -> Result<Value> {
             r.controls.clear();
             r.await_paint = true;
         }
+        history::settle(&mut app.state);
+        app.sync_live();
+        app.invalidate();
+    }
+    result
+}
+
+/// Runs any semantic tool for the in-DAW AI Producer Copilot without requiring the external MCP server.
+pub fn call_copilot(app: &mut App, name: &str, a: &Value) -> Result<Value> {
+    let result = execute(app, name, a, true);
+    let read = matches!(name, "lemon_state" | "lemon_controls" | "lemon_audio_analyze")
+        || matches!(name, "lemon_parameter" | "lemon_clips" | "lemon_notes") && a["op"] == "read"
+        || name == "lemon_plugins" && a["op"] == "list";
+    if !read && result.is_ok() {
         history::settle(&mut app.state);
         app.sync_live();
         app.invalidate();
@@ -830,8 +848,339 @@ fn execute(app: &mut App, name: &str, a: &Value, local: bool) -> Result<Value> {
             }
             _ => return Err("Unknown automation operation".into()),
         },
+        "lemon_compose" => return compose(app, a),
+        "lemon_mix_setup" => return mix_setup(app, a),
+        "lemon_audio_analyze" => return Ok(audio_analyze(app)),
+        "lemon_checkpoint" => match text(a, "op")? {
+            "mark" => return Ok(json!({"checkpoint": history::done_count(&app.state)})),
+            "rollback" => {
+                let cp = uint(a, "checkpoint", 100_000)? as usize;
+                let undone = history::undo_to(&mut app.state, cp);
+                app.sync_live();
+                app.invalidate();
+                return Ok(json!({"undone_steps": undone, "checkpoint": history::done_count(&app.state)}));
+            }
+            _ => return Err("Expected 'mark' or 'rollback'".into()),
+        },
         _ => return Err("Unknown JL Studio tool".into()),
     }
     app.state.piano.dirty = true;
     Ok(json!({"ok":true,"dialog_open":app.modal_open(),"message":app.state.message}))
+}
+
+fn parse_root_note(s: &str) -> Option<u8> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "c" => Some(0),
+        "c#" | "db" => Some(1),
+        "d" => Some(2),
+        "d#" | "eb" => Some(3),
+        "e" | "fb" => Some(4),
+        "f" | "e#" => Some(5),
+        "f#" | "gb" => Some(6),
+        "g" => Some(7),
+        "g#" | "ab" => Some(8),
+        "a" => Some(9),
+        "a#" | "bb" => Some(10),
+        "b" | "cb" => Some(11),
+        _ => None,
+    }
+}
+
+fn scale_intervals(scale: &str) -> &'static [u8] {
+    match scale.trim().to_ascii_lowercase().as_str() {
+        "major" => &[0, 2, 4, 5, 7, 9, 11],
+        "dorian" => &[0, 2, 3, 5, 7, 9, 10],
+        "phrygian" => &[0, 1, 3, 5, 7, 8, 10],
+        "harmonic_minor" => &[0, 2, 3, 5, 7, 8, 11],
+        _ => &[0, 2, 3, 5, 7, 8, 10], // natural minor default
+    }
+}
+
+fn chord_degrees(symbol: &str) -> (usize, bool) {
+    let clean = symbol.trim();
+    let seventh = clean.contains('7');
+    let base = clean.trim_end_matches(|c: char| !c.is_ascii_alphabetic());
+    let deg = match base.to_ascii_lowercase().as_str() {
+        "i" => 0,
+        "ii" => 1,
+        "iii" => 2,
+        "iv" => 3,
+        "v" => 4,
+        "vi" => 5,
+        "vii" => 6,
+        _ => 0,
+    };
+    (deg, seventh)
+}
+
+fn compose(app: &mut App, a: &Value) -> Result<Value> {
+    let op = text(a, "op")?;
+    let row = index(a, "row", app.state.project.channels.len())?;
+    let ch_index = app.state.project.channels[row].index;
+    let ppq = app.state.project.ppq.max(24) as u32;
+    let bar_ticks = ppq * 4;
+    let step_ticks = ppq / 4; // 16th note
+    let root_pc = a["root"].as_str().and_then(parse_root_note).unwrap_or(0);
+    let scale = scale_intervals(a["scale"].as_str().unwrap_or("minor"));
+    let default_oct = if op == "bassline" { 2 } else { 4 };
+    let octave = a["octave"].as_u64().unwrap_or(default_oct).clamp(1, 7) as u8;
+    let bars = a["bars"].as_u64().unwrap_or(4).clamp(1, 16) as u32;
+    let base_vel = a["velocity"].as_u64().unwrap_or(96).clamp(1, 127) as u8;
+    let humanize = a["humanize"].as_u64().unwrap_or(0).min(30) as i32;
+    let replace = a["replace"].as_bool().unwrap_or(true);
+    let chords: Vec<String> = a["chords"]
+        .as_array()
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .filter(|v: &Vec<String>| !v.is_empty())
+        .unwrap_or_else(|| vec!["i".into(), "VI".into(), "III".into(), "VII".into()]);
+
+    crate::piano::snapshot_as(&mut app.state, "AI compose");
+    let pat = crate::piano::pattern_mut(&mut app.state);
+
+    if op == "clear_channel" {
+        let before = pat.notes.len();
+        pat.notes.retain(|n| n.channel != ch_index);
+        let removed = before - pat.notes.len();
+        app.state.piano.dirty = true;
+        app.sync_live();
+        app.invalidate();
+        return Ok(json!({"removed": removed, "pattern": app.state.pattern}));
+    }
+
+    if op == "humanize" {
+        let mut modified = 0usize;
+        let amount = if humanize == 0 { 10 } else { humanize };
+        for (idx, n) in pat.notes.iter_mut().enumerate() {
+            if n.channel != ch_index {
+                continue;
+            }
+            let hash = ((idx as i32 * 37 + 13) % 11) - 5;
+            let vel = (n.velocity as i32 + hash * amount / 5).clamp(20, 127) as u8;
+            let shift = (hash * (step_ticks as i32 / 8)).clamp(-(n.position as i32), step_ticks as i32 / 4);
+            n.velocity = vel;
+            n.position = (n.position as i32 + shift).max(0) as u32;
+            modified += 1;
+        }
+        app.state.piano.dirty = true;
+        app.sync_live();
+        app.invalidate();
+        return Ok(json!({"humanized": modified, "pattern": app.state.pattern}));
+    }
+
+    if replace {
+        pat.notes.retain(|n| n.channel != ch_index);
+    }
+
+    let base_midi = 12 * (octave + 1) + root_pc;
+    let mut added = 0usize;
+    let mut push_note = |pos: u32, len: u32, key: u8, idx: usize| {
+        let jitter_v = if humanize > 0 { ((idx as i32 * 29 + 7) % 9 - 4) * humanize / 4 } else { 0 };
+        let jitter_t = if humanize > 0 { ((idx as i32 * 19 + 3) % 5 - 2) * (step_ticks as i32 / 12) } else { 0 };
+        let mut n = os_model::Note::step(ch_index, (pos as i32 + jitter_t).max(0) as u32);
+        n.length = len.max(1);
+        n.key = u16::from(key.min(127));
+        n.velocity = (base_vel as i32 + jitter_v).clamp(1, 127) as u8;
+        pat.notes.push(n);
+        added += 1;
+    };
+
+    let chord_notes = |deg: usize, seventh: bool| -> Vec<u8> {
+        let note_at = |d: usize| -> u8 {
+            let oct_shift = (d / 7) as u8 * 12;
+            base_midi.saturating_add(scale[d % 7]).saturating_add(oct_shift)
+        };
+        let mut v = vec![note_at(deg), note_at(deg + 2), note_at(deg + 4)];
+        if seventh {
+            v.push(note_at(deg + 6));
+        }
+        v
+    };
+
+    match op {
+        "chord_progression" => {
+            for bar in 0..bars {
+                let sym = &chords[bar as usize % chords.len()];
+                let (deg, seventh) = chord_degrees(sym);
+                let pos = bar * bar_ticks;
+                for (i, key) in chord_notes(deg, seventh).into_iter().enumerate() {
+                    push_note(pos, bar_ticks - step_ticks / 2, key, bar as usize * 4 + i);
+                }
+            }
+        }
+        "bassline" => {
+            let pattern_steps = [0u32, 3, 6, 8, 11, 14];
+            for bar in 0..bars {
+                let sym = &chords[bar as usize % chords.len()];
+                let (deg, _) = chord_degrees(sym);
+                let root_n = base_midi.saturating_add(scale[deg % 7]);
+                let fifth_n = root_n.saturating_add(7);
+                for (i, &st) in pattern_steps.iter().enumerate() {
+                    let key = if i % 3 == 2 { fifth_n } else { root_n };
+                    push_note(bar * bar_ticks + st * step_ticks, step_ticks * 2, key, bar as usize * 6 + i);
+                }
+            }
+        }
+        "arp" => {
+            for bar in 0..bars {
+                let sym = &chords[bar as usize % chords.len()];
+                let (deg, seventh) = chord_degrees(sym);
+                let notes = chord_notes(deg, seventh);
+                for st in 0..16u32 {
+                    let key = notes[st as usize % notes.len()];
+                    push_note(bar * bar_ticks + st * step_ticks, step_ticks, key, bar as usize * 16 + st as usize);
+                }
+            }
+        }
+        "drum_pattern" => {
+            let style = a["style"].as_str().unwrap_or("four_on_floor");
+            let key = a["root"].as_str().and_then(parse_root_note).map(|pc| 12 * (octave + 1) + pc).unwrap_or(60);
+            let steps: &[u32] = match style {
+                "trap" => &[0, 6, 10, 14],
+                "hiphop" => &[0, 3, 8, 10],
+                "breakbeat" => &[0, 6, 10, 12],
+                "house" | "four_on_floor" | _ => &[0, 4, 8, 12],
+            };
+            for bar in 0..bars {
+                for (i, &st) in steps.iter().enumerate() {
+                    push_note(bar * bar_ticks + st * step_ticks, step_ticks, key, bar as usize * 8 + i);
+                }
+            }
+        }
+        _ => return Err("Unknown compose op".into()),
+    }
+
+    app.state.piano.dirty = true;
+    app.sync_live();
+    app.invalidate();
+    Ok(json!({"added": added, "pattern": app.state.pattern, "row": row}))
+}
+
+fn mix_setup(app: &mut App, a: &Value) -> Result<Value> {
+    let op = text(a, "op")?;
+    let prev = app.state.history.begin_sequence();
+    match op {
+        "route_group" => {
+            let dest = track(app, a, "destination")?;
+            let sources = a["sources"].as_array().ok_or("sources must be an array of channel rows")?;
+            let mut rows_vec = Vec::with_capacity(sources.len());
+            for src in sources {
+                let row = src.as_u64().filter(|&r| r < app.state.project.channels.len() as u64).ok_or("Invalid channel row")? as usize;
+                rows_vec.push(row);
+            }
+            let routed = rows_vec.len();
+            crate::rack_controls::route(&mut app.state, &rows_vec, dest, false);
+            app.state.history.end_sequence_named(prev, "AI route group");
+            app.sync_live();
+            app.invalidate();
+            return Ok(json!({"routed": routed, "destination": dest}));
+        }
+        "sidechain" => {
+            let src = track(app, a, "track")?;
+            let dest = track(app, a, "destination")?;
+            if src == dest {
+                app.state.history.end_sequence_named(prev, "AI sidechain");
+                return Err("Cannot sidechain a track to itself".into());
+            }
+            app.state.selected_mixer = src;
+            let _ = crate::mixer::run(app, crate::mixer::MCmd::Route { dst: dest, only: false, side: true });
+            app.state.history.end_sequence_named(prev, "AI sidechain");
+            app.sync_live();
+            app.invalidate();
+            return Ok(json!({"sidechained": true, "from": src, "to": dest}));
+        }
+        "gain_stage" => {
+            let vol = number(a, "value", 0., 1.)?;
+            let mut updated = 0usize;
+            if let Some(arr) = a["sources"].as_array() {
+                for v in arr {
+                    let t = v.as_u64().filter(|&x| x <= crate::mixer::max_insert(&app.state.project) as u64).ok_or("Invalid track")? as u16;
+                    if crate::mixer::track(&app.state, t).is_some() {
+                        history::fader(&mut app.state, t, false);
+                        if let Some(m) = crate::mixer::track_mut(&mut app.state, t) {
+                            m.volume = Some(vol);
+                            updated += 1;
+                        }
+                    }
+                }
+            } else {
+                let t = track(app, a, "track")?;
+                history::fader(&mut app.state, t, false);
+                if let Some(m) = crate::mixer::track_mut(&mut app.state, t) {
+                    m.volume = Some(vol);
+                    updated += 1;
+                }
+            }
+            app.state.history.end_sequence_named(prev, "AI gain stage");
+            app.sync_live();
+            app.invalidate();
+            return Ok(json!({"updated": updated, "volume": vol}));
+        }
+        _ => {
+            app.state.history.end_sequence_named(prev, "AI mix setup");
+            return Err("Unknown mix_setup op".into());
+        }
+    }
+}
+
+fn audio_analyze(app: &App) -> Value {
+    let s = &app.state;
+    let max_t = crate::mixer::max_insert(&s.project);
+    let mut clipping_tracks = Vec::new();
+    let mut hot_tracks = Vec::new();
+    let mut track_levels = Vec::new();
+    let mut master_peak_db = crate::meters::SILENT;
+
+    for (idx, m) in s.mixer.meters.iter().enumerate() {
+        if idx > max_t as usize {
+            break;
+        }
+        let peak = m.db[0].max(m.db[1]).max(m.hold[0]).max(m.hold[1]);
+        if idx == 0 {
+            master_peak_db = peak;
+        }
+        if peak > crate::meters::SILENT + 1.0 {
+            let name = crate::mixer::track(s, idx as u16).map(|t| t.name.clone()).unwrap_or_default();
+            if peak >= 0.0 {
+                clipping_tracks.push(json!({"track": idx, "name": name, "peak_db": peak}));
+            } else if peak >= -3.0 {
+                hot_tracks.push(json!({"track": idx, "name": name, "peak_db": peak}));
+            }
+            track_levels.push(json!({
+                "track": idx,
+                "name": name,
+                "db_l": m.db[0],
+                "db_r": m.db[1],
+                "hold_db": peak,
+                "vu": (m.vu[0] + m.vu[1]) * 0.5
+            }));
+        }
+    }
+
+    let unrouted_channels: Vec<_> = s.project.channels.iter().enumerate()
+        .filter(|(_, c)| c.mixer_track == 0)
+        .map(|(row, c)| json!({"row": row, "name": c.name}))
+        .collect();
+
+    let pat_notes = crate::piano::notes(s);
+    let channel_density: Vec<_> = s.project.channels.iter().enumerate().map(|(row, c)| {
+        let count = pat_notes.iter().filter(|n| n.channel == c.index).count();
+        json!({"row": row, "name": c.name, "mixer_track": c.mixer_track, "notes_in_pattern": count})
+    }).collect();
+
+    let master_assistant_active = crate::master_assistant::enabled(s);
+    let master_assistant_loaded = crate::master_assistant::slot(s).is_some();
+
+    json!({
+        "playing": app.transport.playing(),
+        "tempo": s.tempo,
+        "pattern": s.pattern,
+        "master_peak_db": if master_peak_db <= crate::meters::SILENT + 1.0 { Value::Null } else { json!(master_peak_db) },
+        "master_headroom_db": if master_peak_db <= crate::meters::SILENT + 1.0 { Value::Null } else { json!(-master_peak_db) },
+        "clipping_tracks": clipping_tracks,
+        "hot_tracks": hot_tracks,
+        "active_track_levels": track_levels,
+        "unrouted_channels": unrouted_channels,
+        "channel_density": channel_density,
+        "master_assistant": {"loaded": master_assistant_loaded, "enabled": master_assistant_active},
+    })
 }

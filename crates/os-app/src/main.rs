@@ -33,6 +33,7 @@ mod helper_install;
 mod voice_runtime;
 mod voice_plan;
 mod ai_commands;
+mod copilot;
 mod updates;
 mod donate;
 mod audio_cfg;

@@ -269,6 +269,7 @@ pub enum Body {
     StripSilence(crate::strip_silence::Form),
     VocalAlign(crate::vocal_align::Form),
     Ai,
+    Copilot,
     VoiceAssistant,
     Headphones(crate::headphones::Form),
     RoutePicker(crate::route_picker::Form),
@@ -340,6 +341,14 @@ pub enum DHit {
     AiRemember,
     AiForget,
     AiSetup,
+    CopilotSend,
+    CopilotAnalyze,
+    CopilotRollback,
+    CopilotBackend,
+    CopilotConfig,
+    CopilotField(u8),
+    CopilotMcp,
+    CopilotClear,
     Voice(crate::voice_assistant::Button),
     Headphone(usize),
     HeadphoneToggle,
@@ -559,7 +568,7 @@ impl App {
                 }
                 return;
             }
-            Body::Headphones(_) | Body::RoutePicker(_) | Body::Ai => return,
+            Body::Headphones(_) | Body::RoutePicker(_) | Body::Ai | Body::Copilot => return,
             Body::TimeSig(f) => {
                 // Its value list goes with it.
                 self.state.playlist.popup = None;
@@ -593,14 +602,14 @@ impl App {
             Body::File(_) => Reply::File(None),
             Body::Collaboration(_) | Body::NoteProperties(_) | Body::Normalize(_) | Body::StripSilence(_) | Body::Patch(_) | Body::ClipFx(..) | Body::VocalAlign(_) | Body::Shortcuts(_) => Reply::Button(Answer::Cancel),
             Body::TimeSig(_) => Reply::Button(Answer::Cancel),
-            Body::Project(_) | Body::Headphones(_) | Body::RoutePicker(_) | Body::MixAssistant(_) | Body::MixerInsert(_) | Body::Ai | Body::VoiceAssistant => Reply::Button(Answer::Cancel),
+            Body::Project(_) | Body::Headphones(_) | Body::RoutePicker(_) | Body::MixAssistant(_) | Body::MixerInsert(_) | Body::Ai | Body::Copilot | Body::VoiceAssistant => Reply::Button(Answer::Cancel),
         })
     }
 
     fn top_file(&mut self) -> Option<&mut FileDlg> {
         match &mut self.state.dialogs.last_mut()?.body {
             Body::File(f) => Some(f),
-            Body::Collaboration(_) | Body::NoteProperties(_) | Body::Normalize(_) | Body::StripSilence(_) | Body::Patch(_) | Body::ClipFx(..) | Body::VocalAlign(_) | Body::Msg(_) | Body::Shortcuts(_) | Body::TimeSig(_) | Body::Project(_) | Body::Headphones(_) | Body::RoutePicker(_) | Body::MixAssistant(_) | Body::MixerInsert(_) | Body::Ai | Body::VoiceAssistant => None,
+            Body::Collaboration(_) | Body::NoteProperties(_) | Body::Normalize(_) | Body::StripSilence(_) | Body::Patch(_) | Body::ClipFx(..) | Body::VocalAlign(_) | Body::Msg(_) | Body::Shortcuts(_) | Body::TimeSig(_) | Body::Project(_) | Body::Headphones(_) | Body::RoutePicker(_) | Body::MixAssistant(_) | Body::MixerInsert(_) | Body::Ai | Body::Copilot | Body::VoiceAssistant => None,
         }
     }
 
@@ -657,6 +666,31 @@ impl App {
             DHit::AiRemember=>self.state.ai.remember=!self.state.ai.remember,
             DHit::AiForget=>crate::ai_control::forget(self),
             DHit::AiSetup=>crate::ai_control::setup(self),
+            DHit::CopilotSend => crate::copilot::send_prompt(self, None),
+            DHit::CopilotAnalyze => crate::copilot::send_prompt(self, Some("Analiza todo el proyecto ahora: tempo, pistas sin rutear, niveles/clipping, Master Assistant y densidad de notas, y dime qué mejorarías.")),
+            DHit::CopilotRollback => crate::copilot::rollback(self),
+            DHit::CopilotBackend => crate::copilot::cycle_backend(self),
+            DHit::CopilotConfig => {
+                self.state.copilot.editing_config = !self.state.copilot.editing_config;
+                if !self.state.copilot.editing_config {
+                    crate::copilot::save_config(&self.state.copilot);
+                }
+            }
+            DHit::CopilotField(idx) => {
+                self.state.copilot.config_field = idx;
+            }
+            DHit::CopilotMcp => {
+                self.state.dialogs.pop();
+                self.modal_changed();
+                crate::ai_control::open(self);
+                return;
+            }
+            DHit::CopilotClear => {
+                if !self.state.copilot.busy {
+                    self.state.copilot.messages.truncate(1);
+                    self.state.copilot.scroll = 0.0;
+                }
+            }
             DHit::Voice(button) => crate::voice_assistant::button(self, button),
             DHit::MixAssistant(hit) => crate::mix_assistant::command(self, hit),
             DHit::RoutePick(t)=>{
@@ -707,7 +741,7 @@ impl App {
             DHit::Button(i) => {
                 let a = match &m.body {
                     Body::Msg(msg) => msg.buttons.get(i).copied().filter(|a| !(*a==Answer::Ok && matches!(msg.then,Then::StemChoose(_,0)))),
-                    Body::Collaboration(_) | Body::NoteProperties(_) | Body::Normalize(_) | Body::StripSilence(_) | Body::Patch(_) | Body::ClipFx(..) | Body::VocalAlign(_) | Body::File(_) | Body::Shortcuts(_) | Body::TimeSig(_) | Body::Project(_) | Body::Headphones(_) | Body::RoutePicker(_) | Body::MixAssistant(_) | Body::MixerInsert(_) | Body::Ai | Body::VoiceAssistant => None,
+                    Body::Collaboration(_) | Body::NoteProperties(_) | Body::Normalize(_) | Body::StripSilence(_) | Body::Patch(_) | Body::ClipFx(..) | Body::VocalAlign(_) | Body::File(_) | Body::Shortcuts(_) | Body::TimeSig(_) | Body::Project(_) | Body::Headphones(_) | Body::RoutePicker(_) | Body::MixAssistant(_) | Body::MixerInsert(_) | Body::Ai | Body::Copilot | Body::VoiceAssistant => None,
                 };
                 if let Some(a) = a {
                     self.answer(Reply::Button(a));
@@ -840,6 +874,77 @@ impl App {
             Body::Patch(_)=>crate::ml_patch::key(self,key,ctrl,alt),
             Body::ClipFx(..) | Body::Ai | Body::VoiceAssistant => {
                 if matches!(key, Key::Named(NamedKey::Escape)) { self.answer(Reply::Button(Answer::Cancel)); }
+            }
+            Body::Copilot => {
+                let cp = &mut self.state.copilot;
+                match key {
+                    Key::Named(NamedKey::Escape) => self.answer(Reply::Button(Answer::Cancel)),
+                    Key::Named(NamedKey::Enter) if !cp.editing_config => {
+                        crate::copilot::send_prompt(self, None);
+                    }
+                    Key::Named(NamedKey::Enter) => {
+                        cp.editing_config = false;
+                        crate::copilot::save_config(cp);
+                    }
+                    Key::Named(NamedKey::Backspace) => {
+                        if cp.editing_config {
+                            let target = match cp.config_field {
+                                0 => &mut cp.model,
+                                1 => &mut cp.api_key,
+                                _ => &mut cp.base_url,
+                            };
+                            target.pop();
+                        } else {
+                            cp.input.pop();
+                            cp.cursor = cp.input.len();
+                        }
+                    }
+                    Key::Character(c) if ctrl && c.eq_ignore_ascii_case("v") => {
+                        if let Ok(mut cb) = arboard::Clipboard::new() {
+                            if let Ok(txt) = cb.get_text() {
+                                let clean: String = txt.chars().filter(|ch| *ch != '\r' && *ch != '\n').collect();
+                                if cp.editing_config {
+                                    let target = match cp.config_field {
+                                        0 => &mut cp.model,
+                                        1 => &mut cp.api_key,
+                                        _ => &mut cp.base_url,
+                                    };
+                                    target.push_str(&clean);
+                                } else {
+                                    cp.input.push_str(&clean);
+                                    cp.cursor = cp.input.len();
+                                }
+                            }
+                        }
+                    }
+                    Key::Named(NamedKey::Space) => {
+                        if cp.editing_config {
+                            let target = match cp.config_field {
+                                0 => &mut cp.model,
+                                1 => &mut cp.api_key,
+                                _ => &mut cp.base_url,
+                            };
+                            target.push(' ');
+                        } else {
+                            cp.input.push(' ');
+                            cp.cursor = cp.input.len();
+                        }
+                    }
+                    Key::Character(c) if !ctrl && !alt => {
+                        if cp.editing_config {
+                            let target = match cp.config_field {
+                                0 => &mut cp.model,
+                                1 => &mut cp.api_key,
+                                _ => &mut cp.base_url,
+                            };
+                            target.push_str(c);
+                        } else {
+                            cp.input.push_str(c);
+                            cp.cursor = cp.input.len();
+                        }
+                    }
+                    _ => {}
+                }
             }
             Body::MixerInsert(form) => match key {
                 Key::Named(NamedKey::Escape) => self.answer(Reply::Button(Answer::Cancel)),
@@ -1002,7 +1107,7 @@ impl App {
     pub fn top_message(&self) -> Option<(String, String)> {
         match &self.state.dialogs.last()?.body {
             Body::Msg(m) => Some((m.title.clone(), m.plain())),
-            Body::Collaboration(_) | Body::NoteProperties(_) | Body::Normalize(_) | Body::StripSilence(_) | Body::Patch(_) | Body::ClipFx(..) | Body::VocalAlign(_) | Body::File(_) | Body::Shortcuts(_) | Body::TimeSig(_) | Body::Project(_) | Body::Headphones(_) | Body::RoutePicker(_) | Body::MixAssistant(_) | Body::MixerInsert(_) | Body::Ai | Body::VoiceAssistant => None,
+            Body::Collaboration(_) | Body::NoteProperties(_) | Body::Normalize(_) | Body::StripSilence(_) | Body::Patch(_) | Body::ClipFx(..) | Body::VocalAlign(_) | Body::File(_) | Body::Shortcuts(_) | Body::TimeSig(_) | Body::Project(_) | Body::Headphones(_) | Body::RoutePicker(_) | Body::MixAssistant(_) | Body::MixerInsert(_) | Body::Ai | Body::Copilot | Body::VoiceAssistant => None,
         }
     }
 }

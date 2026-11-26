@@ -864,7 +864,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            16
+            20
         );
         assert_eq!(a.state.ai.activity.as_ref().unwrap().last_command, first_command);
         open(&mut a);

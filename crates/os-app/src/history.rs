@@ -1278,6 +1278,23 @@ pub fn undo(s: &mut State) -> Option<&'static str> {
     Some(name)
 }
 
+/// Current number of applied undoable steps (used as a rollback checkpoint for AI pilot turns).
+pub fn done_count(s: &State) -> usize {
+    s.history.done
+}
+
+/// Rolls back the project to `target_done`, undoing all steps recorded after that checkpoint.
+pub fn undo_to(s: &mut State, target_done: usize) -> usize {
+    let mut count = 0;
+    while s.history.done > target_done {
+        if undo(s).is_none() {
+            break;
+        }
+        count += 1;
+    }
+    count
+}
+
 /// Redoes the oldest undone step; its name, or `None` when nothing is undone.
 pub fn redo(s: &mut State) -> Option<&'static str> {
     if s.history.done<s.history.steps.len() && !permitted(s,s.history.done){return None;}
