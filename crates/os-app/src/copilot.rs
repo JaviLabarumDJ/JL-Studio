@@ -92,11 +92,10 @@ pub struct CopilotState {
     pub open: bool,
     pub input_focused: bool,
     pub backend: Backend,
-    pub model: String,
-    pub api_key: String,
-    pub base_url: String,
-    pub input: String,
-    pub cursor: usize,
+    pub model: crate::dialog::Field,
+    pub api_key: crate::dialog::Field,
+    pub base_url: crate::dialog::Field,
+    pub input: crate::dialog::Field,
     pub editing_config: bool,
     pub config_field: u8, // 0 = model, 1 = api_key, 2 = base_url
     pub messages: Vec<ChatMessage>,
@@ -135,15 +134,21 @@ impl Default for CopilotState {
                 Backend::Gemini => "https://generativelanguage.googleapis.com".into(),
             });
 
+        let mut model_f = crate::dialog::Field::default();
+        model_f.set(&model);
+        let mut key_f = crate::dialog::Field::default();
+        key_f.set(&api_key);
+        let mut url_f = crate::dialog::Field::default();
+        url_f.set(&base_url);
+
         Self {
             open: false,
             input_focused: true,
             backend,
-            model,
-            api_key,
-            base_url,
-            input: String::new(),
-            cursor: 0,
+            model: model_f,
+            api_key: key_f,
+            base_url: url_f,
+            input: crate::dialog::Field::default(),
             editing_config: false,
             config_field: 0,
             messages: vec![ChatMessage {
@@ -253,73 +258,22 @@ pub fn key(app: &mut App, key: &Key, ctrl: bool, alt: bool) {
         Key::Named(NamedKey::Enter) if !cp.editing_config && !shift => {
             send_prompt(app, None);
         }
-        Key::Named(NamedKey::Enter) if !cp.editing_config && shift => {
-            cp.input.push('\n');
-            cp.cursor = cp.input.len();
-        }
-        Key::Named(NamedKey::Enter) => {
+        Key::Named(NamedKey::Enter) if cp.editing_config => {
             cp.editing_config = false;
             save_config(cp);
         }
-        Key::Named(NamedKey::Backspace) => {
-            if cp.editing_config {
-                let target = match cp.config_field {
+        _ => {
+            let field = if cp.editing_config {
+                match cp.config_field {
                     0 => &mut cp.model,
                     1 => &mut cp.api_key,
                     _ => &mut cp.base_url,
-                };
-                target.pop();
-            } else {
-                cp.input.pop();
-                cp.cursor = cp.input.len();
-            }
-        }
-        Key::Character(c) if ctrl && c.eq_ignore_ascii_case("v") => {
-            if let Ok(mut cb) = arboard::Clipboard::new() {
-                if let Ok(txt) = cb.get_text() {
-                    if cp.editing_config {
-                        let clean: String = txt.chars().filter(|ch| *ch != '\r' && *ch != '\n').collect();
-                        let target = match cp.config_field {
-                            0 => &mut cp.model,
-                            1 => &mut cp.api_key,
-                            _ => &mut cp.base_url,
-                        };
-                        target.push_str(&clean);
-                    } else {
-                        let clean: String = txt.chars().filter(|ch| *ch != '\r').collect();
-                        cp.input.push_str(&clean);
-                        cp.cursor = cp.input.len();
-                    }
                 }
-            }
-        }
-        Key::Named(NamedKey::Space) => {
-            if cp.editing_config {
-                let target = match cp.config_field {
-                    0 => &mut cp.model,
-                    1 => &mut cp.api_key,
-                    _ => &mut cp.base_url,
-                };
-                target.push(' ');
             } else {
-                cp.input.push(' ');
-                cp.cursor = cp.input.len();
-            }
+                &mut cp.input
+            };
+            field.key_mod(key, ctrl, alt, shift);
         }
-        Key::Character(c) if !ctrl && !alt => {
-            if cp.editing_config {
-                let target = match cp.config_field {
-                    0 => &mut cp.model,
-                    1 => &mut cp.api_key,
-                    _ => &mut cp.base_url,
-                };
-                target.push_str(c);
-            } else {
-                cp.input.push_str(c);
-                cp.cursor = cp.input.len();
-            }
-        }
-        _ => {}
     }
     app.invalidate();
 }
@@ -327,9 +281,9 @@ pub fn key(app: &mut App, key: &Key, ctrl: bool, alt: bool) {
 pub fn save_config(s: &CopilotState) {
     crate::settings_file::write_all(&[
         ("ai_copilot_backend".into(), s.backend.as_str().to_string()),
-        ("ai_copilot_model".into(), s.model.clone()),
-        ("ai_copilot_key".into(), s.api_key.clone()),
-        ("ai_copilot_url".into(), s.base_url.clone()),
+        ("ai_copilot_model".into(), s.model.as_str().to_string()),
+        ("ai_copilot_key".into(), s.api_key.as_str().to_string()),
+        ("ai_copilot_url".into(), s.base_url.as_str().to_string()),
     ]);
 }
 
@@ -339,19 +293,19 @@ pub fn cycle_backend(app: &mut App) {
     }
     let next = app.state.copilot.backend.next();
     app.state.copilot.backend = next;
-    app.state.copilot.model = next.default_model().to_string();
-    app.state.copilot.base_url = match next {
-        Backend::Ollama => "http://127.0.0.1:11434".into(),
-        Backend::OpenAi => "https://api.openai.com/v1".into(),
-        Backend::Gemini => "https://generativelanguage.googleapis.com".into(),
-    };
+    app.state.copilot.model.set(next.default_model());
+    app.state.copilot.base_url.set(match next {
+        Backend::Ollama => "http://127.0.0.1:11434",
+        Backend::OpenAi => "https://api.openai.com/v1",
+        Backend::Gemini => "https://generativelanguage.googleapis.com",
+    });
     if next == Backend::Gemini && app.state.copilot.api_key.is_empty() {
         if let Ok(k) = std::env::var("GEMINI_API_KEY") {
-            app.state.copilot.api_key = k;
+            app.state.copilot.api_key.set(&k);
         }
     } else if next == Backend::OpenAi && app.state.copilot.api_key.is_empty() {
         if let Ok(k) = std::env::var("OPENAI_API_KEY") {
-            app.state.copilot.api_key = k;
+            app.state.copilot.api_key.set(&k);
         }
     }
     save_config(&app.state.copilot);
@@ -382,9 +336,8 @@ pub fn send_prompt(app: &mut App, custom_prompt: Option<&str>) {
     let prompt = match custom_prompt {
         Some(p) => p.trim().to_string(),
         None => {
-            let p = app.state.copilot.input.trim().to_string();
+            let p = app.state.copilot.input.as_str().trim().to_string();
             app.state.copilot.input.clear();
-            app.state.copilot.cursor = 0;
             p
         }
     };
@@ -408,9 +361,9 @@ pub fn send_prompt(app: &mut App, custom_prompt: Option<&str>) {
     app.copilot_runtime = Some(CopilotRuntime { tool_rx, event_rx });
 
     let backend = app.state.copilot.backend;
-    let model = app.state.copilot.model.clone();
-    let api_key = app.state.copilot.api_key.clone();
-    let base_url = app.state.copilot.base_url.clone();
+    let model = app.state.copilot.model.as_str().to_string();
+    let api_key = app.state.copilot.api_key.as_str().to_string();
+    let base_url = app.state.copilot.base_url.as_str().to_string();
     let history_msgs: Vec<(ChatRole, String)> = app
         .state
         .copilot

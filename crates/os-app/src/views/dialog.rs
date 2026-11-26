@@ -66,7 +66,7 @@ pub fn paint(ui: &mut Ui, s: &State) {
                 crate::vocal_align::paint(ui, r, form);
             }
             Body::Ai => ai_box(ui,s,m),
-            Body::Copilot => copilot_box(ui,s,m),
+            Body::Copilot => paint_copilot_panel(ui, s, place(s, m, 760., 560.)),
             Body::VoiceAssistant => voice_box(ui, s, m),
             Body::RoutePicker(f) => route_picker_box(ui,s,m,f),
             Body::MixAssistant(form) => crate::mix_assistant::paint(ui, s, m, form),
@@ -1212,26 +1212,28 @@ pub fn paint_copilot_panel(ui: &mut Ui, s: &State, r: Rect) {
     btn(ui, Rect::new(r.right() - 186., y0, 58., 24.), CopilotHit::Config, if cp.editing_config { "Guardar" } else { "Config" }, cp.editing_config, "Configurar modelo, API Key y URL");
     btn(ui, Rect::new(r.right() - 122., y0, 58., 24.), CopilotHit::Clear, "Limpiar", false, "Limpiar historial de chat");
     btn(ui, Rect::new(r.right() - 58., y0, 48., 24.), CopilotHit::Mcp, "MCP", false, "Abrir configuracion MCP externa");
-    ui.c.text_clip(Font::new(10), r.x + 10., y0 + 27., r.w - 20., dim, &format!("Modelo: {}", cp.model));
+    ui.c.text_clip(Font::new(10), r.x + 10., y0 + 27., r.w - 20., dim, &format!("Modelo: {}", cp.model.as_str()));
 
     let mut chat_top = y0 + 44.;
     if cp.editing_config {
         let cfg_r = Rect::new(r.x + 10., chat_top, r.w - 20., 84.);
         ui.c.fill_rrect(cfg_r, 5., ui.t.s(0x222b30));
-        let fields: [(u8, &str, String); 3] = [
-            (0, "Modelo:", cp.model.clone()),
-            (1, "API Key:", if cp.api_key.is_empty() { "(vacio; opcional Ollama)".into() } else { "*".repeat(cp.api_key.len().min(18)) }),
-            (2, "URL:", cp.base_url.clone()),
+        let fields: [(u8, &str, &crate::dialog::Field, &'static str); 3] = [
+            (0, "Modelo:", &cp.model, "ej. llama-3.3-70b-versatile"),
+            (1, "API Key:", &cp.api_key, "Pega tu clave con Ctrl+V (opcional en Ollama)"),
+            (2, "URL:", &cp.base_url, "ej. https://api.groq.com/openai/v1"),
         ];
-        for (idx, lbl, val) in fields {
+        for (idx, lbl, field, ph) in fields {
             let fy = cfg_r.y + 6. + f32::from(idx) * 25.;
             let fr = Rect::new(cfg_r.x + 64., fy, cfg_r.w - 72., 21.);
             let active = cp.config_field == idx && cp.input_focused;
-            let _ = ui.hit(fr, Action::Copilot(CopilotHit::Field(idx)), "Haz clic y escribe o pega con Ctrl+V");
             ui.c.text_clip(Font::new(10), cfg_r.x + 8., fy + 4., 54., dim, lbl);
             ui.c.fill_rrect(fr, 3., ui.t.s(0x161c20));
             ui.c.stroke_rrect(fr, 3., 1., if active { ui.t.accent } else { ui.t.s(0x3a464d) });
-            ui.c.text_clip(Font::new(10), fr.x + 6., fy + 4., fr.w - 12., ink, &val);
+            let inner = Rect::new(fr.x + 5., fr.y, (fr.w - 10.).max(0.), fr.h);
+            let font = Font::new(10);
+            let origin = crate::dialog::text::paint(ui, inner, field, active, font, ink, ui.t.accent.with_alpha(95), ph);
+            crate::dialog::text::carets(ui, fr, field, font, origin, |i| Action::TextCaret(crate::dialog::text::Target::Copilot(idx + 1), i), ph);
         }
         chat_top += 92.;
     }
@@ -1301,139 +1303,18 @@ pub fn paint_copilot_panel(ui: &mut Ui, s: &State, r: Rect) {
     btn(ui, Rect::new(r.x + 128., bar_y, 130., 24.), CopilotHit::Rollback, "Deshacer piloto", can_undo, "Revertir todos los cambios del ultimo turno de la IA");
     ui.c.text_clip(Font::new(10), r.x + 12., bar_y + 28., r.w - 24., if cp.busy { ui.t.accent } else { dim }, &cp.status);
 
-    // Multi-line input box + Send
+    // Input box with full caret, selection, Ctrl+A/C/V/X/Z + Send
     let in_y = r.bottom() - input_h - 10.;
     let in_r = Rect::new(r.x + 10., in_y, r.w - 86., input_h);
-    let _ = ui.hit(in_r, Action::Copilot(CopilotHit::FocusInput), "Escribe tu orden (Enter: enviar, Shift+Enter: salto de linea)");
+    let active_in = cp.input_focused && !cp.editing_config;
     ui.c.fill_rrect(in_r, 4., ui.t.s(0x12171a));
-    ui.c.stroke_rrect(in_r, 4., 1., if cp.input_focused && !cp.editing_config { ui.t.accent } else { ui.t.s(0x3a464d) });
-    ui.c.push_clip(in_r);
-    let in_font = Font::new(11);
-    if cp.input.is_empty() {
-        ui.c.text_clip(in_font, in_r.x + 8., in_r.y + 8., in_r.w - 16., dim, "Escribe aqui (Enter: enviar, Shift+Enter: linea)...");
-    } else {
-        let lines = copilot_wrap(ui.c, in_font, &cp.input, in_r.w - 16.);
-        let start = lines.len().saturating_sub(4);
-        let mut ly = in_r.y + 7.;
-        for line in lines.iter().skip(start) {
-            ui.c.text_clip(in_font, in_r.x + 8., ly, in_r.w - 16., ink, line);
-            ly += 16.;
-        }
-    }
-    ui.c.pop_clip();
+    ui.c.stroke_rrect(in_r, 4., 1., if active_in { ui.t.accent } else { ui.t.s(0x3a464d) });
+    let inner_in = Rect::new(in_r.x + 6., in_r.y, (in_r.w - 12.).max(0.), in_r.h);
+    let in_font = Font::new(12);
+    let ph_in = "Escribe o pega tu orden aqui (Enter: enviar, Ctrl+A/C/V/X)...";
+    let origin_in = crate::dialog::text::paint(ui, inner_in, &cp.input, active_in, in_font, ink, ui.t.accent.with_alpha(95), ph_in);
+    crate::dialog::text::carets(ui, in_r, &cp.input, in_font, origin_in, |i| Action::TextCaret(crate::dialog::text::Target::Copilot(0), i), ph_in);
     btn(ui, Rect::new(in_r.right() + 6., in_y, 60., input_h), CopilotHit::Send, if cp.busy { "..." } else { "Enviar" }, !cp.busy, "Enviar orden al Piloto IA (Enter)");
-}
-
-fn copilot_box(ui: &mut Ui, s: &State, m: &Modal) {
-    use crate::copilot::ChatRole;
-    let w = 780f32.min(s.screen.0 - 20.).max(440.);
-    let h = 580f32.min(s.screen.1 - 20.).max(380.);
-    let r = place(s, m, w, h);
-    frame(ui, r, "Piloto de Produccion IA - JL Studio");
-    let cp = &s.copilot;
-    let ink = ui.t.text;
-    let dim = ui.t.text_dim;
-    let btn = |ui: &mut Ui, b: Rect, dh: DHit, label: &str, lit: bool, tip: &'static str| {
-        let hover = hit(ui, b, dh, tip);
-        let bg = if lit { ui.t.s(0x3a6445) } else if hover { ui.t.button_hi } else { ui.t.s(0x303b40) };
-        ui.c.fill_rrect(b, 4., bg);
-        ui.c.text_center(Font::new(11).bold(), b, ink, label);
-    };
-
-    let y0 = r.y + 34.;
-    btn(ui, Rect::new(r.x + 14., y0, 128., 26.), DHit::CopilotBackend, cp.backend.label(), false, "Cambiar motor IA (Ollama / Gemini / OpenAI)");
-    ui.c.text_clip(Font::new(11), r.x + 150., y0 + 6., r.w - 430., dim, &format!("Modelo: {}", cp.model));
-    btn(ui, Rect::new(r.right() - 266., y0, 74., 26.), DHit::CopilotConfig, if cp.editing_config { "Guardar" } else { "Config" }, cp.editing_config, "Configurar modelo, API Key y URL");
-    btn(ui, Rect::new(r.right() - 184., y0, 78., 26.), DHit::CopilotClear, "Limpiar", false, "Limpiar historial de chat");
-    btn(ui, Rect::new(r.right() - 98., y0, 84., 26.), DHit::CopilotMcp, "MCP", false, "Abrir configuracion MCP externa");
-
-    let mut chat_top = y0 + 34.;
-    if cp.editing_config {
-        let cfg_r = Rect::new(r.x + 14., chat_top, r.w - 28., 84.);
-        ui.c.fill_rrect(cfg_r, 5., ui.t.s(0x222b30));
-        let fields: [(u8, &str, String); 3] = [
-            (0, "Modelo:", cp.model.clone()),
-            (1, "API Key:", if cp.api_key.is_empty() { "(vacio; opcional en Ollama)".into() } else { "*".repeat(cp.api_key.len().min(20)) }),
-            (2, "URL:", cp.base_url.clone()),
-        ];
-        for (idx, lbl, val) in fields {
-            let fy = cfg_r.y + 6. + f32::from(idx) * 25.;
-            let fr = Rect::new(cfg_r.x + 76., fy, cfg_r.w - 86., 21.);
-            let active = cp.config_field == idx;
-            let _ = hit(ui, fr, DHit::CopilotField(idx), "Haz clic y escribe o pega con Ctrl+V");
-            ui.c.text_clip(Font::new(11), cfg_r.x + 10., fy + 3., 62., dim, lbl);
-            ui.c.fill_rrect(fr, 3., ui.t.s(0x161c20));
-            ui.c.stroke_rrect(fr, 3., 1., if active { ui.t.accent } else { ui.t.s(0x3a464d) });
-            ui.c.text_clip(Font::new(11), fr.x + 6., fy + 3., fr.w - 12., ink, &val);
-        }
-        chat_top += 92.;
-    }
-
-    let input_h = 34.;
-    let bar_h = 28.;
-    let bar_y = r.bottom() - input_h - bar_h - 18.;
-    let chat_r = Rect::new(r.x + 14., chat_top, r.w - 28., (bar_y - chat_top - 8.).max(80.));
-    ui.c.fill_rrect(chat_r, 5., ui.t.s(0x181f23));
-    ui.c.push_clip(chat_r);
-
-    let msg_font = Font::new(12);
-    let tool_font = Font::new(10);
-    let pad = 10.;
-    let max_tw = chat_r.w - pad * 4.;
-    let mut blocks: Vec<(ChatRole, Vec<String>, f32)> = Vec::new();
-    let mut total_h = 8.;
-    for msg in &cp.messages {
-        let f = if msg.role == ChatRole::Tool { tool_font } else { msg_font };
-        let lh = if msg.role == ChatRole::Tool { 14. } else { 17. };
-        let lines = copilot_wrap(ui.c, f, &msg.text, max_tw);
-        let bh = lines.len().max(1) as f32 * lh + 12.;
-        total_h += bh + 6.;
-        blocks.push((msg.role, lines, bh));
-    }
-    let max_scroll = (total_h - chat_r.h).max(0.);
-    cp.max_scroll.set(max_scroll);
-    let scroll = cp.scroll.clamp(0., max_scroll);
-    let mut cy = chat_r.y + 8. - scroll;
-    for (role, lines, bh) in blocks {
-        if cy + bh >= chat_r.y && cy <= chat_r.bottom() {
-            let bx = chat_r.x + pad;
-            let bw = chat_r.w - pad * 2.;
-            let bg = match role {
-                ChatRole::User => ui.t.s(0x284355),
-                ChatRole::Assistant => ui.t.s(0x242e34),
-                ChatRole::Tool => ui.t.s(0x1e2824),
-                ChatRole::Error => ui.t.s(0x4b2424),
-            };
-            let fg = match role {
-                ChatRole::Tool => ui.t.s(0x98d8a8),
-                ChatRole::Error => ui.t.s(0xffb4b4),
-                _ => ink,
-            };
-            let f = if role == ChatRole::Tool { tool_font } else { msg_font };
-            let lh = if role == ChatRole::Tool { 14. } else { 17. };
-            ui.c.fill_rrect(Rect::new(bx, cy, bw, bh), 4., bg);
-            let mut ly = cy + 6.;
-            for line in lines {
-                ui.c.text_clip(f, bx + 8., ly, bw - 16., fg, &line);
-                ly += lh;
-            }
-        }
-        cy += bh + 6.;
-    }
-    ui.c.pop_clip();
-
-    btn(ui, Rect::new(r.x + 14., bar_y, 126., 26.), DHit::CopilotAnalyze, "Analizar todo", false, "Analiza proyecto, pistas sin rutear, niveles y clipping");
-    let can_undo = cp.last_checkpoint.is_some_and(|(_, n)| n > 0);
-    btn(ui, Rect::new(r.x + 148., bar_y, 142., 26.), DHit::CopilotRollback, "Deshacer piloto", can_undo, "Revertir todos los cambios del ultimo turno de la IA");
-    ui.c.text_clip(Font::new(11), r.x + 300., bar_y + 6., r.w - 314., if cp.busy { ui.t.accent } else { dim }, &cp.status);
-
-    let in_y = r.bottom() - input_h - 10.;
-    let in_r = Rect::new(r.x + 14., in_y, r.w - 114., input_h);
-    ui.c.fill_rrect(in_r, 4., ui.t.s(0x14191c));
-    ui.c.stroke_rrect(in_r, 4., 1., if !cp.editing_config { ui.t.accent } else { ui.t.s(0x3a464d) });
-    let shown_in = if cp.input.is_empty() { "Escribe una orden (ej. 'Analiza todo y crea acordes en Fa menor')..." } else { &cp.input };
-    ui.c.text_clip(Font::new(12), in_r.x + 8., in_r.y + 9., in_r.w - 16., if cp.input.is_empty() { dim } else { ink }, shown_in);
-    btn(ui, Rect::new(in_r.right() + 8., in_y, 78., input_h), DHit::CopilotSend, if cp.busy { "..." } else { "Enviar" }, !cp.busy, "Enviar orden al Piloto IA (Enter)");
 }
 
 fn ai_box(ui:&mut Ui,s:&State,m:&Modal){

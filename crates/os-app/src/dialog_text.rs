@@ -14,6 +14,7 @@ pub(crate) enum Target {
     MenuName,
     Info(crate::views::settings::InfoField),
     Folder(usize, crate::search_folders::Col),
+    Copilot(u8),
 }
 
 impl Target {
@@ -48,6 +49,16 @@ impl Target {
             Self::Folder(row, column) => {
                 app.search_folder_cell(row, column);
                 Some(&mut app.state.settings.folder_edit.as_mut()?.text)
+            }
+            Self::Copilot(slot) => {
+                app.state.copilot.input_focused = true;
+                let cp = &mut app.state.copilot;
+                match slot {
+                    0 => Some(&mut cp.input),
+                    1 => { cp.config_field = 0; Some(&mut cp.model) }
+                    2 => { cp.config_field = 1; Some(&mut cp.api_key) }
+                    _ => { cp.config_field = 2; Some(&mut cp.base_url) }
+                }
             }
         }
     }

@@ -7686,7 +7686,7 @@ impl App {
         if !matches!(action, Some(Action::VocalResize(_))) {
             self.state.playlist.vocal.size.click = None;
         }
-        if !self.modal_open() && !matches!(action, Some(Action::Copilot(_))) {
+        if !self.modal_open() && !matches!(action, Some(Action::Copilot(_) | Action::TextCaret(crate::dialog::text::Target::Copilot(_), _))) {
             self.state.copilot.input_focused = false;
         }
         if !self.modal_open() {

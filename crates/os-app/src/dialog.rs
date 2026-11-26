@@ -876,75 +876,7 @@ impl App {
                 if matches!(key, Key::Named(NamedKey::Escape)) { self.answer(Reply::Button(Answer::Cancel)); }
             }
             Body::Copilot => {
-                let cp = &mut self.state.copilot;
-                match key {
-                    Key::Named(NamedKey::Escape) => self.answer(Reply::Button(Answer::Cancel)),
-                    Key::Named(NamedKey::Enter) if !cp.editing_config => {
-                        crate::copilot::send_prompt(self, None);
-                    }
-                    Key::Named(NamedKey::Enter) => {
-                        cp.editing_config = false;
-                        crate::copilot::save_config(cp);
-                    }
-                    Key::Named(NamedKey::Backspace) => {
-                        if cp.editing_config {
-                            let target = match cp.config_field {
-                                0 => &mut cp.model,
-                                1 => &mut cp.api_key,
-                                _ => &mut cp.base_url,
-                            };
-                            target.pop();
-                        } else {
-                            cp.input.pop();
-                            cp.cursor = cp.input.len();
-                        }
-                    }
-                    Key::Character(c) if ctrl && c.eq_ignore_ascii_case("v") => {
-                        if let Ok(mut cb) = arboard::Clipboard::new() {
-                            if let Ok(txt) = cb.get_text() {
-                                let clean: String = txt.chars().filter(|ch| *ch != '\r' && *ch != '\n').collect();
-                                if cp.editing_config {
-                                    let target = match cp.config_field {
-                                        0 => &mut cp.model,
-                                        1 => &mut cp.api_key,
-                                        _ => &mut cp.base_url,
-                                    };
-                                    target.push_str(&clean);
-                                } else {
-                                    cp.input.push_str(&clean);
-                                    cp.cursor = cp.input.len();
-                                }
-                            }
-                        }
-                    }
-                    Key::Named(NamedKey::Space) => {
-                        if cp.editing_config {
-                            let target = match cp.config_field {
-                                0 => &mut cp.model,
-                                1 => &mut cp.api_key,
-                                _ => &mut cp.base_url,
-                            };
-                            target.push(' ');
-                        } else {
-                            cp.input.push(' ');
-                            cp.cursor = cp.input.len();
-                        }
-                    }
-                    Key::Character(c) if !ctrl && !alt => {
-                        if cp.editing_config {
-                            let target = match cp.config_field {
-                                0 => &mut cp.model,
-                                1 => &mut cp.api_key,
-                                _ => &mut cp.base_url,
-                            };
-                            target.push_str(c);
-                        } else {
-                            cp.input.push_str(c);
-                            cp.cursor = cp.input.len();
-                        }
-                    }
-                    _ => {}
-                }
+                crate::copilot::key(self, key, ctrl, alt);
             }
             Body::MixerInsert(form) => match key {
                 Key::Named(NamedKey::Escape) => self.answer(Reply::Button(Answer::Cancel)),
