@@ -9302,7 +9302,9 @@ impl App {
             return self.dialog_wheel(dy);
         }
         if self.state.copilot.open && crate::copilot::panel_rect(&self.state).contains(self.mouse.0, self.mouse.1) {
-            self.state.copilot.scroll = (self.state.copilot.scroll - dy * 42.0).max(0.0);
+            let max_s = self.state.copilot.max_scroll.get();
+            let cur = self.state.copilot.scroll.clamp(0.0, max_s);
+            self.state.copilot.scroll = (cur - dy * 42.0).clamp(0.0, max_s);
             self.invalidate();
             return;
         }

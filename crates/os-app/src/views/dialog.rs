@@ -1259,6 +1259,7 @@ pub fn paint_copilot_panel(ui: &mut Ui, s: &State, r: Rect) {
         blocks.push((msg.role, lines, bh));
     }
     let max_scroll = (total_h - chat_r.h).max(0.);
+    cp.max_scroll.set(max_scroll);
     let scroll = cp.scroll.clamp(0., max_scroll);
     let mut cy = chat_r.y + 8. - scroll;
     for (role, lines, bh) in blocks {
@@ -1390,6 +1391,7 @@ fn copilot_box(ui: &mut Ui, s: &State, m: &Modal) {
         blocks.push((msg.role, lines, bh));
     }
     let max_scroll = (total_h - chat_r.h).max(0.);
+    cp.max_scroll.set(max_scroll);
     let scroll = cp.scroll.clamp(0., max_scroll);
     let mut cy = chat_r.y + 8. - scroll;
     for (role, lines, bh) in blocks {

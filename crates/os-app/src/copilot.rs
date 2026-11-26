@@ -103,6 +103,7 @@ pub struct CopilotState {
     pub busy: bool,
     pub status: String,
     pub scroll: f32,
+    pub max_scroll: std::cell::Cell<f32>,
     pub last_checkpoint: Option<(usize, usize)>, // (history_done, tool_calls)
 }
 
@@ -152,6 +153,7 @@ impl Default for CopilotState {
             busy: false,
             status: "Listo. Escribe una orden o pulsa Analizar.".into(),
             scroll: 0.0,
+            max_scroll: std::cell::Cell::new(0.0),
             last_checkpoint: None,
         }
     }
@@ -667,6 +669,9 @@ fn post_json_with_retry(
             }
             Err(ureq::Error::Status(code, r)) => {
                 let detail = r.into_string().unwrap_or_default();
+                if code == 429 && (detail.contains("PerDay") || detail.contains("FreeTier")) {
+                    return Err("Cuota diaria gratuita de Gemini agotada para este modelo. Cambia a gemini-2.5-flash-lite / gemini-2.0-flash en Config, activa facturacion en AI Studio, o usa Ollama (Local) sin limites.".into());
+                }
                 let transient = matches!(code, 429 | 500 | 502 | 503 | 504);
                 if transient && attempt < delays.len() {
                     let wait = delays[attempt];
