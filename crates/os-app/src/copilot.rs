@@ -392,15 +392,45 @@ fn openai_tools() -> Vec<Value> {
         .collect()
 }
 
+fn sanitize_gemini_schema(v: Value) -> Value {
+    match v {
+        Value::Object(mut map) => {
+            map.remove("additionalProperties");
+            if let Some(Value::Object(props)) = map.get("properties") {
+                if props.is_empty() {
+                    map.remove("properties");
+                    map.remove("required");
+                }
+            }
+            let cleaned = map
+                .into_iter()
+                .map(|(k, val)| (k, sanitize_gemini_schema(val)))
+                .collect();
+            Value::Object(cleaned)
+        }
+        Value::Array(arr) => Value::Array(arr.into_iter().map(sanitize_gemini_schema).collect()),
+        other => other,
+    }
+}
+
 fn gemini_tools() -> Vec<Value> {
     let decls: Vec<Value> = crate::ai_commands::tools()
         .into_iter()
         .map(|t| {
-            json!({
-                "name": t["name"],
-                "description": t["description"],
-                "parameters": t["inputSchema"],
-            })
+            let schema = sanitize_gemini_schema(t["inputSchema"].clone());
+            let has_props = schema.get("properties").is_some();
+            if has_props {
+                json!({
+                    "name": t["name"],
+                    "description": t["description"],
+                    "parameters": schema,
+                })
+            } else {
+                json!({
+                    "name": t["name"],
+                    "description": t["description"],
+                })
+            }
         })
         .collect();
     vec![json!({ "functionDeclarations": decls })]
@@ -458,9 +488,14 @@ fn run_agent_loop(
                 if backend == Backend::OpenAi && !api_key.is_empty() {
                     req = req.set("Authorization", &format!("Bearer {api_key}"));
                 }
-                let raw_resp = req
-                    .send_string(&body.to_string())
-                    .map_err(|e| format!("Error de conexión ({url}): {e}"))?;
+                let raw_resp = match req.send_string(&body.to_string()) {
+                    Ok(r) => r,
+                    Err(ureq::Error::Status(code, r)) => {
+                        let detail = r.into_string().unwrap_or_default();
+                        return Err(format!("Error HTTP {code}: {detail}"));
+                    }
+                    Err(e) => return Err(format!("Error de conexión: {e}")),
+                };
                 let resp: Value = serde_json::from_reader(raw_resp.into_reader())
                     .map_err(|e| format!("JSON inválido del modelo: {e}"))?;
 
@@ -508,10 +543,9 @@ fn run_agent_loop(
                 return Err("Falta GEMINI_API_KEY. Configúrala en el panel o usa Ollama local.".into());
             }
             let url = format!(
-                "{}/v1beta/models/{}:generateContent?key={}",
+                "{}/v1beta/models/{}:generateContent",
                 base_url.trim_end_matches('/'),
-                model.trim(),
-                api_key.trim()
+                model.trim()
             );
             let mut contents: Vec<Value> = history_msgs
                 .iter()
@@ -531,11 +565,19 @@ fn run_agent_loop(
                     "contents": contents,
                     "tools": tools,
                 });
-                let raw_resp = agent
+                let raw_resp = match agent
                     .post(&url)
                     .set("Content-Type", "application/json")
+                    .set("x-goog-api-key", api_key.trim())
                     .send_string(&body.to_string())
-                    .map_err(|e| format!("Error Gemini API: {e}"))?;
+                {
+                    Ok(r) => r,
+                    Err(ureq::Error::Status(code, r)) => {
+                        let detail = r.into_string().unwrap_or_default();
+                        return Err(format!("Error Gemini ({code}): {detail}"));
+                    }
+                    Err(e) => return Err(format!("Error de conexión Gemini: {e}")),
+                };
                 let resp: Value = serde_json::from_reader(raw_resp.into_reader())
                     .map_err(|e| format!("JSON inválido de Gemini: {e}"))?;
 
