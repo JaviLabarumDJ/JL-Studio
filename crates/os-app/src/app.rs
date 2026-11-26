@@ -153,6 +153,7 @@ pub enum Action {
     PitchDraw(crate::piano_pitch::Hit),
     RackStrip(crate::rack_mixer::Command),
     Ai,
+    Copilot(crate::copilot::CopilotHit),
     Voice(crate::voice_assistant::Button),
     Updates,
     Donate,
@@ -1367,9 +1368,10 @@ impl State {
     pub fn work_rect(&self) -> Rect {
         if self.native_view.is_some() {return Rect::new(0.,0.,self.screen.0,self.screen.1);}
         let width = if self.show_browser { views::browser_w(self) } else { 0.0 };
+        let copilot_w = crate::copilot::panel_width(self);
         let left = if views::browser_right(self) { 0. } else { width };
         let top = views::work_y(self);
-        Rect::new(left, top, (self.screen.0 - width).max(0.0), (self.screen.1 - top).max(0.0))
+        Rect::new(left, top, (self.screen.0 - width - copilot_w).max(0.0), (self.screen.1 - top).max(0.0))
     }
 
     /// The window's floating rect, kept at least its minimum size and at most the screen's, with its part in the
@@ -7684,6 +7686,9 @@ impl App {
         if !matches!(action, Some(Action::VocalResize(_))) {
             self.state.playlist.vocal.size.click = None;
         }
+        if !self.modal_open() && !matches!(action, Some(Action::Copilot(_))) {
+            self.state.copilot.input_focused = false;
+        }
         if !self.modal_open() {
             if let Some(Action::PitchDraw(hit @ (crate::piano_pitch::Hit::Note(_) | crate::piano_pitch::Hit::Point(..)))) = action {
                 self.smooth.stop();
@@ -9296,6 +9301,11 @@ impl App {
         if self.modal_open() {
             return self.dialog_wheel(dy);
         }
+        if self.state.copilot.open && crate::copilot::panel_rect(&self.state).contains(self.mouse.0, self.mouse.1) {
+            self.state.copilot.scroll = (self.state.copilot.scroll - dy * 42.0).max(0.0);
+            self.invalidate();
+            return;
+        }
         if self.menu_wheel(dx, dy, shift) {
             return;
         }
@@ -9799,6 +9809,12 @@ impl App {
         // A dialog takes every key.
         if self.modal_open() {
             return self.dialog_key(key, ctrl, alt);
+        }
+        if self.state.copilot.open && self.state.copilot.input_focused
+            && self.state.playlist.popup.is_none() && self.state.menu_open.is_none()
+        {
+            crate::copilot::key(self, key, ctrl, alt);
+            return;
         }
         if *key == Key::Named(NamedKey::Escape) && self.state.playlist.popup.is_some() {
             self.menu_hover_pending=None;
@@ -10858,6 +10874,10 @@ impl App {
             crate::copilot::open(self);
             return;
         }
+        if let Action::Copilot(h) = a {
+            crate::copilot::command(self, h);
+            return;
+        }
         if a == Action::ReportBug {
             if let Err(error) = crate::feedback::open() {
                 self.say(error);
@@ -11391,7 +11411,7 @@ impl App {
             Action::CloseWin(w) => s.hide(w),
             Action::BrowserLibrary(_) | Action::BrowserPreview(_) | Action::BrowserPreviewVolume(_) | Action::StarterPack(_) | Action::PluginDownload(_, _) | Action::BrowserRow(_) | Action::BrowserTab(_) | Action::BrowserList | Action::BrowserScroll | Action::BrowserCollapse | Action::BrowserReread | Action::BrowserMenu | Action::BrowserSearch | Action::BrowserSplitter => {}
             Action::TypeIn(t) => crate::typein::click(s, t),
-            Action::Voice(_) | Action::Ai | Action::Donate | Action::ReportBug | Action::Updates | Action::PlaylistArea | Action::MixerArea | Action::RackArea | Action::RackStepGap | Action::InlineText(_) | Action::Swallow => {}
+            Action::Voice(_) | Action::Ai | Action::Copilot(_) | Action::Donate | Action::ReportBug | Action::Updates | Action::PlaylistArea | Action::MixerArea | Action::RackArea | Action::RackStepGap | Action::InlineText(_) | Action::Swallow => {}
             Action::PlTool(_)
             | Action::PlSnap
             | Action::PlOptions

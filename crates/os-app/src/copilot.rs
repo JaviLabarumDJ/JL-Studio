@@ -5,8 +5,8 @@ use serde_json::{json, Value};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use crate::app::App;
-use crate::dialog::Body;
+use crate::app::{App, State};
+use winit::keyboard::{Key, NamedKey};
 
 const MAX_TOOL_STEPS: usize = 32;
 const SPECIALIST_TOOL_STEPS: usize = 20;
@@ -74,7 +74,23 @@ pub struct ChatMessage {
     pub text: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CopilotHit {
+    Send,
+    Analyze,
+    Rollback,
+    Backend,
+    Config,
+    Field(u8),
+    Mcp,
+    Clear,
+    FocusInput,
+    Close,
+}
+
 pub struct CopilotState {
+    pub open: bool,
+    pub input_focused: bool,
     pub backend: Backend,
     pub model: String,
     pub api_key: String,
@@ -119,6 +135,8 @@ impl Default for CopilotState {
             });
 
         Self {
+            open: false,
+            input_focused: true,
             backend,
             model,
             api_key,
@@ -156,11 +174,152 @@ pub struct CopilotRuntime {
     pub event_rx: mpsc::Receiver<WorkerEvent>,
 }
 
-pub fn open(app: &mut App) {
-    if matches!(app.state.dialogs.last().map(|m| &m.body), Some(Body::Copilot)) {
-        return;
+pub fn panel_width(s: &State) -> f32 {
+    if s.copilot.open {
+        410.0f32.min((s.screen.0 * 0.38).max(320.0))
+    } else {
+        0.0
     }
-    app.show_form(Body::Copilot);
+}
+
+pub fn panel_rect(s: &State) -> os_ui::Rect {
+    let pw = panel_width(s);
+    let top = crate::views::work_y(s);
+    os_ui::Rect::new((s.screen.0 - pw).max(0.0), top, pw, (s.screen.1 - top).max(0.0))
+}
+
+pub fn open(app: &mut App) {
+    app.state.copilot.open = !app.state.copilot.open;
+    if app.state.copilot.open {
+        app.state.copilot.input_focused = true;
+    }
+    app.invalidate();
+}
+
+pub fn command(app: &mut App, hit: CopilotHit) {
+    match hit {
+        CopilotHit::Send => send_prompt(app, None),
+        CopilotHit::Analyze => send_prompt(
+            app,
+            Some("Analiza todo el proyecto ahora: tempo, pistas sin rutear, niveles/clipping, Master Assistant y densidad de notas, y dime qué mejorarías."),
+        ),
+        CopilotHit::Rollback => rollback(app),
+        CopilotHit::Backend => cycle_backend(app),
+        CopilotHit::Config => {
+            app.state.copilot.editing_config = !app.state.copilot.editing_config;
+            app.state.copilot.input_focused = true;
+            if !app.state.copilot.editing_config {
+                save_config(&app.state.copilot);
+            }
+        }
+        CopilotHit::Field(idx) => {
+            app.state.copilot.config_field = idx;
+            app.state.copilot.input_focused = true;
+        }
+        CopilotHit::Mcp => {
+            crate::ai_control::open(app);
+        }
+        CopilotHit::Clear => {
+            if !app.state.copilot.busy {
+                app.state.copilot.messages.truncate(1);
+                app.state.copilot.scroll = 0.0;
+            }
+        }
+        CopilotHit::FocusInput => {
+            app.state.copilot.input_focused = true;
+        }
+        CopilotHit::Close => {
+            app.state.copilot.open = false;
+            app.state.copilot.input_focused = false;
+        }
+    }
+    app.invalidate();
+}
+
+pub fn key(app: &mut App, key: &Key, ctrl: bool, alt: bool) {
+    let shift = app.shift;
+    let cp = &mut app.state.copilot;
+    match key {
+        Key::Named(NamedKey::Escape) => {
+            if cp.editing_config {
+                cp.editing_config = false;
+                save_config(cp);
+            } else {
+                cp.input_focused = false;
+            }
+        }
+        Key::Named(NamedKey::Enter) if !cp.editing_config && !shift => {
+            send_prompt(app, None);
+        }
+        Key::Named(NamedKey::Enter) if !cp.editing_config && shift => {
+            cp.input.push('\n');
+            cp.cursor = cp.input.len();
+        }
+        Key::Named(NamedKey::Enter) => {
+            cp.editing_config = false;
+            save_config(cp);
+        }
+        Key::Named(NamedKey::Backspace) => {
+            if cp.editing_config {
+                let target = match cp.config_field {
+                    0 => &mut cp.model,
+                    1 => &mut cp.api_key,
+                    _ => &mut cp.base_url,
+                };
+                target.pop();
+            } else {
+                cp.input.pop();
+                cp.cursor = cp.input.len();
+            }
+        }
+        Key::Character(c) if ctrl && c.eq_ignore_ascii_case("v") => {
+            if let Ok(mut cb) = arboard::Clipboard::new() {
+                if let Ok(txt) = cb.get_text() {
+                    if cp.editing_config {
+                        let clean: String = txt.chars().filter(|ch| *ch != '\r' && *ch != '\n').collect();
+                        let target = match cp.config_field {
+                            0 => &mut cp.model,
+                            1 => &mut cp.api_key,
+                            _ => &mut cp.base_url,
+                        };
+                        target.push_str(&clean);
+                    } else {
+                        let clean: String = txt.chars().filter(|ch| *ch != '\r').collect();
+                        cp.input.push_str(&clean);
+                        cp.cursor = cp.input.len();
+                    }
+                }
+            }
+        }
+        Key::Named(NamedKey::Space) => {
+            if cp.editing_config {
+                let target = match cp.config_field {
+                    0 => &mut cp.model,
+                    1 => &mut cp.api_key,
+                    _ => &mut cp.base_url,
+                };
+                target.push(' ');
+            } else {
+                cp.input.push(' ');
+                cp.cursor = cp.input.len();
+            }
+        }
+        Key::Character(c) if !ctrl && !alt => {
+            if cp.editing_config {
+                let target = match cp.config_field {
+                    0 => &mut cp.model,
+                    1 => &mut cp.api_key,
+                    _ => &mut cp.base_url,
+                };
+                target.push_str(c);
+            } else {
+                cp.input.push_str(c);
+                cp.cursor = cp.input.len();
+            }
+        }
+        _ => {}
+    }
+    app.invalidate();
 }
 
 pub fn save_config(s: &CopilotState) {
@@ -615,7 +774,7 @@ fn run_agent_with_prompt(
 ) -> Result<String, String> {
     let agent = ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(10))
-        .timeout_read(Duration::from_secs(90))
+        .timeout_read(Duration::from_secs(180))
         .build();
 
     match backend {

@@ -1181,6 +1181,148 @@ fn copilot_wrap(c: &mut os_ui::Canvas, font: Font, text: &str, max_w: f32) -> Ve
     lines
 }
 
+pub fn paint_copilot_panel(ui: &mut Ui, s: &State, r: Rect) {
+    use crate::copilot::{ChatRole, CopilotHit};
+    let cp = &s.copilot;
+    let ink = ui.t.text;
+    let dim = ui.t.text_dim;
+
+    ui.c.fill_rect(r, ui.t.s(0x1e2529));
+    ui.c.line(r.x, r.y, r.x, r.bottom(), 1.0, ui.t.s(0x3a464d));
+
+    // Header
+    let hdr = Rect::new(r.x, r.y, r.w, 30.0);
+    ui.c.fill_rect(hdr, ui.t.s(0x252e34));
+    ui.c.text_clip(Font::new(12).bold(), r.x + 12., r.y + 8., r.w - 44., ink, "Piloto IA - JL Studio");
+    let close_r = Rect::new(r.right() - 28., r.y + 4., 22., 22.);
+    let close_h = ui.hit(close_r, Action::Copilot(CopilotHit::Close), "Cerrar panel del Piloto IA");
+    ui.c.fill_rrect(close_r, 3., if close_h { ui.t.s(0x6e3636) } else { ui.t.s(0x303b40) });
+    ui.c.text_center(Font::new(12).bold(), close_r, ink, "x");
+
+    let btn = |ui: &mut Ui, b: Rect, ch: CopilotHit, label: &str, lit: bool, tip: &'static str| {
+        let hover = ui.hit(b, Action::Copilot(ch), tip);
+        let bg = if lit { ui.t.s(0x3a6445) } else if hover { ui.t.button_hi } else { ui.t.s(0x303b40) };
+        ui.c.fill_rrect(b, 4., bg);
+        ui.c.text_center(Font::new(11).bold(), b, ink, label);
+    };
+
+    // Controls row
+    let y0 = r.y + 36.;
+    btn(ui, Rect::new(r.x + 10., y0, 108., 24.), CopilotHit::Backend, cp.backend.label(), false, "Cambiar motor IA (Ollama / Gemini / OpenAI)");
+    btn(ui, Rect::new(r.right() - 186., y0, 58., 24.), CopilotHit::Config, if cp.editing_config { "Guardar" } else { "Config" }, cp.editing_config, "Configurar modelo, API Key y URL");
+    btn(ui, Rect::new(r.right() - 122., y0, 58., 24.), CopilotHit::Clear, "Limpiar", false, "Limpiar historial de chat");
+    btn(ui, Rect::new(r.right() - 58., y0, 48., 24.), CopilotHit::Mcp, "MCP", false, "Abrir configuracion MCP externa");
+    ui.c.text_clip(Font::new(10), r.x + 10., y0 + 27., r.w - 20., dim, &format!("Modelo: {}", cp.model));
+
+    let mut chat_top = y0 + 44.;
+    if cp.editing_config {
+        let cfg_r = Rect::new(r.x + 10., chat_top, r.w - 20., 84.);
+        ui.c.fill_rrect(cfg_r, 5., ui.t.s(0x222b30));
+        let fields: [(u8, &str, String); 3] = [
+            (0, "Modelo:", cp.model.clone()),
+            (1, "API Key:", if cp.api_key.is_empty() { "(vacio; opcional Ollama)".into() } else { "*".repeat(cp.api_key.len().min(18)) }),
+            (2, "URL:", cp.base_url.clone()),
+        ];
+        for (idx, lbl, val) in fields {
+            let fy = cfg_r.y + 6. + f32::from(idx) * 25.;
+            let fr = Rect::new(cfg_r.x + 64., fy, cfg_r.w - 72., 21.);
+            let active = cp.config_field == idx && cp.input_focused;
+            let _ = ui.hit(fr, Action::Copilot(CopilotHit::Field(idx)), "Haz clic y escribe o pega con Ctrl+V");
+            ui.c.text_clip(Font::new(10), cfg_r.x + 8., fy + 4., 54., dim, lbl);
+            ui.c.fill_rrect(fr, 3., ui.t.s(0x161c20));
+            ui.c.stroke_rrect(fr, 3., 1., if active { ui.t.accent } else { ui.t.s(0x3a464d) });
+            ui.c.text_clip(Font::new(10), fr.x + 6., fy + 4., fr.w - 12., ink, &val);
+        }
+        chat_top += 92.;
+    }
+
+    let input_h = 74.;
+    let bar_h = 26.;
+    let status_h = 18.;
+    let bar_y = r.bottom() - input_h - bar_h - status_h - 18.;
+    let chat_r = Rect::new(r.x + 10., chat_top, r.w - 20., (bar_y - chat_top - 8.).max(80.));
+    ui.c.fill_rrect(chat_r, 5., ui.t.s(0x161c20));
+    ui.c.push_clip(chat_r);
+
+    let msg_font = Font::new(12);
+    let tool_font = Font::new(10);
+    let pad = 8.;
+    let max_tw = chat_r.w - pad * 4. - 8.;
+    let mut blocks: Vec<(ChatRole, Vec<String>, f32)> = Vec::new();
+    let mut total_h = 8.;
+    for msg in &cp.messages {
+        let f = if msg.role == ChatRole::Tool { tool_font } else { msg_font };
+        let lh = if msg.role == ChatRole::Tool { 14. } else { 16. };
+        let lines = copilot_wrap(ui.c, f, &msg.text, max_tw);
+        let bh = lines.len().max(1) as f32 * lh + 10.;
+        total_h += bh + 6.;
+        blocks.push((msg.role, lines, bh));
+    }
+    let max_scroll = (total_h - chat_r.h).max(0.);
+    let scroll = cp.scroll.clamp(0., max_scroll);
+    let mut cy = chat_r.y + 8. - scroll;
+    for (role, lines, bh) in blocks {
+        if cy + bh >= chat_r.y && cy <= chat_r.bottom() {
+            let bx = chat_r.x + pad;
+            let bw = chat_r.w - pad * 2. - 8.;
+            let bg = match role {
+                ChatRole::User => ui.t.s(0x284355),
+                ChatRole::Assistant => ui.t.s(0x242e34),
+                ChatRole::Tool => ui.t.s(0x1e2824),
+                ChatRole::Error => ui.t.s(0x4b2424),
+            };
+            let fg = match role {
+                ChatRole::Tool => ui.t.s(0x98d8a8),
+                ChatRole::Error => ui.t.s(0xffb4b4),
+                _ => ink,
+            };
+            let f = if role == ChatRole::Tool { tool_font } else { msg_font };
+            let lh = if role == ChatRole::Tool { 14. } else { 16. };
+            ui.c.fill_rrect(Rect::new(bx, cy, bw, bh), 4., bg);
+            let mut ly = cy + 5.;
+            for line in lines {
+                ui.c.text_clip(f, bx + 7., ly, bw - 14., fg, &line);
+                ly += lh;
+            }
+        }
+        cy += bh + 6.;
+    }
+    if max_scroll > 0.0 {
+        let sb_h = (chat_r.h * (chat_r.h / total_h)).clamp(20.0, chat_r.h);
+        let sb_y = chat_r.y + (chat_r.h - sb_h) * (scroll / max_scroll);
+        ui.c.fill_rrect(Rect::new(chat_r.right() - 6., sb_y, 4., sb_h), 2., ui.t.s(0x52636d));
+    }
+    ui.c.pop_clip();
+
+    // Quick actions & status
+    btn(ui, Rect::new(r.x + 10., bar_y, 112., 24.), CopilotHit::Analyze, "Analizar todo", false, "Analiza proyecto, pistas sin rutear, niveles y clipping");
+    let can_undo = cp.last_checkpoint.is_some_and(|(_, n)| n > 0);
+    btn(ui, Rect::new(r.x + 128., bar_y, 130., 24.), CopilotHit::Rollback, "Deshacer piloto", can_undo, "Revertir todos los cambios del ultimo turno de la IA");
+    ui.c.text_clip(Font::new(10), r.x + 12., bar_y + 28., r.w - 24., if cp.busy { ui.t.accent } else { dim }, &cp.status);
+
+    // Multi-line input box + Send
+    let in_y = r.bottom() - input_h - 10.;
+    let in_r = Rect::new(r.x + 10., in_y, r.w - 86., input_h);
+    let _ = ui.hit(in_r, Action::Copilot(CopilotHit::FocusInput), "Escribe tu orden (Enter: enviar, Shift+Enter: salto de linea)");
+    ui.c.fill_rrect(in_r, 4., ui.t.s(0x12171a));
+    ui.c.stroke_rrect(in_r, 4., 1., if cp.input_focused && !cp.editing_config { ui.t.accent } else { ui.t.s(0x3a464d) });
+    ui.c.push_clip(in_r);
+    let in_font = Font::new(11);
+    if cp.input.is_empty() {
+        ui.c.text_clip(in_font, in_r.x + 8., in_r.y + 8., in_r.w - 16., dim, "Escribe aqui (Enter: enviar, Shift+Enter: linea)...");
+    } else {
+        let lines = copilot_wrap(ui.c, in_font, &cp.input, in_r.w - 16.);
+        let start = lines.len().saturating_sub(4);
+        let mut ly = in_r.y + 7.;
+        for line in lines.iter().skip(start) {
+            ui.c.text_clip(in_font, in_r.x + 8., ly, in_r.w - 16., ink, line);
+            ly += 16.;
+        }
+    }
+    ui.c.pop_clip();
+    btn(ui, Rect::new(in_r.right() + 6., in_y, 60., input_h), CopilotHit::Send, if cp.busy { "..." } else { "Enviar" }, !cp.busy, "Enviar orden al Piloto IA (Enter)");
+}
+
 fn copilot_box(ui: &mut Ui, s: &State, m: &Modal) {
     use crate::copilot::ChatRole;
     let w = 780f32.min(s.screen.0 - 20.).max(440.);

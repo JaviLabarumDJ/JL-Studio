@@ -279,6 +279,10 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
         ui.c.pop_clip();
         ui.win = None;
     }
+    if s.copilot.open && s.native_view.is_none() {
+        let cr = crate::copilot::panel_rect(s);
+        dialog::paint_copilot_panel(ui, s, cr);
+    }
     if !s.toolbar.hidden && s.native_view.is_none() {
         // At Toolbars scaling (spec: ui/ui-scaling.md §1): the band works in its own px, `k` of the window's each, so
         // it is `w / k` of them wide; what doesn't fit is left out (`toolbar::room`).
