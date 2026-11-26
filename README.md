@@ -1,4 +1,4 @@
-<img src="docs/assets/ml-studio/logo.png" width="72" alt="JL Studio logo">
+<img src="docs/assets/jl-studio/logo.png" width="96" alt="JL Studio logo">
 
 # JL Studio
 
