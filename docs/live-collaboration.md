@@ -8,14 +8,17 @@ project editing: each computer renders its own audio with its installed plugins.
 
 1. Both participants use builds with the same collaboration protocol (currently 3).
 2. Host: save the project and stop playback. Choose **File > Collaborate**, enter
-   your display name and reachable **address:port**, and choose **Host session**.
-   Packaging and sample transfer run in a background worker.
-3. On the same network, use the displayed LAN address. For distant collaboration,
-   use a shared private VPN address, or forward **TCP 32190** on the host router
-   and enter the reachable public address. Allow the application through the
-   host firewall when prompted. A guest normally needs no inbound port rule.
-   Carrier-grade NAT may require a VPN; the app does not provide a relay or
-   automatically change router/firewall settings.
+   your display name and either `p2p` (default, for automatic internet P2P) or
+   a reachable **address:port**, and choose **Host session**. Packaging and
+   sample transfer run in a background worker.
+3. In **`p2p` mode** (`auto` or empty field also selects it), ML Studio uses
+   `iroh` (QUIC with UDP hole punching and automatic relay fallback) so
+   collaborators can join from anywhere on the internet without router port
+   forwarding or a third-party VPN; the host's own local client still connects
+   over loopback `127.0.0.1`. For direct LAN/VPN hosting, enter an
+   `address:port` (for example `192.168.1.20:32190` or a private VPN address,
+   forwarding **TCP 32190** if using a public address) and allow the
+   application through the host firewall when prompted.
 4. **Copy invitation** and share it privately with your collaborator. It contains
    a random access key and the host certificate. Anyone holding it can download
    and edit the shared project, so invite trusted collaborators only.
