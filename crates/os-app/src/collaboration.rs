@@ -240,10 +240,7 @@ pub fn open(app: &mut App) {
     let mut name = Field::default();
     name.set(&crate::settings_file::get("collaboration_name").unwrap_or("Producer".into()));
     let mut address = Field::default();
-    address.set(
-        &crate::settings_file::get("collaboration_address")
-            .unwrap_or_else(|| format!("{}:32190", local_address())),
-    );
+    address.set(&crate::settings_file::get("collaboration_address").unwrap_or_else(|| "p2p".into()));
     let mut invite = Field::default();
     invite.set(&app.collaboration.invitation);
     app.show_form(Body::Collaboration(Form {
@@ -328,7 +325,7 @@ pub fn command(app: &mut App, c: Command) {
             }
         }
         Command::Help => {
-            error(app,"Same Wi-Fi: use the host LAN address. Internet: use a shared VPN address, or forward TCP 32190 on the host router. Invitations are private access keys.".into());
+            error(app,"Use \"p2p\" for automatic internet P2P (hole punching + relay), or enter LAN/VPN ip:port (TCP 32190). Invitations are private access keys.".into());
         }
         Command::KeepLocal | Command::UseShared => {
             let Some(remote) = app.collaboration.conflict.take() else {
@@ -456,15 +453,23 @@ pub fn command(app: &mut App, c: Command) {
                 return error(app,"Stop playback before preparing a hosted session. Playback is independent once connected.".into());
             }
             crate::settings_file::write("collaboration_address", &address);
-            let Ok(port) = address.rsplit(':').next().unwrap_or("").parse::<u16>() else {
-                return error(
-                    app,
-                    "Use a host address and port, for example 192.168.1.20:32190.".into(),
-                );
+            let use_p2p = address.is_empty()
+                || address.eq_ignore_ascii_case("p2p")
+                || address.eq_ignore_ascii_case("auto");
+            let port = if use_p2p {
+                0
+            } else {
+                let Ok(port) = address.rsplit(':').next().unwrap_or("").parse::<u16>() else {
+                    return error(
+                        app,
+                        "Enter \"p2p\" for internet, or host address and port (e.g. 192.168.1.20:32190).".into(),
+                    );
+                };
+                if port == 0 {
+                    return error(app, "Choose a port between 1 and 65535.".into());
+                }
+                port
             };
-            if port == 0 {
-                return error(app, "Choose a port between 1 and 65535.".into());
-            }
             let result = (|| {
                 let dir = folder()?;
                 capture_plugin_states(app)?;
@@ -473,20 +478,25 @@ pub fn command(app: &mut App, c: Command) {
                 let zip = dir.join("Shared project.zip");
                 let job = crate::zipped::collaboration_pack(app, &zip)?;
                 let initial = doc.clone();
-                let advertised = address.clone();
+                let advertised = if use_p2p {
+                    "p2p".into()
+                } else {
+                    address.clone()
+                };
                 let worker = spawn_worker(dir.clone(), name, move |stop, media| {
                     job()?;
                     if stop.load(Ordering::Acquire) {
                         return Err("Cancelled".into());
                     }
-                    let host = Host::start(
-                        ([0, 0, 0, 0], port).into(),
-                        advertised,
-                        zip,
-                        media.encode(&initial, None, stop)?,
-                        validate,
-                    )?;
-                    let local = host.invitation.with_address(format!("127.0.0.1:{port}"));
+                    let encoded = media.encode(&initial, None, stop)?;
+                    let host = if use_p2p {
+                        Host::start_p2p(zip, encoded, validate)?
+                    } else {
+                        Host::start(([0, 0, 0, 0], port).into(), advertised, zip, encoded, validate)?
+                    };
+                    let local = host
+                        .invitation
+                        .with_local_tcp(format!("127.0.0.1:{}", host.port));
                     Ok((Some(host), local, None))
                 })?;
                 app.collaboration = Runtime {
@@ -1107,7 +1117,7 @@ impl Form {
 pub fn paint(ui: &mut Ui, r: Rect, f: &Form) {
     for (i, label) in [
         "Your name",
-        "Host address and port (LAN, VPN or forwarded internet address)",
+        "Host mode or address (\"p2p\" for internet, or LAN/VPN ip:port)",
         "Private invitation (paste here to join)",
     ]
     .iter()
