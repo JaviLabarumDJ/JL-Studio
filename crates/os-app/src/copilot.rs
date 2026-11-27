@@ -465,83 +465,80 @@ pub fn tick(app: &mut App) {
 }
 
 fn system_prompt() -> &'static str {
-    "Eres el Director Musical y Productor Ejecutivo de JL Studio (un DAW profesional compatible con FL Studio). \
-Tienes un equipo de 4 especialistas bajo tu mando a los que puedes delegar bloques complejos con `lemon_delegate`: \
-1) `drums`: busca samples REALES en las librerías del usuario con `lemon_samples` (Kick, Clap, Closed Hat, Open Hat, Perc, Riser/Crash — NUNCA uses osciladores crudos para batería si hay samples disponibles), los carga con `lemon_channel(op: 'load_sample')`, programa grooves profesionales con `lemon_compose(op: 'drum_pattern')` y humanización, y asigna cada uno a su pista del mixer. \
-2) `melody`: carga sintetizadores reales (`Lemon 3x Osc`, `Citrus`, `Lemon Wave`, etc. con `lemon_plugins`), ajusta sus parámetros con `lemon_parameter` para que suenen cálidos, filtrados y con pegada (NUNCA dejes un sinte con el preset crudo por defecto si puedes moldear su filtro/envolvente), y compone líneas de bajo (`rolling`/`offbeat`), acordes/stabs y arpegios. \
-3) `arrangement`: organiza el tema completo en la Playlist (`lemon_clips`) en formato Extended Mix profesional (Intro DJ, Build-up con snare roll y riser, Drop 1, Breakdown atmosférico, Build-up 2, Drop 2, Outro DJ) y crea automatizaciones de tensión (`lemon_automation`). \
-4) `mixing`: hace el ruteo, `sidechain` (Kick -> Bajo y Kick -> Stabs con `lemon_mix_setup`), carga `Lemon Parametric EQ`, `Lemon Soft Clipper`, `Lemon Reverb` y `Lemon Delay` en los inserts adecuados, ajusta niveles con `gain_stage` dejando -4 a -6 dB de headroom, y verifica con `lemon_audio_analyze` que nada sature. \
-\nREGLAS DE ORO: \
-- Para cualquier petición de crear o producir un tema completo, empieza leyendo `lemon_state` y `lemon_transport(op: 'song')` + BPM, y luego coordina a tu equipo llamando a `lemon_delegate` en orden: `drums` -> `melody` -> `arrangement` -> `mixing`. \
-- Si el usuario pide algo puntual (ej. solo analizar o solo un patrón), puedes hacerlo directo o delegar al especialista correspondiente. \
-- Responde siempre en español, detallando con precisión los samples reales cargados, sintetizadores, patrones, efectos, ruteos y verificación final."
+    "Eres el Director Musical de JL Studio (DAW). Tienes 4 especialistas via `lemon_delegate`: \
+1) `drums`: busca samples reales (`lemon_samples`), carga con `lemon_channel(load_sample)`, programa `lemon_compose(drum_pattern)` y asigna mixer. \
+2) `melody`: carga sintes (`lemon_plugins`), moldea filtro/envolvente (`lemon_parameter`) y compone bajo/stabs/arp (`lemon_compose`). \
+3) `arrangement`: arma la Playlist (`lemon_clips`) en Extended Mix (Intro, Build-up, Drop 1, Breakdown, Build-up 2, Drop 2, Outro) y `lemon_automation`. \
+4) `mixing`: sidechain (`lemon_mix_setup`), EQ/Clipper/Reverb/Delay, `gain_stage` (-4 a -6 dB) y `lemon_audio_analyze`. \
+Para temas completos, lee `lemon_state` y `lemon_transport`, y delega en orden: `drums` -> `melody` -> `arrangement` -> `mixing`. Responde siempre en español con detalles exactos."
 }
 
 fn specialist_prompt(role: &str) -> &'static str {
     match role {
-        "drums" => "Eres el Especialista de Batería y Groove de JL Studio. Tu única misión es construir una sección rítmica profesional y con pegada real: \
-1) Usa `lemon_samples` para buscar samples reales (.wav/.flac/.mp3) de Kick, Clap, Closed Hat, Open Hat y Percusión en las carpetas del usuario (ej. query: 'kick', 'clap', 'closed hat', 'open hat', 'perc'). \
-2) Cárgales con `lemon_channel(op: 'load_sample', path: ...)` en canales separados y asígnales pistas de mixer distintas (ej. tracks 1..5). \
-3) Programa patrones separados o combinados con `lemon_compose(op: 'drum_pattern', style: 'kick_4x4' | 'clap_2_4' | 'offbeat_hat' | 'closed_hat_16th' | 'perc_groove' | 'snare_roll', humanize: 10)` en los patrones que indique el Director. \
-Devuelve un resumen exacto de qué samples cargaste, en qué filas/pistas del mixer y en qué patrones.",
-        "melody" => "Eres el Especialista de Bajo, Síntesis y Armonía de JL Studio. Tu misión es crear bajos con peso y melodías/stabs memorables: \
-1) Lista plugins con `lemon_plugins(op: 'list')` y carga sintetizadores (`Lemon 3x Osc`, `Citrus`, `Lemon Wave`) en nuevos canales, asignándoles pistas del mixer libres. \
-2) Lee sus parámetros con `lemon_parameter(op: 'read')` y ajusta cutoff/envolvente/nivel con `lemon_parameter(op: 'set')` para que el bajo y los stabs suenen limpios y musicales (nunca un pitido agudo sin filtrar). \
-3) Usa `lemon_compose` (`bassline` estilo `rolling`/`offbeat`, `chord_progression`, `arp`) con `humanize: 8` en la tonalidad y patrones indicados. \
-Devuelve un resumen exacto de canales, pistas de mixer, parámetros ajustados y patrones.",
-        "arrangement" => "Eres el Especialista de Arreglo y Tensión de JL Studio. Tu misión es montar un arreglo profesional en la Playlist: \
-1) Inspecciona canales y patrones con `lemon_state`. \
-2) Coloca clips en la Playlist con `lemon_clips(op: 'add', ...)` construyendo secciones reales (Intro DJ, Build-up, Drop 1, Breakdown, Build-up 2, Drop 2, Outro DJ) sin solapar clips erróneamente y cubriendo toda la duración pedida. \
-3) Si hay parámetros automatizables o volumen/filtro, crea curvas de tensión con `lemon_automation`. \
-Devuelve la estructura exacta por compases.",
-        "mixing" => "Eres el Ingeniero de Mezcla y Mastering de JL Studio. Tu misión es que el tema suene limpio, potente y sin clipping: \
-1) Inspecciona canales, inserts y efectos con `lemon_state` y `lemon_audio_analyze`. \
-2) Configura `sidechain` (`lemon_mix_setup` op: 'sidechain') del Kick hacia el Bajo y hacia los Synths/Stabs. \
-3) Carga `Lemon Parametric EQ`, `Lemon Soft Clipper`, `Lemon Reverb` y `Lemon Delay` en las pistas apropiadas (`lemon_plugins` op: 'add_effect'). \
-4) Ajusta los faders con `lemon_mix_setup(op: 'gain_stage')` para mantener balance y headroom (-4 a -6 dB), y vuelve a ejecutar `lemon_audio_analyze` al final para confirmar.",
+        "drums" => "Especialista de Batería JL Studio: 1) Busca samples reales con `lemon_samples` (kick, clap, closed hat, open hat, perc). \
+2) Cárgalos con `lemon_channel(op:'load_sample')` en canales distintos y pistas mixer 1..5. \
+3) Programa patrones con `lemon_compose(op:'drum_pattern', style:'kick_4x4'|'clap_2_4'|'offbeat_hat'|'closed_hat_16th'|'perc_groove'|'snare_roll', humanize:10)`. Resume samples, pistas y patrones.",
+        "melody" => "Especialista de Bajo/Melodía JL Studio: 1) Lista/carga sintes (`Lemon 3x Osc`, `Citrus`, `Lemon Wave`) con `lemon_plugins` en pistas mixer libres. \
+2) Ajusta cutoff/envolvente con `lemon_parameter` para sonido cálido y musical. \
+3) Compone con `lemon_compose` (`bassline` rolling/offbeat, `chord_progression`, `arp`, `humanize:8`). Resume canales, mixer y patrones.",
+        "arrangement" => "Especialista de Arreglo JL Studio: 1) Lee `lemon_state`. \
+2) Coloca clips en Playlist con `lemon_clips(op:'add')` formando Intro, Build-up, Drop 1, Breakdown, Build-up 2, Drop 2, Outro sin solapamientos erróneos. \
+3) Añade automatizaciones de tensión con `lemon_automation`. Resume estructura por compases.",
+        "mixing" => "Ingeniero de Mezcla JL Studio: 1) Lee `lemon_state` y `lemon_audio_analyze`. \
+2) Haz `sidechain` (`lemon_mix_setup`) del Kick al Bajo y Synths/Stabs. \
+3) Añade `Lemon Parametric EQ`, `Lemon Soft Clipper`, `Lemon Reverb`, `Lemon Delay` (`lemon_plugins`). \
+4) Haz `gain_stage` (-4 a -6 dB headroom) y confirma con `lemon_audio_analyze`.",
         _ => system_prompt(),
     }
 }
 
 fn compact_tool_output(name: &str, raw: String) -> String {
-    if name == "lemon_state" {
+    let compacted = if name == "lemon_state" {
         if let Ok(mut v) = serde_json::from_str::<Value>(&raw) {
             let sel_mix = v["selected_mixer"].as_u64().unwrap_or(0);
             let used_tracks: std::collections::HashSet<u64> = v["channels"]
                 .as_array()
                 .map(|arr| arr.iter().filter_map(|c| c["mixer_track"].as_u64()).collect())
                 .unwrap_or_default();
+            if let Some(obj) = v.as_object_mut() {
+                obj.remove("limitations");
+                if let Some(pl_count) = obj.remove("playlist_tracks").and_then(|p| p.as_array().map(|a| a.len())) {
+                    obj.insert("playlist_track_count".to_string(), json!(pl_count));
+                }
+            }
             if let Some(mixer) = v["mixer"].as_array().cloned() {
                 let compact_mixer: Vec<Value> = mixer
                     .into_iter()
                     .filter(|m| {
                         let t = m["track"].as_u64().unwrap_or(0);
                         let has_slots = m["slots"].as_array().is_some_and(|s| !s.is_empty());
-                        let has_routes = m["routes"].as_array().is_some_and(|r| !r.is_empty());
-                        let custom_name = m["name"].as_str().is_some_and(|n| !n.is_empty() && !n.starts_with("Insert "));
-                        t == 0 || t == sel_mix || used_tracks.contains(&t) || has_slots || has_routes || custom_name
+                        t == 0 || t == sel_mix || used_tracks.contains(&t) || has_slots
                     })
+                    .take(16)
                     .map(|mut m| {
                         if let Some(obj) = m.as_object_mut() {
                             obj.remove("strip");
                             obj.remove("eq");
+                            obj.remove("strip_bypassed");
+                            obj.remove("effects");
                         }
                         m
                     })
                     .collect();
                 v["mixer"] = Value::Array(compact_mixer);
             }
-            if let Some(pl) = v["playlist_tracks"].as_array().cloned() {
-                v["playlist_tracks"] = Value::Array(pl.into_iter().take(24).collect());
-            }
-            return v.to_string();
+            v.to_string()
+        } else {
+            raw
         }
+    } else {
+        raw
+    };
+    if compacted.len() > 3_200 {
+        let end = compacted.floor_char_boundary(3_200);
+        return format!("{}...(truncated)", &compacted[..end]);
     }
-    if raw.len() > 8_000 {
-        let end = raw.floor_char_boundary(8_000);
-        return format!("{}...(truncated)", &raw[..end]);
-    }
-    raw
+    compacted
 }
 
 fn invoke_ui_tool(
@@ -568,23 +565,6 @@ fn invoke_ui_tool(
         Ok(Err(e)) => json!({"error": e}).to_string(),
         Err(_) => r#"{"error":"Tool execution timed out"}"#.into(),
     }
-}
-
-fn director_tools() -> Vec<Value> {
-    let mut t = crate::ai_commands::tools();
-    t.push(json!({
-        "name": "lemon_delegate",
-        "description": "Delegate a focused production block to a specialist AI sub-agent with direct DAW tool access. Roles: 'drums' (searches real samples & programs grooves), 'melody' (loads/shapes synths, bassline, chords, arp), 'arrangement' (builds Extended Mix in Playlist & automations), 'mixing' (sidechain, EQ, FX, gain staging, Master check).",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "role": {"type": "string", "enum": ["drums", "melody", "arrangement", "mixing"]},
-                "task": {"type": "string"}
-            },
-            "required": ["role", "task"]
-        }
-    }));
-    t
 }
 
 fn tools_for_role(role: Option<&str>) -> Vec<Value> {
@@ -622,11 +602,18 @@ fn openai_tools(role: Option<&str>) -> Vec<Value> {
     tools_for_role(role)
         .into_iter()
         .map(|t| {
+            let desc = t["description"].as_str().unwrap_or("");
+            let short_desc = if desc.len() > 120 {
+                let end = desc.floor_char_boundary(120);
+                &desc[..end]
+            } else {
+                desc
+            };
             json!({
                 "type": "function",
                 "function": {
                     "name": t["name"],
-                    "description": t["description"],
+                    "description": short_desc,
                     "parameters": t["inputSchema"],
                 }
             })
@@ -712,14 +699,24 @@ fn post_json_with_retry(
                 if code == 429 && (detail.contains("PerDay") || detail.contains("FreeTier")) {
                     return Err("Cuota diaria gratuita de Gemini agotada para este modelo. Cambia a gemini-2.5-flash-lite / gemini-2.0-flash en Config, activa facturacion en AI Studio, o usa Ollama (Local) sin limites.".into());
                 }
-                let transient = matches!(code, 429 | 500 | 502 | 503 | 504);
+                let transient = matches!(code, 429 | 500 | 502 | 503 | 504)
+                    || (code == 413 && detail.contains("rate_limit_exceeded") && attempt == 0);
                 if transient && attempt < delays.len() {
-                    let wait = parse_retry_after_secs(&detail).unwrap_or(delays[attempt]);
+                    let wait = if code == 413 {
+                        10
+                    } else {
+                        parse_retry_after_secs(&detail).unwrap_or(delays[attempt])
+                    };
                     let _ = event_tx.send(WorkerEvent::Status(format!(
                         "Limite por minuto ({code}), esperando {wait}s..."
                     )));
                     std::thread::sleep(Duration::from_secs(wait));
                     continue;
+                }
+                if code == 413 {
+                    return Err(format!(
+                        "Error HTTP (413): La petición supera el límite de tokens del modelo gratuito. Prueba limpiar el chat o usar un prompt más corto. Detalle: {detail}"
+                    ));
                 }
                 return Err(format!("Error HTTP ({code}): {detail}"));
             }
