@@ -103,6 +103,10 @@ pub fn tools() -> Vec<Value> {
  ("lemon_mix_setup","High-level mixer routing & gain staging in one undoable step. op: route_group (routes channel rows to destination track), sidechain (sidechains source track to destination track), gain_stage (sets volume 0..1 on track or sources).",json!({"op":s,"sources":{"type":"array","items":i},"destination":i,"track":i,"value":n}),vec!["op"]),
  ("lemon_audio_analyze","Analyze live mixer peak/VU meters, clipping/hot tracks, master headroom, channel routing, effects/Master Assistant status, and pattern note density.",json!({}),vec![]),
  ("lemon_checkpoint","Create an undo checkpoint (op: 'mark') or roll back all edits since a checkpoint (op: 'rollback', checkpoint: integer).",json!({"op":s,"checkpoint":i}),vec!["op"]),
+ ("lemon_drum_kit","ONE-CALL macro: searches real user samples (Kick, Clap, Closed Hat, Open Hat, Perc), loads each into its own channel, routes to mixer tracks 1..5, and programs full drum groove + build snare roll. style: tech_house, techno, house, trap, hiphop, dnb.",json!({"style":s,"bars":i,"pattern":i,"build_pattern":i,"humanize":n}),vec![]),
+ ("lemon_synth_track","ONE-CALL macro: loads a synth instrument (e.g. 'Lemon 3x Osc', 'Citrus', 'Lemon Wave'), routes to a mixer track, shapes filter cutoff/resonance, and writes bassline/chords/arp notes. role: bass, stab, lead, pad, arp.",json!({"role":s,"instrument":s,"root":s,"scale":s,"octave":i,"bars":i,"style":s,"chords":{"type":"array","items":s},"cutoff":n,"resonance":n,"pattern":i,"mixer_track":i}),vec!["role"]),
+ ("lemon_arrange_song","ONE-CALL macro: builds a full multi-section Playlist arrangement (Intro, Build-up 1, Drop 1, Breakdown, Build-up 2, Drop 2, Outro) in song mode. template: extended_mix, club_mix, radio_edit, build_drop.",json!({"template":s,"tempo":n,"bars":i,"drum_pattern":i,"bass_pattern":i,"stab_pattern":i,"build_pattern":i,"arp_pattern":i}),vec![]),
+ ("lemon_master_mix","ONE-CALL macro: sets up Kick->Bass/Synth sidechain, loads EQ/Soft Clipper/Reverb/Delay, gain-stages tracks for -4..-6 dB headroom, and runs audio analysis.",json!({"kick_track":i,"bass_track":i,"synth_tracks":{"type":"array","items":i}}),vec![]),
  ];
     entries.into_iter().map(|(name,description,properties,required)|json!({"name":name,"description":description,"inputSchema":{"type":"object","properties":properties,"required":required,"additionalProperties":false}})).collect()
 }
@@ -853,6 +857,10 @@ fn execute(app: &mut App, name: &str, a: &Value, local: bool) -> Result<Value> {
         "lemon_samples" => return search_samples(app, a),
         "lemon_mix_setup" => return mix_setup(app, a),
         "lemon_audio_analyze" => return Ok(audio_analyze(app)),
+        "lemon_drum_kit" => return drum_kit(app, a),
+        "lemon_synth_track" => return synth_track(app, a),
+        "lemon_arrange_song" => return arrange_song(app, a),
+        "lemon_master_mix" => return master_mix(app, a),
         "lemon_checkpoint" => match text(a, "op")? {
             "mark" => return Ok(json!({"checkpoint": history::done_count(&app.state)})),
             "rollback" => {
@@ -1256,13 +1264,13 @@ fn search_samples(app: &App, a: &Value) -> Result<Value> {
     let mut matches = Vec::new();
     let mut scanned = 0usize;
     while let Some(dir) = queue.pop_front() {
-        if matches.len() >= limit || scanned >= 12_000 {
+        if matches.len() >= limit || scanned >= 80_000 {
             break;
         }
         let Ok(rd) = std::fs::read_dir(&dir) else { continue };
         for entry in rd.flatten() {
             scanned += 1;
-            if scanned >= 12_000 {
+            if scanned >= 80_000 {
                 break;
             }
             let p = entry.path();
@@ -1293,4 +1301,510 @@ fn search_samples(app: &App, a: &Value) -> Result<Value> {
         }
     }
     Ok(json!({"query": query, "count": matches.len(), "samples": matches}))
+}
+
+fn find_best_samples(app: &App, roles: &[(&str, &[&str])]) -> Vec<Option<String>> {
+    let roots = crate::views::browser::library_roots(&app.state);
+    let mut queue: std::collections::VecDeque<std::path::PathBuf> = roots.into_iter().collect();
+    let mut best: Vec<Option<(i32, String)>> = vec![None; roles.len()];
+    let mut scanned = 0usize;
+
+    while let Some(dir) = queue.pop_front() {
+        if scanned >= 80_000 || best.iter().all(|b| b.as_ref().is_some_and(|(sc, _)| *sc >= 100)) {
+            break;
+        }
+        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        for entry in rd.flatten() {
+            scanned += 1;
+            if scanned >= 80_000 {
+                break;
+            }
+            let p = entry.path();
+            let Ok(ft) = entry.file_type() else { continue };
+            if ft.is_dir() {
+                queue.push_back(p);
+                continue;
+            }
+            let ext_ok = p.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+                matches!(e.to_ascii_lowercase().as_str(), "wav" | "flac" | "ogg" | "mp3" | "aiff" | "aif")
+            });
+            if !ext_ok {
+                continue;
+            }
+            let fname = p.file_name().and_then(|n| n.to_str()).unwrap_or("").to_ascii_lowercase();
+            let full = p.to_string_lossy().to_ascii_lowercase();
+            let is_loop = fname.contains("loop") || fname.contains("top") || fname.contains("full") || fname.contains("bpm");
+
+            for (idx, (_, keywords)) in roles.iter().enumerate() {
+                let mut score = 0i32;
+                for kw in *keywords {
+                    if fname.contains(kw) {
+                        score += 60;
+                    } else if full.contains(kw) {
+                        score += 20;
+                    }
+                }
+                if score == 0 {
+                    continue;
+                }
+                if !is_loop {
+                    score += 40;
+                }
+                if best[idx].as_ref().is_none_or(|(cur, _)| score > *cur) {
+                    best[idx] = Some((score, p.to_string_lossy().into_owned()));
+                }
+            }
+        }
+    }
+    best.into_iter().map(|b| b.map(|(_, p)| p)).collect()
+}
+
+fn next_free_mixer_track(app: &App, start_from: u16) -> u16 {
+    let max_t = crate::mixer::max_insert(&app.state.project);
+    let used: std::collections::HashSet<u16> = app
+        .state
+        .project
+        .channels
+        .iter()
+        .map(|c| c.mixer_track)
+        .collect();
+    for t in start_from..=max_t {
+        if !used.contains(&t) {
+            return t;
+        }
+    }
+    start_from.min(max_t)
+}
+
+fn ensure_pattern(app: &mut App, pat_num: u16) {
+    if app.state.project.pattern(pat_num).is_none() {
+        app.state.project.patterns.push(os_model::Pattern {
+            number: pat_num,
+            ..os_model::Pattern::default()
+        });
+    }
+    app.state.pattern = pat_num;
+}
+
+fn drum_kit(app: &mut App, a: &Value) -> Result<Value> {
+    let style = a["style"].as_str().unwrap_or("tech_house").to_ascii_lowercase();
+    let bars = a["bars"].as_u64().unwrap_or(4).clamp(1, 16);
+    let pat = a["pattern"].as_u64().unwrap_or(1).clamp(1, 999) as u16;
+    let build_pat = a["build_pattern"].as_u64().unwrap_or(4).clamp(0, 999) as u16;
+    let humanize = a["humanize"].as_f64().unwrap_or(10.0);
+
+    let role_specs: [(&str, &[&str], &str, u8); 5] = [
+        ("Kick", &["kick", "bd"], "kick_4x4", 112),
+        ("Clap", &["clap", "cp"], "clap_2_4", 104),
+        ("Closed Hat", &["closed", "ch", "hihat", "hh", "hat"], "closed_hat_16th", 86),
+        ("Open Hat", &["open", "oh", "hat"], "offbeat_hat", 96),
+        ("Perc", &["perc", "shaker", "conga", "rim", "tom"], "perc_groove", 88),
+    ];
+
+    let paths = find_best_samples(
+        app,
+        &role_specs.iter().map(|(n, kws, _, _)| (*n, *kws)).collect::<Vec<_>>(),
+    );
+
+    ensure_pattern(app, pat);
+    let mut loaded = Vec::new();
+    let mut missing = Vec::new();
+    let mut clap_row = None;
+
+    for (idx, ((role_name, _, drum_style, vel), maybe_path)) in role_specs.iter().zip(paths.into_iter()).enumerate() {
+        let Some(path) = maybe_path else {
+            missing.push(*role_name);
+            continue;
+        };
+        let reuse_first = idx == 0
+            && app.state.project.channels.first().is_some_and(|c| {
+                matches!(c.kind, os_model::ChannelKind::Sampler)
+                    && c.sample_path.as_deref().is_none_or(str::is_empty)
+            });
+        let target_row = if reuse_first { Some(0) } else { None };
+        app.sample_to_channel(path.clone().into(), target_row);
+        let row = if reuse_first {
+            0
+        } else {
+            app.state.project.channels.len().saturating_sub(1)
+        };
+        if let Some(ch) = app.state.project.channels.get_mut(row) {
+            ch.name = Some((*role_name).to_string());
+        }
+        let mixer_track = (idx as u16) + 1;
+        app.route_sample_to(row, mixer_track);
+
+        let pat_style = if *role_name == "Kick" && (style.contains("trap") || style.contains("hiphop") || style.contains("break")) {
+            style.as_str()
+        } else {
+            *drum_style
+        };
+        let _ = compose(
+            app,
+            &json!({
+                "op": "drum_pattern",
+                "row": row,
+                "style": pat_style,
+                "bars": bars,
+                "velocity": vel,
+                "humanize": humanize,
+                "replace": true
+            }),
+        );
+        if *role_name == "Clap" {
+            clap_row = Some(row);
+        }
+        loaded.push(json!({
+            "row": row,
+            "name": role_name,
+            "mixer_track": mixer_track,
+            "sample": std::path::Path::new(&path).file_name().and_then(|n| n.to_str()).unwrap_or(&path),
+        }));
+    }
+
+    if build_pat > 0 {
+        if let Some(crow) = clap_row.or_else(|| loaded.first().and_then(|v| v["row"].as_u64()).map(|r| r as usize)) {
+            ensure_pattern(app, build_pat);
+            let _ = compose(
+                app,
+                &json!({
+                    "op": "drum_pattern",
+                    "row": crow,
+                    "style": "snare_roll",
+                    "bars": bars,
+                    "velocity": 100,
+                    "humanize": 6,
+                    "replace": true
+                }),
+            );
+            app.state.pattern = pat;
+        }
+    }
+
+    app.sync_live();
+    app.invalidate();
+    Ok(json!({
+        "pattern": pat,
+        "build_pattern": build_pat,
+        "loaded": loaded,
+        "missing_roles": missing,
+    }))
+}
+
+fn synth_track(app: &mut App, a: &Value) -> Result<Value> {
+    let role = a["role"].as_str().unwrap_or("bass").to_ascii_lowercase();
+    let wanted_inst = a["instrument"].as_str().unwrap_or("Lemon 3x Osc").to_ascii_lowercase();
+    let root = a["root"].as_str().unwrap_or("F");
+    let scale = a["scale"].as_str().unwrap_or("minor");
+    let default_oct = match role.as_str() {
+        "bass" => 2,
+        "stab" | "pad" => 4,
+        _ => 5,
+    };
+    let octave = a["octave"].as_u64().unwrap_or(default_oct).clamp(1, 7);
+    let bars = a["bars"].as_u64().unwrap_or(4).clamp(1, 16);
+    let default_pat = match role.as_str() {
+        "bass" => 2,
+        "stab" | "pad" => 3,
+        _ => 5,
+    };
+    let pat = a["pattern"].as_u64().unwrap_or(default_pat).clamp(1, 999) as u16;
+    let mixer_track = a["mixer_track"]
+        .as_u64()
+        .map(|t| t as u16)
+        .unwrap_or_else(|| next_free_mixer_track(app, 6));
+
+    let inst_idx = app
+        .plugins
+        .available
+        .iter()
+        .position(|p| p.desc.name.to_ascii_lowercase().contains(&wanted_inst))
+        .or_else(|| {
+            app.plugins.available.iter().position(|p| {
+                let n = p.desc.name.to_ascii_lowercase();
+                n.contains("3x osc") || n.contains("citrus") || n.contains("wave")
+            })
+        })
+        .or_else(|| (!app.plugins.available.is_empty()).then_some(0))
+        .ok_or("No instruments available")?;
+    let inst_name = app.plugins.available[inst_idx].desc.name.clone();
+
+    crate::plugin_menu::run(
+        app,
+        crate::plugin_menu::PlugCmd::Generator {
+            index: inst_idx,
+            after: None,
+        },
+    );
+    let row = app.state.project.channels.len().saturating_sub(1);
+    let clean_name = match role.as_str() {
+        "bass" => format!("Bass ({root} {scale})"),
+        "stab" => "Stabs".into(),
+        "pad" => "Pad".into(),
+        "arp" => "Arp".into(),
+        _ => "Lead".into(),
+    };
+    if let Some(ch) = app.state.project.channels.get_mut(row) {
+        ch.name = Some(clean_name.clone());
+    }
+    app.route_sample_to(row, mixer_track);
+
+    let cutoff_val = a["cutoff"].as_f64().unwrap_or(match role.as_str() {
+        "bass" => 0.28,
+        "stab" => 0.46,
+        "pad" => 0.40,
+        _ => 0.62,
+    });
+    let res_val = a["resonance"].as_f64().unwrap_or(0.24);
+
+    if let Some(list) = app.state.params.lists.get(&row).cloned() {
+        for (pi, p) in list.params.iter().enumerate() {
+            let pn = p.name.to_ascii_lowercase();
+            if pn.contains("cutoff") || pn.contains("filter freq") {
+                app.params_cmd(crate::params::PCmd::Set(row, pi, cutoff_val.clamp(0.05, 0.95)));
+            } else if pn.contains("res") || pn == "q" {
+                app.params_cmd(crate::params::PCmd::Set(row, pi, res_val.clamp(0.0, 0.8)));
+            }
+        }
+    }
+
+    ensure_pattern(app, pat);
+    let compose_op = match role.as_str() {
+        "bass" => "bassline",
+        "stab" | "pad" => "chord_progression",
+        _ => "arp",
+    };
+    let compose_style = a["style"].as_str().unwrap_or(match role.as_str() {
+        "bass" => "rolling",
+        _ => "house",
+    });
+    let mut comp_args = json!({
+        "op": compose_op,
+        "row": row,
+        "root": root,
+        "scale": scale,
+        "octave": octave,
+        "bars": bars,
+        "style": compose_style,
+        "velocity": if role == "bass" { 104 } else { 92 },
+        "humanize": 8,
+        "replace": true,
+    });
+    if let Some(chords) = a.get("chords") {
+        comp_args["chords"] = chords.clone();
+    }
+    let comp_res = compose(app, &comp_args)?;
+    app.sync_live();
+    app.invalidate();
+
+    Ok(json!({
+        "row": row,
+        "name": clean_name,
+        "instrument": inst_name,
+        "mixer_track": mixer_track,
+        "pattern": pat,
+        "notes_written": comp_res["notes_written"],
+    }))
+}
+
+fn arrange_song(app: &mut App, a: &Value) -> Result<Value> {
+    if let Some(bpm) = a["tempo"].as_f64() {
+        app.set_tempo(bpm.clamp(10., 522.));
+    }
+    let template = a["template"].as_str().unwrap_or("extended_mix");
+    let drum_p = a["drum_pattern"].as_u64().unwrap_or(1) as u16;
+    let bass_p = a["bass_pattern"].as_u64().unwrap_or(2) as u16;
+    let stab_p = a["stab_pattern"].as_u64().unwrap_or(3) as u16;
+    let build_p = a["build_pattern"].as_u64().unwrap_or(4) as u16;
+    let arp_p = a["arp_pattern"].as_u64().unwrap_or(5) as u16;
+
+    let ppq = app.state.project.ppq.max(24) as u32;
+    let bar_ticks = ppq * 4;
+    let pat_bars_of = |proj: &os_model::Project, p: u16| -> u32 {
+        let max_end = proj
+            .pattern(p)
+            .and_then(|pat| pat.notes.iter().map(|n| n.position + n.length).max())
+            .unwrap_or(bar_ticks * 4);
+        ((max_end + bar_ticks - 1) / bar_ticks).max(1)
+    };
+
+    let sections: Vec<(u32, u32, Vec<u16>)> = match template {
+        "radio_edit" => vec![
+            (0, 8, vec![drum_p]),
+            (8, 16, vec![drum_p, build_p, stab_p]),
+            (16, 48, vec![drum_p, bass_p, stab_p]),
+            (48, 64, vec![stab_p, arp_p]),
+            (64, 96, vec![drum_p, bass_p, stab_p, arp_p]),
+            (96, 104, vec![drum_p]),
+        ],
+        _ => vec![
+            (0, 16, vec![drum_p]),
+            (16, 32, vec![drum_p, build_p, stab_p]),
+            (32, 64, vec![drum_p, bass_p, stab_p]),
+            (64, 80, vec![stab_p, arp_p]),
+            (80, 96, vec![build_p, stab_p]),
+            (96, 128, vec![drum_p, bass_p, stab_p, arp_p]),
+            (128, 144, vec![drum_p]),
+        ],
+    };
+
+    let pat_meta: std::collections::HashMap<u16, u32> = [drum_p, bass_p, stab_p, build_p, arp_p]
+        .into_iter()
+        .filter_map(|p| {
+            let pat = app.state.project.pattern(p)?;
+            (!pat.notes.is_empty()).then(|| (p, pat_bars_of(&app.state.project, p)))
+        })
+        .collect();
+
+    pl::snapshot(&mut app.state);
+    pl::arr_mut(&mut app.state).clips.clear();
+    let mut clips_added = 0usize;
+    let mut total_bars = 0u32;
+
+    for (start_bar, end_bar, pats) in sections {
+        total_bars = total_bars.max(end_bar);
+        for (lane, p) in pats.into_iter().enumerate() {
+            let Some(&len_bars) = pat_meta.get(&p) else {
+                continue;
+            };
+            let mut b = start_bar;
+            while b < end_bar {
+                let clip_bars = len_bars.min(end_bar - b);
+                let pos = b * bar_ticks;
+                let len = clip_bars * bar_ticks;
+                let track_idx = match p {
+                    x if x == drum_p => 0,
+                    x if x == bass_p => 1,
+                    x if x == stab_p => 2,
+                    x if x == build_p => 3,
+                    _ => lane.min(7) as u16,
+                };
+                pl::arr_mut(&mut app.state).clips.push(os_model::Clip::new(
+                    pos,
+                    len,
+                    track_idx,
+                    os_model::ClipSource::Pattern(p),
+                ));
+                clips_added += 1;
+                b += clip_bars;
+            }
+        }
+    }
+
+    app.act(Action::PatSong(true));
+    app.sync_live();
+    app.invalidate();
+
+    Ok(json!({
+        "template": template,
+        "tempo": app.state.tempo,
+        "total_bars": total_bars,
+        "clips_added": clips_added,
+        "song_mode": true,
+    }))
+}
+
+fn master_mix(app: &mut App, a: &Value) -> Result<Value> {
+    let kick_track = a["kick_track"].as_u64().unwrap_or_else(|| {
+        app.state.project.channels.iter()
+            .find(|c| c.name.as_deref().is_some_and(|n| n.to_ascii_lowercase().contains("kick")))
+            .map(|c| c.mixer_track as u64)
+            .unwrap_or(1)
+    }) as u16;
+
+    let bass_track = a["bass_track"].as_u64().or_else(|| {
+        app.state.project.channels.iter()
+            .find(|c| c.name.as_deref().is_some_and(|n| n.to_ascii_lowercase().contains("bass")))
+            .map(|c| c.mixer_track as u64)
+    }).map(|t| t as u16);
+
+    let synth_tracks: Vec<u16> = if let Some(arr) = a["synth_tracks"].as_array() {
+        arr.iter().filter_map(|v| v.as_u64().map(|x| x as u16)).collect()
+    } else {
+        app.state.project.channels.iter()
+            .filter(|c| matches!(c.kind, os_model::ChannelKind::Plugin) && Some(c.mixer_track) != bass_track && c.mixer_track > 0)
+            .map(|c| c.mixer_track)
+            .collect()
+    };
+
+    let mut sidechained = Vec::new();
+    let mut targets = Vec::new();
+    if let Some(bt) = bass_track {
+        targets.push(bt);
+    }
+    for st in &synth_tracks {
+        if !targets.contains(st) {
+            targets.push(*st);
+        }
+    }
+    for dst in targets {
+        if dst != kick_track && dst > 0 {
+            if mix_setup(app, &json!({"op": "sidechain", "track": kick_track, "destination": dst})).is_ok() {
+                sidechained.push(dst);
+            }
+        }
+    }
+
+    let mut effects_added = Vec::new();
+    let add_fx = |app: &mut App, tr: u16, fx_sub: &str, added: &mut Vec<String>| {
+        let Some(fx_idx) = app.plugins.effects.iter().position(|e| e.desc.name.to_ascii_lowercase().contains(fx_sub)) else {
+            return;
+        };
+        let fx_name = app.plugins.effects[fx_idx].desc.name.clone();
+        let already = crate::mixer::track(&app.state, tr)
+            .is_some_and(|m| m.slots.iter().flatten().any(|p| p.name.to_ascii_lowercase().contains(fx_sub)));
+        if already {
+            return;
+        }
+        let cap = crate::mixer::user_slot_capacity(&app.state, tr);
+        for k in 0..cap {
+            let slot = crate::mixer::visible_user_slot(&app.state, tr, k);
+            if crate::mixer::track(&app.state, tr).is_some_and(|m| m.slots[slot as usize].is_none()) {
+                app.state.selected_mixer = tr;
+                app.state.mixer.sel.clear();
+                crate::mixer::run(app, crate::mixer::MCmd::AddEffect(slot, fx_idx));
+                added.push(format!("T{tr}: {fx_name}"));
+                break;
+            }
+        }
+    };
+
+    add_fx(app, 0, "parametric eq", &mut effects_added);
+    add_fx(app, 0, "soft clipper", &mut effects_added);
+    for st in &synth_tracks {
+        add_fx(app, *st, "parametric eq", &mut effects_added);
+        add_fx(app, *st, "reverb", &mut effects_added);
+        add_fx(app, *st, "delay", &mut effects_added);
+    }
+
+    let mut gain_staged = 0usize;
+    let set_vol = |app: &mut App, tr: u16, vol: f64, count: &mut usize| {
+        if crate::mixer::track(&app.state, tr).is_some() {
+            history::fader(&mut app.state, tr, false);
+            if let Some(m) = crate::mixer::track_mut(&mut app.state, tr) {
+                m.volume = Some(vol);
+                *count += 1;
+            }
+        }
+    };
+    set_vol(app, 0, 0.80, &mut gain_staged);
+    set_vol(app, kick_track, 0.80, &mut gain_staged);
+    if let Some(bt) = bass_track {
+        set_vol(app, bt, 0.74, &mut gain_staged);
+    }
+    for c in app.state.project.channels.clone() {
+        if c.mixer_track > 0 && c.mixer_track != kick_track && Some(c.mixer_track) != bass_track {
+            let v = if synth_tracks.contains(&c.mixer_track) { 0.66 } else { 0.70 };
+            set_vol(app, c.mixer_track, v, &mut gain_staged);
+        }
+    }
+
+    app.sync_live();
+    app.invalidate();
+    Ok(json!({
+        "sidechained_tracks": sidechained,
+        "effects_added": effects_added,
+        "gain_staged_tracks": gain_staged,
+        "analysis": audio_analyze(app),
+    }))
 }

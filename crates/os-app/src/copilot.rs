@@ -475,30 +475,21 @@ pub fn tick(app: &mut App) {
 }
 
 fn system_prompt() -> &'static str {
-    "Eres el Director Musical de JL Studio (DAW). REGLA CRÍTICA: PROHIBIDO responder con guías, tutoriales o instrucciones para que las haga el usuario; SIEMPRE debes EJECUTAR las herramientas tú mismo hasta dejar el tema terminado en el DAW. \
-Equipo via `lemon_delegate`: \
-1) `drums`: busca samples reales (`lemon_samples`), carga con `lemon_channel(load_sample)`, programa `lemon_compose(drum_pattern)` y asigna mixer. \
-2) `melody`: carga sintes (`lemon_plugins`), moldea filtro/envolvente (`lemon_parameter`) y compone bajo/stabs/arp (`lemon_compose`). \
-3) `arrangement`: arma la Playlist (`lemon_clips`) en Extended Mix (Intro, Build-up, Drop 1, Breakdown, Build-up 2, Drop 2, Outro) y `lemon_automation`. \
-4) `mixing`: sidechain (`lemon_mix_setup`), EQ/Clipper/Reverb/Delay + ajuste (`lemon_parameter`), `gain_stage` (-4 a -6 dB) y `lemon_audio_analyze`. \
-Para crear un tema, lee `lemon_state` y `lemon_transport`, y llama a `lemon_delegate` en orden: `drums` -> `melody` -> `arrangement` -> `mixing`. Responde en español solo cuando todo esté ejecutado."
+    "Eres el Director Musical de JL Studio (DAW). REGLA CRÍTICA: PROHIBIDO responder con guías o tutoriales; EJECUTA las herramientas tú mismo. \
+Para crear un tema completo, usa SIEMPRE las macro-herramientas (1 llamada por bloque, rápido y sin gastar tokens) o delega con `lemon_delegate`: \
+1) `lemon_drum_kit` (o `drums`): busca samples reales y programa Kick, Clap, Hats, Perc y Snare Roll en sus pistas. \
+2) `lemon_synth_track` (o `melody`): carga sintes, ajusta filtro y compone Bajo, Stabs/Acordes y Arp en patrones separados. \
+3) `lemon_arrange_song` (o `arrangement`): construye el Extended Mix completo en Playlist y ajusta BPM. \
+4) `lemon_master_mix` (o `mixing`): aplica sidechain Kick->Bajo/Synths, EQ/Soft Clipper/Reverb/Delay, gain staging y análisis final. \
+Para ajustes finos usa `lemon_samples`, `lemon_channel`, `lemon_compose`, `lemon_parameter`, `lemon_clips`, `lemon_mix_setup`. Responde en español solo al terminar."
 }
 
 fn specialist_prompt(role: &str) -> &'static str {
     match role {
-        "drums" => "Especialista de Batería JL Studio. EJECUTA herramientas, nunca des guías: 1) Busca samples reales con `lemon_samples` (kick, clap, closed hat, open hat, perc). \
-2) Cárgalos con `lemon_channel(op:'load_sample')` en canales distintos y pistas mixer 1..5. \
-3) Selecciona patrón si hace falta (`lemon_transport`) y programa con `lemon_compose(op:'drum_pattern', style:'kick_4x4'|'clap_2_4'|'offbeat_hat'|'closed_hat_16th'|'perc_groove'|'snare_roll', humanize:10)`. Resume lo ejecutado.",
-        "melody" => "Especialista de Bajo/Melodía JL Studio. EJECUTA herramientas, nunca des guías: 1) Lista/carga sintes (`Lemon 3x Osc`, `Citrus`, `Lemon Wave`) con `lemon_plugins` en pistas mixer libres. \
-2) Ajusta cutoff/envolvente con `lemon_parameter` para sonido cálido y musical. \
-3) Selecciona patrón (`lemon_transport`) y compone con `lemon_compose` (`bassline` rolling/offbeat, `chord_progression`, `arp`, `humanize:8`). Resume lo ejecutado.",
-        "arrangement" => "Especialista de Arreglo JL Studio. EJECUTA herramientas, nunca des guías: 1) Lee `lemon_state`. \
-2) Coloca clips en Playlist con `lemon_clips(op:'add')` formando Intro, Build-up, Drop 1, Breakdown, Build-up 2, Drop 2, Outro sin solapamientos erróneos. \
-3) Añade automatizaciones de tensión con `lemon_automation`. Resume estructura por compases.",
-        "mixing" => "Ingeniero de Mezcla y Mastering JL Studio. EJECUTA herramientas, nunca des guías: 1) Lee `lemon_state` y `lemon_audio_analyze`. \
-2) Haz `sidechain` (`lemon_mix_setup`) del Kick al Bajo y Synths/Stabs. \
-3) Añade `Lemon Parametric EQ`, `Lemon Soft Clipper`, `Lemon Reverb`, `Lemon Delay` (`lemon_plugins`) y ajústalos con `lemon_parameter`. \
-4) Haz `gain_stage` (-4 a -6 dB headroom) y confirma con `lemon_audio_analyze`.",
+        "drums" => "Especialista de Batería JL Studio. EJECUTA herramientas, nunca des guías: usa `lemon_drum_kit` para cargar samples reales y programar el groove + snare roll en un paso, o `lemon_samples`/`lemon_channel`/`lemon_compose` para ajustes extra. Resume lo ejecutado.",
+        "melody" => "Especialista de Bajo/Melodía JL Studio. EJECUTA herramientas, nunca des guías: usa `lemon_synth_track` (una llamada para `bass`, otra para `stab`, otra para `arp` si aplica) para cargar sintes, filtrar cutoff y escribir notas. Resume lo ejecutado.",
+        "arrangement" => "Especialista de Arreglo JL Studio. EJECUTA herramientas, nunca des guías: usa `lemon_arrange_song` para montar el Extended Mix completo en Playlist y ajustar BPM, o `lemon_clips`/`lemon_automation` para detalles. Resume estructura por compases.",
+        "mixing" => "Ingeniero de Mezcla y Mastering JL Studio. EJECUTA herramientas, nunca des guías: usa `lemon_master_mix` para sidechain, EQ/Clipper/Reverb/Delay, gain staging y análisis, o `lemon_parameter`/`lemon_mix_setup` para ajustes finos. Resume resultados.",
         _ => system_prompt(),
     }
 }
@@ -582,16 +573,16 @@ fn tools_for_role(role: Option<&str>) -> Vec<Value> {
     let all = crate::ai_commands::tools();
     match role {
         Some("drums") => all.into_iter().filter(|t| matches!(t["name"].as_str(),
-            Some("lemon_state" | "lemon_samples" | "lemon_channel" | "lemon_compose" | "lemon_transport"))).collect(),
+            Some("lemon_drum_kit" | "lemon_state" | "lemon_samples" | "lemon_channel" | "lemon_compose" | "lemon_transport"))).collect(),
         Some("melody") => all.into_iter().filter(|t| matches!(t["name"].as_str(),
-            Some("lemon_state" | "lemon_plugins" | "lemon_parameter" | "lemon_compose" | "lemon_channel" | "lemon_transport"))).collect(),
+            Some("lemon_synth_track" | "lemon_state" | "lemon_plugins" | "lemon_parameter" | "lemon_compose" | "lemon_channel" | "lemon_transport"))).collect(),
         Some("arrangement") => all.into_iter().filter(|t| matches!(t["name"].as_str(),
-            Some("lemon_state" | "lemon_clips" | "lemon_automation" | "lemon_transport"))).collect(),
+            Some("lemon_arrange_song" | "lemon_state" | "lemon_clips" | "lemon_automation" | "lemon_transport"))).collect(),
         Some("mixing") => all.into_iter().filter(|t| matches!(t["name"].as_str(),
-            Some("lemon_state" | "lemon_mix_setup" | "lemon_mixer" | "lemon_plugins" | "lemon_parameter" | "lemon_audio_analyze"))).collect(),
+            Some("lemon_master_mix" | "lemon_state" | "lemon_mix_setup" | "lemon_mixer" | "lemon_plugins" | "lemon_parameter" | "lemon_audio_analyze"))).collect(),
         _ => {
             let mut list: Vec<Value> = all.into_iter().filter(|t| matches!(t["name"].as_str(),
-                Some("lemon_state" | "lemon_transport" | "lemon_audio_analyze" | "lemon_compose" | "lemon_checkpoint"))).collect();
+                Some("lemon_drum_kit" | "lemon_synth_track" | "lemon_arrange_song" | "lemon_master_mix" | "lemon_state" | "lemon_transport" | "lemon_audio_analyze" | "lemon_compose" | "lemon_checkpoint"))).collect();
             list.push(json!({
                 "name": "lemon_delegate",
                 "description": "Delegate to specialist: 'drums' (samples & grooves), 'melody' (synths, bass, chords, arp), 'arrangement' (Playlist Extended Mix & automations), 'mixing' (sidechain, EQ, FX, gain staging).",
@@ -718,6 +709,11 @@ fn post_json_with_retry(
                     } else {
                         parse_retry_after_secs(&detail).unwrap_or(delays[attempt])
                     };
+                    if code == 429 && (detail.contains("tokens per day") || detail.contains("TPD") || wait > 90) {
+                        return Err(format!(
+                            "Límite diario de tokens (TPD) alcanzado en Groq para este modelo. Cambia de modelo en Config (ej. llama-3.1-8b-instant o qwen/qwen3-32b) o espera el reinicio. Detalle: {detail}"
+                        ));
+                    }
                     let _ = event_tx.send(WorkerEvent::Status(format!(
                         "Limite por minuto ({code}), esperando {wait}s..."
                     )));
