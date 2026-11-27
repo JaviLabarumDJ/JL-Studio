@@ -84,6 +84,7 @@ pub enum CopilotHit {
     Field(u8),
     Mcp,
     Clear,
+    CopyMsg(usize),
     FocusInput,
     Close,
 }
@@ -231,6 +232,15 @@ pub fn command(app: &mut App, hit: CopilotHit) {
             if !app.state.copilot.busy {
                 app.state.copilot.messages.truncate(1);
                 app.state.copilot.scroll = 0.0;
+            }
+        }
+        CopilotHit::CopyMsg(idx) => {
+            if let Some(msg) = app.state.copilot.messages.get(idx) {
+                if crate::dialog::text::clipboard_set(&msg.text) {
+                    app.state.copilot.status = "Mensaje copiado al portapapeles.".into();
+                } else {
+                    app.state.copilot.status = "No se pudo acceder al portapapeles.".into();
+                }
             }
         }
         CopilotHit::FocusInput => {
@@ -465,28 +475,29 @@ pub fn tick(app: &mut App) {
 }
 
 fn system_prompt() -> &'static str {
-    "Eres el Director Musical de JL Studio (DAW). Tienes 4 especialistas via `lemon_delegate`: \
+    "Eres el Director Musical de JL Studio (DAW). REGLA CRÍTICA: PROHIBIDO responder con guías, tutoriales o instrucciones para que las haga el usuario; SIEMPRE debes EJECUTAR las herramientas tú mismo hasta dejar el tema terminado en el DAW. \
+Equipo via `lemon_delegate`: \
 1) `drums`: busca samples reales (`lemon_samples`), carga con `lemon_channel(load_sample)`, programa `lemon_compose(drum_pattern)` y asigna mixer. \
 2) `melody`: carga sintes (`lemon_plugins`), moldea filtro/envolvente (`lemon_parameter`) y compone bajo/stabs/arp (`lemon_compose`). \
 3) `arrangement`: arma la Playlist (`lemon_clips`) en Extended Mix (Intro, Build-up, Drop 1, Breakdown, Build-up 2, Drop 2, Outro) y `lemon_automation`. \
-4) `mixing`: sidechain (`lemon_mix_setup`), EQ/Clipper/Reverb/Delay, `gain_stage` (-4 a -6 dB) y `lemon_audio_analyze`. \
-Para temas completos, lee `lemon_state` y `lemon_transport`, y delega en orden: `drums` -> `melody` -> `arrangement` -> `mixing`. Responde siempre en español con detalles exactos."
+4) `mixing`: sidechain (`lemon_mix_setup`), EQ/Clipper/Reverb/Delay + ajuste (`lemon_parameter`), `gain_stage` (-4 a -6 dB) y `lemon_audio_analyze`. \
+Para crear un tema, lee `lemon_state` y `lemon_transport`, y llama a `lemon_delegate` en orden: `drums` -> `melody` -> `arrangement` -> `mixing`. Responde en español solo cuando todo esté ejecutado."
 }
 
 fn specialist_prompt(role: &str) -> &'static str {
     match role {
-        "drums" => "Especialista de Batería JL Studio: 1) Busca samples reales con `lemon_samples` (kick, clap, closed hat, open hat, perc). \
+        "drums" => "Especialista de Batería JL Studio. EJECUTA herramientas, nunca des guías: 1) Busca samples reales con `lemon_samples` (kick, clap, closed hat, open hat, perc). \
 2) Cárgalos con `lemon_channel(op:'load_sample')` en canales distintos y pistas mixer 1..5. \
-3) Programa patrones con `lemon_compose(op:'drum_pattern', style:'kick_4x4'|'clap_2_4'|'offbeat_hat'|'closed_hat_16th'|'perc_groove'|'snare_roll', humanize:10)`. Resume samples, pistas y patrones.",
-        "melody" => "Especialista de Bajo/Melodía JL Studio: 1) Lista/carga sintes (`Lemon 3x Osc`, `Citrus`, `Lemon Wave`) con `lemon_plugins` en pistas mixer libres. \
+3) Selecciona patrón si hace falta (`lemon_transport`) y programa con `lemon_compose(op:'drum_pattern', style:'kick_4x4'|'clap_2_4'|'offbeat_hat'|'closed_hat_16th'|'perc_groove'|'snare_roll', humanize:10)`. Resume lo ejecutado.",
+        "melody" => "Especialista de Bajo/Melodía JL Studio. EJECUTA herramientas, nunca des guías: 1) Lista/carga sintes (`Lemon 3x Osc`, `Citrus`, `Lemon Wave`) con `lemon_plugins` en pistas mixer libres. \
 2) Ajusta cutoff/envolvente con `lemon_parameter` para sonido cálido y musical. \
-3) Compone con `lemon_compose` (`bassline` rolling/offbeat, `chord_progression`, `arp`, `humanize:8`). Resume canales, mixer y patrones.",
-        "arrangement" => "Especialista de Arreglo JL Studio: 1) Lee `lemon_state`. \
+3) Selecciona patrón (`lemon_transport`) y compone con `lemon_compose` (`bassline` rolling/offbeat, `chord_progression`, `arp`, `humanize:8`). Resume lo ejecutado.",
+        "arrangement" => "Especialista de Arreglo JL Studio. EJECUTA herramientas, nunca des guías: 1) Lee `lemon_state`. \
 2) Coloca clips en Playlist con `lemon_clips(op:'add')` formando Intro, Build-up, Drop 1, Breakdown, Build-up 2, Drop 2, Outro sin solapamientos erróneos. \
 3) Añade automatizaciones de tensión con `lemon_automation`. Resume estructura por compases.",
-        "mixing" => "Ingeniero de Mezcla JL Studio: 1) Lee `lemon_state` y `lemon_audio_analyze`. \
+        "mixing" => "Ingeniero de Mezcla y Mastering JL Studio. EJECUTA herramientas, nunca des guías: 1) Lee `lemon_state` y `lemon_audio_analyze`. \
 2) Haz `sidechain` (`lemon_mix_setup`) del Kick al Bajo y Synths/Stabs. \
-3) Añade `Lemon Parametric EQ`, `Lemon Soft Clipper`, `Lemon Reverb`, `Lemon Delay` (`lemon_plugins`). \
+3) Añade `Lemon Parametric EQ`, `Lemon Soft Clipper`, `Lemon Reverb`, `Lemon Delay` (`lemon_plugins`) y ajústalos con `lemon_parameter`. \
 4) Haz `gain_stage` (-4 a -6 dB headroom) y confirma con `lemon_audio_analyze`.",
         _ => system_prompt(),
     }
@@ -571,13 +582,13 @@ fn tools_for_role(role: Option<&str>) -> Vec<Value> {
     let all = crate::ai_commands::tools();
     match role {
         Some("drums") => all.into_iter().filter(|t| matches!(t["name"].as_str(),
-            Some("lemon_state" | "lemon_samples" | "lemon_channel" | "lemon_compose"))).collect(),
+            Some("lemon_state" | "lemon_samples" | "lemon_channel" | "lemon_compose" | "lemon_transport"))).collect(),
         Some("melody") => all.into_iter().filter(|t| matches!(t["name"].as_str(),
-            Some("lemon_state" | "lemon_plugins" | "lemon_parameter" | "lemon_compose" | "lemon_channel"))).collect(),
+            Some("lemon_state" | "lemon_plugins" | "lemon_parameter" | "lemon_compose" | "lemon_channel" | "lemon_transport"))).collect(),
         Some("arrangement") => all.into_iter().filter(|t| matches!(t["name"].as_str(),
             Some("lemon_state" | "lemon_clips" | "lemon_automation" | "lemon_transport"))).collect(),
         Some("mixing") => all.into_iter().filter(|t| matches!(t["name"].as_str(),
-            Some("lemon_state" | "lemon_mix_setup" | "lemon_mixer" | "lemon_plugins" | "lemon_audio_analyze"))).collect(),
+            Some("lemon_state" | "lemon_mix_setup" | "lemon_mixer" | "lemon_plugins" | "lemon_parameter" | "lemon_audio_analyze"))).collect(),
         _ => {
             let mut list: Vec<Value> = all.into_iter().filter(|t| matches!(t["name"].as_str(),
                 Some("lemon_state" | "lemon_transport" | "lemon_audio_analyze" | "lemon_compose" | "lemon_checkpoint"))).collect();

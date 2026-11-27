@@ -1256,7 +1256,8 @@ pub fn paint_copilot_panel(ui: &mut Ui, s: &State, r: Rect) {
         let f = if msg.role == ChatRole::Tool { tool_font } else { msg_font };
         let lh = if msg.role == ChatRole::Tool { 14. } else { 16. };
         let lines = copilot_wrap(ui.c, f, &msg.text, max_tw);
-        let bh = lines.len().max(1) as f32 * lh + 10.;
+        let extra = if msg.role == ChatRole::Tool { 10. } else { 24. };
+        let bh = lines.len().max(1) as f32 * lh + extra;
         total_h += bh + 6.;
         blocks.push((msg.role, lines, bh));
     }
@@ -1264,7 +1265,7 @@ pub fn paint_copilot_panel(ui: &mut Ui, s: &State, r: Rect) {
     cp.max_scroll.set(max_scroll);
     let scroll = cp.scroll.clamp(0., max_scroll);
     let mut cy = chat_r.y + 8. - scroll;
-    for (role, lines, bh) in blocks {
+    for (msg_idx, (role, lines, bh)) in blocks.into_iter().enumerate() {
         if cy + bh >= chat_r.y && cy <= chat_r.bottom() {
             let bx = chat_r.x + pad;
             let bw = chat_r.w - pad * 2. - 8.;
@@ -1283,6 +1284,13 @@ pub fn paint_copilot_panel(ui: &mut Ui, s: &State, r: Rect) {
             let lh = if role == ChatRole::Tool { 14. } else { 16. };
             ui.c.fill_rrect(Rect::new(bx, cy, bw, bh), 4., bg);
             let mut ly = cy + 5.;
+            if role != ChatRole::Tool {
+                let copy_r = Rect::new(bx + bw - 50., cy + 4., 44., 15.);
+                let copy_h = ui.hit(copy_r, Action::Copilot(CopilotHit::CopyMsg(msg_idx)), "Copiar mensaje al portapapeles");
+                ui.c.fill_rrect(copy_r, 3., if copy_h { ui.t.button_hi } else { ui.t.s(0x303b40) });
+                ui.c.text_center(Font::new(9).bold(), copy_r, dim, "Copiar");
+                ly = cy + 20.;
+            }
             for line in lines {
                 ui.c.text_clip(f, bx + 7., ly, bw - 14., fg, &line);
                 ly += lh;

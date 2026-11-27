@@ -289,13 +289,13 @@ pub(crate) fn nearest(app: &crate::app::App, x: f32, index: impl Fn(&Action) -> 
 #[cfg(not(test))]
 thread_local! { static CLIPBOARD: std::cell::RefCell<Option<arboard::Clipboard>> = const { std::cell::RefCell::new(None) }; }
 #[cfg(not(test))]
-fn clipboard_set(s: &str) -> bool { CLIPBOARD.with(|c| { let mut c=c.borrow_mut(); if c.is_none() { *c=arboard::Clipboard::new().ok(); } c.as_mut().is_some_and(|c|c.set_text(s.to_owned()).is_ok()) }) }
+pub(crate) fn clipboard_set(s: &str) -> bool { CLIPBOARD.with(|c| { let mut c=c.borrow_mut(); if c.is_none() { *c=arboard::Clipboard::new().ok(); } c.as_mut().is_some_and(|c|c.set_text(s.to_owned()).is_ok()) }) }
 #[cfg(not(test))]
 fn clipboard_get() -> Option<String> { CLIPBOARD.with(|c| { let mut c=c.borrow_mut(); if c.is_none() { *c=arboard::Clipboard::new().ok(); } c.as_mut()?.get_text().ok() }) }
 #[cfg(test)]
 thread_local! { static CLIPBOARD: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) }; }
 #[cfg(test)]
-fn clipboard_set(s: &str) -> bool { CLIPBOARD.with(|c| *c.borrow_mut()=s.into()); true }
+pub(crate) fn clipboard_set(s: &str) -> bool { CLIPBOARD.with(|c| *c.borrow_mut()=s.into()); true }
 #[cfg(test)]
 fn clipboard_get() -> Option<String> { Some(CLIPBOARD.with(|c|c.borrow().clone())) }
 
