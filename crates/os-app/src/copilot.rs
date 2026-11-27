@@ -373,7 +373,7 @@ pub fn send_prompt(app: &mut App, custom_prompt: Option<&str>) {
         .messages
         .iter()
         .rev()
-        .take(10)
+        .take(4)
         .rev()
         .filter(|m| matches!(m.role, ChatRole::User | ChatRole::Assistant))
         .map(|m| (m.role, m.text.clone()))
@@ -497,6 +497,47 @@ Devuelve la estructura exacta por compases.",
     }
 }
 
+fn compact_tool_output(name: &str, raw: String) -> String {
+    if name == "lemon_state" {
+        if let Ok(mut v) = serde_json::from_str::<Value>(&raw) {
+            let sel_mix = v["selected_mixer"].as_u64().unwrap_or(0);
+            let used_tracks: std::collections::HashSet<u64> = v["channels"]
+                .as_array()
+                .map(|arr| arr.iter().filter_map(|c| c["mixer_track"].as_u64()).collect())
+                .unwrap_or_default();
+            if let Some(mixer) = v["mixer"].as_array().cloned() {
+                let compact_mixer: Vec<Value> = mixer
+                    .into_iter()
+                    .filter(|m| {
+                        let t = m["track"].as_u64().unwrap_or(0);
+                        let has_slots = m["slots"].as_array().is_some_and(|s| !s.is_empty());
+                        let has_routes = m["routes"].as_array().is_some_and(|r| !r.is_empty());
+                        let custom_name = m["name"].as_str().is_some_and(|n| !n.is_empty() && !n.starts_with("Insert "));
+                        t == 0 || t == sel_mix || used_tracks.contains(&t) || has_slots || has_routes || custom_name
+                    })
+                    .map(|mut m| {
+                        if let Some(obj) = m.as_object_mut() {
+                            obj.remove("strip");
+                            obj.remove("eq");
+                        }
+                        m
+                    })
+                    .collect();
+                v["mixer"] = Value::Array(compact_mixer);
+            }
+            if let Some(pl) = v["playlist_tracks"].as_array().cloned() {
+                v["playlist_tracks"] = Value::Array(pl.into_iter().take(24).collect());
+            }
+            return v.to_string();
+        }
+    }
+    if raw.len() > 8_000 {
+        let end = raw.floor_char_boundary(8_000);
+        return format!("{}...(truncated)", &raw[..end]);
+    }
+    raw
+}
+
 fn invoke_ui_tool(
     tool_tx: &mpsc::Sender<ToolReq>,
     event_tx: &mpsc::Sender<WorkerEvent>,
@@ -517,7 +558,7 @@ fn invoke_ui_tool(
         return r#"{"error":"DAW UI closed"}"#.into();
     }
     match reply_rx.recv_timeout(Duration::from_secs(15)) {
-        Ok(Ok(s)) => s,
+        Ok(Ok(s)) => compact_tool_output(name, s),
         Ok(Err(e)) => json!({"error": e}).to_string(),
         Err(_) => r#"{"error":"Tool execution timed out"}"#.into(),
     }
@@ -712,7 +753,7 @@ fn detect_openai_model(agent: &ureq::Agent, base_url: &str, api_key: &str) -> Op
         let l = id.to_ascii_lowercase();
         !l.contains("whisper") && !l.contains("tts") && !l.contains("guard") && !l.contains("embed") && !l.contains("moderation")
     };
-    let prefs = ["llama-3.3", "qwen", "gpt-oss", "llama-3.1", "llama-4", "gpt-4o", "deepseek", "mixtral"];
+    let prefs = ["gpt-oss", "llama-3.3", "llama-3.1", "llama-4", "qwen", "gpt-4o", "deepseek", "mixtral"];
     for p in prefs {
         if let Some(&m) = ids.iter().find(|&&id| usable(id) && id.to_ascii_lowercase().contains(p)) {
             return Some(m.to_string());
