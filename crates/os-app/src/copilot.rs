@@ -258,6 +258,9 @@ pub fn key(app: &mut App, key: &Key, ctrl: bool, alt: bool) {
         Key::Named(NamedKey::Enter) if !cp.editing_config && !shift => {
             send_prompt(app, None);
         }
+        Key::Named(NamedKey::Enter) if !cp.editing_config && shift => {
+            cp.input.insert("\n");
+        }
         Key::Named(NamedKey::Enter) if cp.editing_config => {
             cp.editing_config = false;
             save_config(cp);
@@ -695,6 +698,29 @@ fn dispatch_tool(
     invoke_ui_tool(tool_tx, event_tx, name, args)
 }
 
+fn detect_openai_model(agent: &ureq::Agent, base_url: &str, api_key: &str) -> Option<String> {
+    let url = format!("{}/models", base_url.trim_end_matches('/'));
+    let mut req = agent.get(&url);
+    if !api_key.is_empty() {
+        req = req.set("Authorization", &format!("Bearer {api_key}"));
+    }
+    let resp = req.call().ok()?;
+    let val: Value = serde_json::from_reader(resp.into_reader()).ok()?;
+    let list = val["data"].as_array()?;
+    let ids: Vec<&str> = list.iter().filter_map(|m| m["id"].as_str()).collect();
+    let usable = |id: &str| {
+        let l = id.to_ascii_lowercase();
+        !l.contains("whisper") && !l.contains("tts") && !l.contains("guard") && !l.contains("embed") && !l.contains("moderation")
+    };
+    let prefs = ["llama-3.3", "qwen", "gpt-oss", "llama-3.1", "llama-4", "gpt-4o", "deepseek", "mixtral"];
+    for p in prefs {
+        if let Some(&m) = ids.iter().find(|&&id| usable(id) && id.to_ascii_lowercase().contains(p)) {
+            return Some(m.to_string());
+        }
+    }
+    ids.into_iter().find(|&id| usable(id)).map(str::to_string)
+}
+
 fn run_agent_loop(
     backend: Backend,
     model: &str,
@@ -752,25 +778,40 @@ fn run_agent_with_prompt(
                 format!("{}/chat/completions", base_url.trim_end_matches('/'))
             };
 
+            let mut active_model = model.to_string();
             for _ in 0..max_steps {
                 let _ = event_tx.send(WorkerEvent::Status("Esperando respuesta del modelo...".into()));
-                let body = if backend == Backend::Ollama {
-                    json!({
-                        "model": model,
-                        "messages": msgs,
-                        "tools": tools,
-                        "stream": false
-                    })
-                } else {
-                    json!({
-                        "model": model,
-                        "messages": msgs,
-                        "tools": tools,
-                    })
+                let make_body = |m: &str| {
+                    if backend == Backend::Ollama {
+                        json!({
+                            "model": m,
+                            "messages": msgs,
+                            "tools": tools,
+                            "stream": false
+                        })
+                    } else {
+                        json!({
+                            "model": m,
+                            "messages": msgs,
+                            "tools": tools,
+                        })
+                    }
                 };
 
                 let auth = (backend == Backend::OpenAi && !api_key.is_empty()).then_some(api_key);
-                let resp = post_json_with_retry(&agent, &url, auth, None, &body.to_string(), event_tx)?;
+                let resp = match post_json_with_retry(&agent, &url, auth, None, &make_body(&active_model).to_string(), event_tx) {
+                    Ok(r) => r,
+                    Err(e) if backend == Backend::OpenAi && e.contains("(404)") => {
+                        if let Some(found) = detect_openai_model(&agent, base_url, api_key) {
+                            let _ = event_tx.send(WorkerEvent::ToolLog(format!("Modelo '{active_model}' no disponible; cambiando a '{found}'")));
+                            active_model = found;
+                            post_json_with_retry(&agent, &url, auth, None, &make_body(&active_model).to_string(), event_tx)?
+                        } else {
+                            return Err(e);
+                        }
+                    }
+                    Err(e) => return Err(e),
+                };
 
                 let msg = if backend == Backend::Ollama {
                     resp["message"].clone()

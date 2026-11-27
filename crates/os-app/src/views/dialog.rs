@@ -1303,18 +1303,131 @@ pub fn paint_copilot_panel(ui: &mut Ui, s: &State, r: Rect) {
     btn(ui, Rect::new(r.x + 128., bar_y, 130., 24.), CopilotHit::Rollback, "Deshacer piloto", can_undo, "Revertir todos los cambios del ultimo turno de la IA");
     ui.c.text_clip(Font::new(10), r.x + 12., bar_y + 28., r.w - 24., if cp.busy { ui.t.accent } else { dim }, &cp.status);
 
-    // Input box with full caret, selection, Ctrl+A/C/V/X/Z + Send
+    // Multi-line input box with full caret, selection, click-to-place, Ctrl+A/C/V/X/Z + Send
     let in_y = r.bottom() - input_h - 10.;
     let in_r = Rect::new(r.x + 10., in_y, r.w - 86., input_h);
     let active_in = cp.input_focused && !cp.editing_config;
     ui.c.fill_rrect(in_r, 4., ui.t.s(0x12171a));
     ui.c.stroke_rrect(in_r, 4., 1., if active_in { ui.t.accent } else { ui.t.s(0x3a464d) });
-    let inner_in = Rect::new(in_r.x + 6., in_r.y, (in_r.w - 12.).max(0.), in_r.h);
-    let in_font = Font::new(12);
-    let ph_in = "Escribe o pega tu orden aqui (Enter: enviar, Ctrl+A/C/V/X)...";
-    let origin_in = crate::dialog::text::paint(ui, inner_in, &cp.input, active_in, in_font, ink, ui.t.accent.with_alpha(95), ph_in);
-    crate::dialog::text::carets(ui, in_r, &cp.input, in_font, origin_in, |i| Action::TextCaret(crate::dialog::text::Target::Copilot(0), i), ph_in);
+    let in_font = Font::new(11);
+    let ph_in = "Escribe o pega tu orden aqui (Enter: enviar, Shift+Enter: linea)...";
+    paint_wrapped_field(ui, in_r, &cp.input, active_in, in_font, ink, dim, ui.t.accent.with_alpha(95), ph_in, crate::dialog::text::Target::Copilot(0));
     btn(ui, Rect::new(in_r.right() + 6., in_y, 60., input_h), CopilotHit::Send, if cp.busy { "..." } else { "Enviar" }, !cp.busy, "Enviar orden al Piloto IA (Enter)");
+}
+
+fn paint_wrapped_field(
+    ui: &mut Ui,
+    bounds: Rect,
+    field: &crate::dialog::Field,
+    focused: bool,
+    font: Font,
+    ink: Color,
+    dim: Color,
+    sel_bg: Color,
+    placeholder: &'static str,
+    target: crate::dialog::text::Target,
+) {
+    let inner_w = (bounds.w - 14.).max(20.);
+    let lh = 16.0;
+    let text = field.as_str();
+    let chars: Vec<char> = text.chars().collect();
+    let mut lines: Vec<(usize, usize, String)> = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '\n' {
+            lines.push((i, i, String::new()));
+            i += 1;
+            continue;
+        }
+        let line_start = i;
+        let mut last_space = None;
+        let mut cur = String::new();
+        let mut wrapped = false;
+        while i < chars.len() && chars[i] != '\n' {
+            if chars[i].is_whitespace() {
+                last_space = Some((i, cur.len()));
+            }
+            cur.push(chars[i]);
+            if ui.c.text_width(font, &cur) > inner_w && cur.chars().count() > 1 {
+                if let Some((sp_idx, str_len)) = last_space.filter(|&(si, _)| si > line_start) {
+                    cur.truncate(str_len);
+                    lines.push((line_start, sp_idx, std::mem::take(&mut cur)));
+                    i = sp_idx + 1;
+                } else {
+                    cur.pop();
+                    lines.push((line_start, i, std::mem::take(&mut cur)));
+                }
+                wrapped = true;
+                break;
+            }
+            i += 1;
+        }
+        if !wrapped {
+            let end = i;
+            if i < chars.len() && chars[i] == '\n' {
+                i += 1;
+            }
+            lines.push((line_start, end, cur));
+        }
+    }
+    if lines.is_empty() {
+        lines.push((0, 0, String::new()));
+    }
+
+    let caret = field.caret.min(chars.len());
+    let caret_line = lines.iter().rposition(|(s, _, _)| caret >= *s).unwrap_or(0);
+    let max_vis = ((bounds.h - 10.) / lh).floor().max(1.) as usize;
+    let start_line = caret_line.saturating_sub(max_vis.saturating_sub(1));
+
+    ui.c.push_clip(bounds);
+    let x0 = bounds.x + 7.;
+    let mut y0 = bounds.y + 6.;
+
+    if text.is_empty() {
+        ui.c.text_clip(font, x0, y0, inner_w, dim, placeholder);
+        let _ = ui.hit(bounds, Action::TextCaret(target, 0), placeholder);
+        if focused {
+            ui.c.fill_rect(Rect::new(x0, y0, 1.5, lh - 2.), ink);
+        }
+        ui.c.pop_clip();
+        return;
+    }
+
+    let sel = field.selection();
+    for (li, (ls, le, line_str)) in lines.iter().enumerate().skip(start_line).take(max_vis) {
+        if let Some((sa, sb)) = sel {
+            let os = sa.max(*ls);
+            let oe = sb.min(*le);
+            if os < oe {
+                let pre: String = chars[*ls..os].iter().collect();
+                let mid: String = chars[os..oe].iter().collect();
+                let sx = x0 + ui.c.text_width(font, &pre);
+                let sw = ui.c.text_width(font, &mid).max(4.);
+                ui.c.fill_rect(Rect::new(sx, y0, sw, lh - 1.), sel_bg);
+            }
+        }
+        ui.c.text_clip(font, x0, y0, inner_w + 4., ink, line_str);
+        if focused && li == caret_line {
+            let pre: String = chars[*ls..caret.min(*le)].iter().collect();
+            let cx = x0 + ui.c.text_width(font, &pre);
+            ui.c.fill_rect(Rect::new(cx, y0, 1.5, lh - 2.), ink);
+        }
+
+        // Per-character hit rects for exact click & drag selection
+        let mut px = x0;
+        for ci in *ls..=*le {
+            let cw = if ci < *le {
+                let ch_s: String = std::iter::once(chars[ci]).collect();
+                ui.c.text_width(font, &ch_s).max(3.)
+            } else {
+                (bounds.right() - px).max(6.)
+            };
+            let _ = ui.hit(Rect::new(px, y0, cw, lh), Action::TextCaret(target, ci), placeholder);
+            px += cw;
+        }
+        y0 += lh;
+    }
+    ui.c.pop_clip();
 }
 
 fn ai_box(ui:&mut Ui,s:&State,m:&Modal){
