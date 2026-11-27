@@ -98,7 +98,7 @@ pub fn tools() -> Vec<Value> {
  ("lemon_history","Undo or redo one DAW history step.",json!({"op":s}),vec!["op"]),
  ("lemon_scroll","Scroll an app view to a logical position; view: mixer, playlist_x, playlist_y, rack, piano_x, piano_y.",json!({"view":s,"position":n}),vec!["view","position"]),
  ("lemon_automation","Create an automation clip for a host target ID, or replace its points. op create needs target,name,value. op points needs channel (channel index), points array of {beat,value}; positions>=0, values0..1. Existing DAW undo is retained.",json!({"op":s,"target":i,"name":s,"value":n,"channel":i,"points":{"type":"array","maxItems":4096,"items":{"type":"object","properties":{"beat":n,"value":n},"required":["beat","value"],"additionalProperties":false}}}),vec!["op"]),
- ("lemon_compose","High-level musical composer for the selected pattern in one undoable step. op: chord_progression, bassline, arp, drum_pattern, humanize, clear_channel. Uses channel row (0-based), root (e.g. 'F', 'C#', 'Bb'), scale (minor, major, dorian, phrygian, harmonic_minor), octave (1..7), bars (1..16), chords (e.g. ['i','VI','III','VII']), style (kick_4x4, clap_2_4, offbeat_hat, closed_hat_16th, perc_groove, snare_roll, four_on_floor, house, trap, hiphop, breakbeat; or for bassline: rolling, offbeat, syncopated, sub), velocity (1..127), humanize (0..30), replace (bool).",json!({"op":s,"row":i,"root":s,"scale":s,"octave":i,"bars":i,"chords":{"type":"array","items":s},"style":s,"velocity":i,"humanize":i,"replace":b}),vec!["op","row"]),
+ ("lemon_compose","High-level musical composer for the selected pattern in one undoable step. op: chord_progression, bassline, arp, drum_pattern, humanize, clear_channel. Uses channel row (0-based), root (e.g. 'F', 'C#', 'Bb'), scale (minor, major, dorian, phrygian, harmonic_minor), octave (1..7), bars (1..16), chords (e.g. ['i','VI','III','VII']), style (kick_4x4, clap_2_4, offbeat_hat, closed_hat_16th, perc_groove, snare_roll, four_on_floor, house, trap, hiphop, breakbeat; or for bassline: rolling, offbeat, syncopated, sub), velocity (1..127), humanize (0..30), replace (bool).",json!({"op":s,"row":i,"root":s,"scale":s,"octave":i,"bars":i,"chords":{"type":"array","items":s},"style":s,"velocity":i,"humanize":n,"replace":b}),vec!["op"]),
  ("lemon_samples","Search the user's installed sample libraries (Vengeance, SampleFocus, Techno bundles, etc.) for real audio files (.wav/.flac/.ogg/.mp3) matching query (e.g. 'kick', 'clap', 'hat', 'perc', 'riser', 'bass'). Returns absolute paths for lemon_channel load_sample.",json!({"query":s,"limit":i}),vec!["query"]),
  ("lemon_mix_setup","High-level mixer routing & gain staging in one undoable step. op: route_group (routes channel rows to destination track), sidechain (sidechains source track to destination track), gain_stage (sets volume 0..1 on track or sources).",json!({"op":s,"sources":{"type":"array","items":i},"destination":i,"track":i,"value":n}),vec!["op"]),
  ("lemon_audio_analyze","Analyze live mixer peak/VU meters, clipping/hot tracks, master headroom, channel routing, effects/Master Assistant status, and pattern note density.",json!({}),vec![]),
@@ -928,7 +928,17 @@ fn compose(app: &mut App, a: &Value) -> Result<Value> {
     let octave = a["octave"].as_u64().unwrap_or(default_oct).clamp(1, 7) as u8;
     let bars = a["bars"].as_u64().unwrap_or(4).clamp(1, 16) as u32;
     let base_vel = a["velocity"].as_u64().unwrap_or(96).clamp(1, 127) as u8;
-    let humanize = a["humanize"].as_u64().unwrap_or(0).min(30) as i32;
+    let humanize = if let Some(u) = a["humanize"].as_u64() {
+        u.min(30) as i32
+    } else if let Some(f) = a["humanize"].as_f64() {
+        if f > 0.0 && f < 1.0 {
+            (f * 30.0).round() as i32
+        } else {
+            f.round().clamp(0.0, 30.0) as i32
+        }
+    } else {
+        0
+    };
     let replace = a["replace"].as_bool().unwrap_or(true);
     let chords: Vec<String> = a["chords"]
         .as_array()

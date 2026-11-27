@@ -861,6 +861,7 @@ fn run_agent_with_prompt(
             };
 
             let mut active_model = model.to_string();
+            let mut schema_retries = 0usize;
             for _ in 0..max_steps {
                 let _ = event_tx.send(WorkerEvent::Status("Esperando respuesta del modelo...".into()));
                 let make_body = |m: &str| {
@@ -892,6 +893,15 @@ fn run_agent_with_prompt(
                         } else {
                             return Err(e);
                         }
+                    }
+                    Err(e) if backend == Backend::OpenAi && e.contains("tool_use_failed") && schema_retries < 2 => {
+                        schema_retries += 1;
+                        let _ = event_tx.send(WorkerEvent::Status("Corrigiendo parámetros de herramienta...".into()));
+                        msgs.push(json!({
+                            "role": "user",
+                            "content": format!("Tu última llamada a herramienta falló la validación de esquema JSON ({e}). Corrige los tipos y campos obligatorios (por ejemplo 'row' entero 0-based en lemon_compose) y vuelve a intentarlo.")
+                        }));
+                        continue;
                     }
                     Err(e) => return Err(e),
                 };
@@ -965,6 +975,7 @@ fn run_agent_with_prompt(
                 .collect();
             let tools = gemini_tools(specialist_role);
 
+            let mut schema_retries = 0usize;
             for _ in 0..max_steps {
                 let _ = event_tx.send(WorkerEvent::Status("Consultando Gemini...".into()));
                 let body = json!({
