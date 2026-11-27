@@ -476,20 +476,20 @@ pub fn tick(app: &mut App) {
 
 fn system_prompt() -> &'static str {
     "Eres el Director Musical de JL Studio (DAW). REGLA CRÍTICA: PROHIBIDO responder con guías o tutoriales; EJECUTA las herramientas tú mismo. \
-Para crear un tema completo, usa SIEMPRE las macro-herramientas (1 llamada por bloque, rápido y sin gastar tokens) o delega con `lemon_delegate`: \
-1) `lemon_drum_kit` (o `drums`): busca samples reales y programa Kick, Clap, Hats, Perc y Snare Roll en sus pistas. \
-2) `lemon_synth_track` (o `melody`): carga sintes, ajusta filtro y compone Bajo, Stabs/Acordes y Arp en patrones separados. \
-3) `lemon_arrange_song` (o `arrangement`): construye el Extended Mix completo en Playlist y ajusta BPM. \
-4) `lemon_master_mix` (o `mixing`): aplica sidechain Kick->Bajo/Synths, EQ/Soft Clipper/Reverb/Delay, gain staging y análisis final. \
-Para ajustes finos usa `lemon_samples`, `lemon_channel`, `lemon_compose`, `lemon_parameter`, `lemon_clips`, `lemon_mix_setup`. Responde en español solo al terminar."
+Para crear un tema completo, llama DIRECTAMENTE y en orden a las macro-herramientas (sin delegar ni repetir búsquedas innecesarias): \
+1) `lemon_drum_kit` (ya busca samples reales, crea canales Kick/Clap/Hats/Perc, rutea a mixer 1..5 y programa groove + snare roll). \
+2) `lemon_synth_track` (llámalo 1 vez para `role:'bass'` y otra para `role:'stab'`, y opcional `role:'arp'`). \
+3) `lemon_arrange_song` (ajusta `tempo` en BPM y arma el Extended Mix completo en Playlist). \
+4) `lemon_master_mix` (configura sidechain Kick->Bajo/Synths, EQ/Soft Clipper/Reverb/Delay, gain staging y análisis final). \
+Responde en español solo al terminar todo."
 }
 
 fn specialist_prompt(role: &str) -> &'static str {
     match role {
-        "drums" => "Especialista de Batería JL Studio. EJECUTA herramientas, nunca des guías: usa `lemon_drum_kit` para cargar samples reales y programar el groove + snare roll en un paso, o `lemon_samples`/`lemon_channel`/`lemon_compose` para ajustes extra. Resume lo ejecutado.",
-        "melody" => "Especialista de Bajo/Melodía JL Studio. EJECUTA herramientas, nunca des guías: usa `lemon_synth_track` (una llamada para `bass`, otra para `stab`, otra para `arp` si aplica) para cargar sintes, filtrar cutoff y escribir notas. Resume lo ejecutado.",
-        "arrangement" => "Especialista de Arreglo JL Studio. EJECUTA herramientas, nunca des guías: usa `lemon_arrange_song` para montar el Extended Mix completo en Playlist y ajustar BPM, o `lemon_clips`/`lemon_automation` para detalles. Resume estructura por compases.",
-        "mixing" => "Ingeniero de Mezcla y Mastering JL Studio. EJECUTA herramientas, nunca des guías: usa `lemon_master_mix` para sidechain, EQ/Clipper/Reverb/Delay, gain staging y análisis, o `lemon_parameter`/`lemon_mix_setup` para ajustes finos. Resume resultados.",
+        "drums" => "Especialista de Batería JL Studio. Llama ÚNICAMENTE a `lemon_drum_kit` (ya busca samples reales, carga canales, rutea al mixer y programa groove + snare roll en 1 paso). No llames a `lemon_samples` salvo que falte algo concreto. Resume lo ejecutado.",
+        "melody" => "Especialista de Bajo/Melodía JL Studio. Llama a `lemon_synth_track` (`role:'bass'`, `role:'stab'`, etc.) para cargar sintes, filtrar cutoff y escribir notas. Resume lo ejecutado.",
+        "arrangement" => "Especialista de Arreglo JL Studio. Llama a `lemon_arrange_song` para montar el Extended Mix completo en Playlist y ajustar BPM. Resume estructura.",
+        "mixing" => "Ingeniero de Mezcla y Mastering JL Studio. Llama a `lemon_master_mix` para sidechain, EQ/Clipper/Reverb/Delay, gain staging y análisis. Resume resultados.",
         _ => system_prompt(),
     }
 }
@@ -786,7 +786,12 @@ fn dispatch_tool(
     invoke_ui_tool(tool_tx, event_tx, name, args)
 }
 
-fn detect_openai_model(agent: &ureq::Agent, base_url: &str, api_key: &str) -> Option<String> {
+fn detect_openai_model_excluding(
+    agent: &ureq::Agent,
+    base_url: &str,
+    api_key: &str,
+    exclude: &[String],
+) -> Option<String> {
     let url = format!("{}/models", base_url.trim_end_matches('/'));
     let mut req = agent.get(&url);
     if !api_key.is_empty() {
@@ -798,9 +803,15 @@ fn detect_openai_model(agent: &ureq::Agent, base_url: &str, api_key: &str) -> Op
     let ids: Vec<&str> = list.iter().filter_map(|m| m["id"].as_str()).collect();
     let usable = |id: &str| {
         let l = id.to_ascii_lowercase();
-        !l.contains("whisper") && !l.contains("tts") && !l.contains("guard") && !l.contains("embed") && !l.contains("moderation")
+        !exclude.iter().any(|ex| ex.eq_ignore_ascii_case(id))
+            && !l.contains("whisper")
+            && !l.contains("tts")
+            && !l.contains("guard")
+            && !l.contains("embed")
+            && !l.contains("moderation")
+            && !l.contains("orpheus")
     };
-    let prefs = ["gpt-oss", "llama-3.3", "llama-3.1", "llama-4", "qwen", "gpt-4o", "deepseek", "mixtral"];
+    let prefs = ["qwen", "llama-3.3", "llama-4", "llama-3.1", "gpt-oss", "gpt-4o", "deepseek", "mixtral"];
     for p in prefs {
         if let Some(&m) = ids.iter().find(|&&id| usable(id) && id.to_ascii_lowercase().contains(p)) {
             return Some(m.to_string());
@@ -868,6 +879,7 @@ fn run_agent_with_prompt(
             };
 
             let mut active_model = model.to_string();
+            let mut exhausted_models: Vec<String> = Vec::new();
             let mut schema_retries = 0usize;
             for _ in 0..max_steps {
                 let _ = event_tx.send(WorkerEvent::Status("Esperando respuesta del modelo...".into()));
@@ -891,12 +903,13 @@ fn run_agent_with_prompt(
                 let auth = (backend == Backend::OpenAi && !api_key.is_empty()).then_some(api_key);
                 let resp = match post_json_with_retry(&agent, &url, auth, None, &make_body(&active_model).to_string(), event_tx) {
                     Ok(r) => r,
-                    Err(e) if backend == Backend::OpenAi && e.contains("(404)") => {
-                        if let Some(found) = detect_openai_model(&agent, base_url, api_key) {
-                            let _ = event_tx.send(WorkerEvent::ToolLog(format!("Modelo '{active_model}' no disponible; cambiando a '{found}'")));
+                    Err(e) if backend == Backend::OpenAi && (e.contains("(404)") || e.contains("TPD") || e.contains("tokens per day")) => {
+                        exhausted_models.push(active_model.clone());
+                        if let Some(found) = detect_openai_model_excluding(&agent, base_url, api_key, &exhausted_models) {
+                            let _ = event_tx.send(WorkerEvent::ToolLog(format!("Modelo '{active_model}' agotado/no disponible; cambiando a '{found}'")));
                             let _ = event_tx.send(WorkerEvent::ModelChanged(found.clone()));
                             active_model = found;
-                            post_json_with_retry(&agent, &url, auth, None, &make_body(&active_model).to_string(), event_tx)?
+                            continue;
                         } else {
                             return Err(e);
                         }
