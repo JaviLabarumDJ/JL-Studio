@@ -173,6 +173,7 @@ pub struct ToolReq {
 pub enum WorkerEvent {
     Status(String),
     ToolLog(String),
+    ModelChanged(String),
     Done(Result<String, String>),
 }
 
@@ -423,6 +424,11 @@ pub fn tick(app: &mut App) {
                 app.state.copilot.scroll = f32::MAX;
                 app.invalidate();
             }
+            WorkerEvent::ModelChanged(new_model) => {
+                app.state.copilot.model.set(&new_model);
+                save_config(&app.state.copilot);
+                app.invalidate();
+            }
             WorkerEvent::Done(res) => {
                 finished = true;
                 app.state.copilot.busy = false;
@@ -581,9 +587,40 @@ fn director_tools() -> Vec<Value> {
     t
 }
 
-fn openai_tools(include_delegate: bool) -> Vec<Value> {
-    let list = if include_delegate { director_tools() } else { crate::ai_commands::tools() };
-    list.into_iter()
+fn tools_for_role(role: Option<&str>) -> Vec<Value> {
+    let all = crate::ai_commands::tools();
+    match role {
+        Some("drums") => all.into_iter().filter(|t| matches!(t["name"].as_str(),
+            Some("lemon_state" | "lemon_samples" | "lemon_channel" | "lemon_compose"))).collect(),
+        Some("melody") => all.into_iter().filter(|t| matches!(t["name"].as_str(),
+            Some("lemon_state" | "lemon_plugins" | "lemon_parameter" | "lemon_compose" | "lemon_channel"))).collect(),
+        Some("arrangement") => all.into_iter().filter(|t| matches!(t["name"].as_str(),
+            Some("lemon_state" | "lemon_clips" | "lemon_automation" | "lemon_transport"))).collect(),
+        Some("mixing") => all.into_iter().filter(|t| matches!(t["name"].as_str(),
+            Some("lemon_state" | "lemon_mix_setup" | "lemon_mixer" | "lemon_plugins" | "lemon_audio_analyze"))).collect(),
+        _ => {
+            let mut list: Vec<Value> = all.into_iter().filter(|t| matches!(t["name"].as_str(),
+                Some("lemon_state" | "lemon_transport" | "lemon_audio_analyze" | "lemon_compose" | "lemon_checkpoint"))).collect();
+            list.push(json!({
+                "name": "lemon_delegate",
+                "description": "Delegate to specialist: 'drums' (samples & grooves), 'melody' (synths, bass, chords, arp), 'arrangement' (Playlist Extended Mix & automations), 'mixing' (sidechain, EQ, FX, gain staging).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "role": {"type": "string", "enum": ["drums", "melody", "arrangement", "mixing"]},
+                        "task": {"type": "string"}
+                    },
+                    "required": ["role", "task"]
+                }
+            }));
+            list
+        }
+    }
+}
+
+fn openai_tools(role: Option<&str>) -> Vec<Value> {
+    tools_for_role(role)
+        .into_iter()
         .map(|t| {
             json!({
                 "type": "function",
@@ -618,9 +655,8 @@ fn sanitize_gemini_schema(v: Value) -> Value {
     }
 }
 
-fn gemini_tools(include_delegate: bool) -> Vec<Value> {
-    let list = if include_delegate { director_tools() } else { crate::ai_commands::tools() };
-    let decls: Vec<Value> = list
+fn gemini_tools(role: Option<&str>) -> Vec<Value> {
+    let decls: Vec<Value> = tools_for_role(role)
         .into_iter()
         .map(|t| {
             let schema = sanitize_gemini_schema(t["inputSchema"].clone());
@@ -642,6 +678,13 @@ fn gemini_tools(include_delegate: bool) -> Vec<Value> {
     vec![json!({ "functionDeclarations": decls })]
 }
 
+fn parse_retry_after_secs(detail: &str) -> Option<u64> {
+    let idx = detail.find("try again in ")?;
+    let rest = &detail[idx + "try again in ".len()..];
+    let num: String = rest.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+    num.parse::<f64>().ok().map(|s| (s.ceil() as u64 + 1).clamp(2, 30))
+}
+
 fn post_json_with_retry(
     agent: &ureq::Agent,
     url: &str,
@@ -650,7 +693,7 @@ fn post_json_with_retry(
     body_str: &str,
     event_tx: &mpsc::Sender<WorkerEvent>,
 ) -> Result<Value, String> {
-    let delays = [2u64, 4, 8];
+    let delays = [3u64, 6, 10, 15];
     for attempt in 0..=delays.len() {
         let mut req = agent.post(url).set("Content-Type", "application/json");
         if let Some(tok) = auth_bearer {
@@ -671,9 +714,9 @@ fn post_json_with_retry(
                 }
                 let transient = matches!(code, 429 | 500 | 502 | 503 | 504);
                 if transient && attempt < delays.len() {
-                    let wait = delays[attempt];
+                    let wait = parse_retry_after_secs(&detail).unwrap_or(delays[attempt]);
                     let _ = event_tx.send(WorkerEvent::Status(format!(
-                        "Modelo ocupado ({code}), reintentando en {wait}s..."
+                        "Limite por minuto ({code}), esperando {wait}s..."
                     )));
                     std::thread::sleep(Duration::from_secs(wait));
                     continue;
@@ -727,7 +770,7 @@ fn dispatch_tool(
             base_url,
             &sub_history,
             specialist_prompt(role),
-            false,
+            Some(role),
             SPECIALIST_TOOL_STEPS,
             tool_tx,
             event_tx,
@@ -778,7 +821,7 @@ fn run_agent_loop(
         base_url,
         history_msgs,
         system_prompt(),
-        true,
+        None,
         MAX_TOOL_STEPS,
         tool_tx,
         event_tx,
@@ -792,11 +835,12 @@ fn run_agent_with_prompt(
     base_url: &str,
     history_msgs: &[(ChatRole, String)],
     sys_prompt: &str,
-    allow_delegate: bool,
+    specialist_role: Option<&str>,
     max_steps: usize,
     tool_tx: &mpsc::Sender<ToolReq>,
     event_tx: &mpsc::Sender<WorkerEvent>,
 ) -> Result<String, String> {
+    let allow_delegate = specialist_role.is_none();
     let agent = ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(10))
         .timeout_read(Duration::from_secs(180))
@@ -812,7 +856,7 @@ fn run_agent_with_prompt(
                 };
                 msgs.push(json!({"role": role, "content": txt}));
             }
-            let tools = openai_tools(allow_delegate);
+            let tools = openai_tools(specialist_role);
             let url = if backend == Backend::Ollama {
                 format!("{}/api/chat", base_url.trim_end_matches('/'))
             } else {
@@ -845,6 +889,7 @@ fn run_agent_with_prompt(
                     Err(e) if backend == Backend::OpenAi && e.contains("(404)") => {
                         if let Some(found) = detect_openai_model(&agent, base_url, api_key) {
                             let _ = event_tx.send(WorkerEvent::ToolLog(format!("Modelo '{active_model}' no disponible; cambiando a '{found}'")));
+                            let _ = event_tx.send(WorkerEvent::ModelChanged(found.clone()));
                             active_model = found;
                             post_json_with_retry(&agent, &url, auth, None, &make_body(&active_model).to_string(), event_tx)?
                         } else {
@@ -883,7 +928,7 @@ fn run_agent_with_prompt(
                     };
                     let out = dispatch_tool(
                         backend,
-                        model,
+                        &active_model,
                         api_key,
                         base_url,
                         allow_delegate,
@@ -921,7 +966,7 @@ fn run_agent_with_prompt(
                     })
                 })
                 .collect();
-            let tools = gemini_tools(allow_delegate);
+            let tools = gemini_tools(specialist_role);
 
             for _ in 0..max_steps {
                 let _ = event_tx.send(WorkerEvent::Status("Consultando Gemini...".into()));
