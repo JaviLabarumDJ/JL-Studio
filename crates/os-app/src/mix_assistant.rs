@@ -485,6 +485,29 @@ pub(crate) struct Render {
     rate: u32,
 }
 
+impl Render {
+    pub(crate) fn ai_summary(&self) -> serde_json::Value {
+        if let Some(o) = &self.output {
+            let harsh_alarm = o.high_fraction > 0.45 && o.low_fraction < 0.15;
+            let silent = o.typical <= -70.0 && o.true_peak <= -70.0;
+            serde_json::json!({
+                "true_peak_db": (o.true_peak * 10.0).round() / 10.0,
+                "loudness_lufs": (o.typical * 10.0).round() / 10.0,
+                "crest_db": (o.crest * 10.0).round() / 10.0,
+                "low_fraction": (o.low_fraction * 100.0).round() / 100.0,
+                "sub_fraction": (o.sub_fraction * 100.0).round() / 100.0,
+                "high_fraction": (o.high_fraction * 100.0).round() / 100.0,
+                "side_fraction": (o.side_fraction * 100.0).round() / 100.0,
+                "clipping": o.true_peak >= 0.0,
+                "silent": silent,
+                "harsh_highs_warning": harsh_alarm,
+            })
+        } else {
+            serde_json::json!({"silent": true, "clipping": false})
+        }
+    }
+}
+
 struct Excerpt {
     wanted: Option<usize>,
     length: usize,

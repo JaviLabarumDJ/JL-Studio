@@ -820,6 +820,22 @@ fn detect_openai_model_excluding(
     ids.into_iter().find(|&id| usable(id)).map(str::to_string)
 }
 
+fn strip_think_tags(s: &str) -> String {
+    let mut out = s.to_string();
+    while let Some(start) = out.find("<think>") {
+        if let Some(end) = out[start..].find("</think>") {
+            out.replace_range(start..start + end + "</think>".len(), "");
+        } else {
+            out.truncate(start);
+            break;
+        }
+    }
+    if let Some(end) = out.find("</think>") {
+        out = out[end + "</think>".len()..].to_string();
+    }
+    out.trim().to_string()
+}
+
 fn run_agent_loop(
     backend: Backend,
     model: &str,
@@ -934,11 +950,12 @@ fn run_agent_with_prompt(
 
                 let calls = msg["tool_calls"].as_array().cloned().unwrap_or_default();
                 if calls.is_empty() {
-                    let content = msg["content"].as_str().unwrap_or("").trim().to_string();
-                    return Ok(if content.is_empty() {
+                    let content = msg["content"].as_str().unwrap_or("");
+                    let clean = strip_think_tags(content);
+                    return Ok(if clean.is_empty() {
                         "Acciones completadas.".into()
                     } else {
-                        content
+                        clean
                     });
                 }
 
@@ -1095,10 +1112,10 @@ mod tests {
             }),
         )
         .unwrap();
-        assert_eq!(composed["added"].as_u64().unwrap(), 6);
+        assert_eq!(composed["added"].as_u64().unwrap(), 18);
 
         let analyzed = call(&mut app, "lemon_audio_analyze", &json!({})).unwrap();
-        assert_eq!(analyzed["channel_density"][0]["notes_in_pattern"].as_u64().unwrap(), 6);
+        assert_eq!(analyzed["channel_density"][0]["notes_in_pattern"].as_u64().unwrap(), 18);
 
         let rolled = call(
             &mut app,

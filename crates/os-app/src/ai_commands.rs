@@ -1018,12 +1018,26 @@ fn compose(app: &mut App, a: &Value) -> Result<Value> {
 
     match op {
         "chord_progression" => {
+            let style = a["style"].as_str().unwrap_or("house");
+            let stab_mode = matches!(style, "stab" | "stabs" | "house" | "tech_house");
             for bar in 0..bars {
                 let sym = &chords[bar as usize % chords.len()];
                 let (deg, seventh) = chord_degrees(sym);
-                let pos = bar * bar_ticks;
-                for (i, key) in chord_notes(deg, seventh).into_iter().enumerate() {
-                    push_note(pos, bar_ticks - step_ticks / 2, key, bar as usize * 4 + i);
+                let notes = chord_notes(deg, seventh);
+                if stab_mode {
+                    let hits: &[u32] = if bar % 2 == 0 { &[2, 6, 11] } else { &[2, 10, 14] };
+                    for (h_idx, &st) in hits.iter().enumerate() {
+                        let pos = bar * bar_ticks + st * step_ticks;
+                        let len = step_ticks * 2 - step_ticks / 4;
+                        for (i, &key) in notes.iter().enumerate() {
+                            push_note(pos, len, key, bar as usize * 12 + h_idx * 4 + i);
+                        }
+                    }
+                } else {
+                    let pos = bar * bar_ticks;
+                    for (i, key) in notes.into_iter().enumerate() {
+                        push_note(pos, bar_ticks - step_ticks / 2, key, bar as usize * 4 + i);
+                    }
                 }
             }
         }
@@ -1042,26 +1056,27 @@ fn compose(app: &mut App, a: &Value) -> Result<Value> {
                 let oct_n = root_n.saturating_add(12);
                 let fifth_n = root_n.saturating_add(7);
                 for (i, &st) in pattern_steps.iter().enumerate() {
-                    let key = if i % 4 == 3 {
+                    let key = if i == 7 && bar % 2 == 1 {
                         oct_n
-                    } else if i % 3 == 2 {
+                    } else if i % 4 == 2 {
                         fifth_n
                     } else {
                         root_n
                     };
-                    let len = if style == "sub" { step_ticks * 6 } else { step_ticks * 2 - step_ticks / 4 };
+                    let len = if style == "sub" { step_ticks * 6 } else { step_ticks * 3 / 2 };
                     push_note(bar * bar_ticks + st * step_ticks, len, key, bar as usize * 8 + i);
                 }
             }
         }
         "arp" => {
+            let arp_steps: &[u32] = &[0, 3, 6, 8, 11, 14];
             for bar in 0..bars {
                 let sym = &chords[bar as usize % chords.len()];
                 let (deg, seventh) = chord_degrees(sym);
                 let notes = chord_notes(deg, seventh);
-                for st in 0..16u32 {
-                    let key = notes[st as usize % notes.len()];
-                    push_note(bar * bar_ticks + st * step_ticks, step_ticks, key, bar as usize * 16 + st as usize);
+                for (i, &st) in arp_steps.iter().enumerate() {
+                    let key = notes[i % notes.len()];
+                    push_note(bar * bar_ticks + st * step_ticks, step_ticks * 3 / 4, key, bar as usize * 8 + i);
                 }
             }
         }
@@ -1237,6 +1252,30 @@ fn audio_analyze(app: &App) -> Value {
     let master_assistant_active = crate::master_assistant::enabled(s);
     let master_assistant_loaded = crate::master_assistant::slot(s).is_some();
 
+    let offline_render = if s.project.patterns.iter().any(|p| !p.notes.is_empty()) {
+        let ppq = u64::from(s.project.ppq.max(24));
+        let bar = ppq * 4;
+        let span_start = if s.song_mode && !pl::clips(s).is_empty() {
+            pl::clips(s).iter().map(|c| u64::from(c.position)).max().map(|m| m.min(bar * 32)).unwrap_or(0)
+        } else {
+            0
+        };
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let req = crate::mix_assistant::RenderRequest {
+            span: Some((span_start, span_start + bar * 4)),
+            tracks: vec![],
+            excerpt_at: None,
+            effects: vec![],
+        };
+        let rx = app.transport.render_mix(&s.project, 44_100, req, cancel);
+        rx.recv_timeout(std::time::Duration::from_secs(4))
+            .ok()
+            .and_then(|r| r.ok())
+            .map(|r| r.ai_summary())
+    } else {
+        None
+    };
+
     json!({
         "playing": app.transport.playing(),
         "tempo": s.tempo,
@@ -1249,6 +1288,7 @@ fn audio_analyze(app: &App) -> Value {
         "unrouted_channels": unrouted_channels,
         "channel_density": channel_density,
         "master_assistant": {"loaded": master_assistant_loaded, "enabled": master_assistant_active},
+        "offline_audio_check": offline_render,
     })
 }
 
@@ -1333,13 +1373,15 @@ fn find_best_samples(app: &App, roles: &[(&str, &[&str])]) -> Vec<Option<String>
             }
             let fname = p.file_name().and_then(|n| n.to_str()).unwrap_or("").to_ascii_lowercase();
             let full = p.to_string_lossy().to_ascii_lowercase();
-            let is_loop = fname.contains("loop") || fname.contains("top") || fname.contains("full") || fname.contains("bpm");
+            let is_non_oneshot = ["loop", "top", "full", "bpm", "fill", "rev", "reverse", "fx", "sweep", "riser", "down", "crash", "ride", "vox", "vocal", "long", "stem", "kit", "build", "drop"]
+                .iter()
+                .any(|bad| fname.contains(bad));
 
-            for (idx, (_, keywords)) in roles.iter().enumerate() {
+            for (idx, (role_name, keywords)) in roles.iter().enumerate() {
                 let mut score = 0i32;
                 for kw in *keywords {
                     if fname.contains(kw) {
-                        score += 60;
+                        score += 80;
                     } else if full.contains(kw) {
                         score += 20;
                     }
@@ -1347,7 +1389,18 @@ fn find_best_samples(app: &App, roles: &[(&str, &[&str])]) -> Vec<Option<String>
                 if score == 0 {
                     continue;
                 }
-                if !is_loop {
+                if *role_name == "Kick" && (fname.contains("clap") || fname.contains("hat") || fname.contains("snare") || fname.contains("perc")) {
+                    score -= 100;
+                }
+                if *role_name == "Closed Hat" && (fname.contains("open") || fname.contains("oh")) {
+                    score -= 90;
+                }
+                if *role_name == "Open Hat" && (fname.contains("closed") || fname.contains("ch")) {
+                    score -= 90;
+                }
+                if is_non_oneshot {
+                    score -= 140;
+                } else {
                     score += 40;
                 }
                 if best[idx].as_ref().is_none_or(|(cur, _)| score > *cur) {
@@ -1498,10 +1551,10 @@ fn synth_track(app: &mut App, a: &Value) -> Result<Value> {
     let scale = a["scale"].as_str().unwrap_or("minor");
     let default_oct = match role.as_str() {
         "bass" => 2,
-        "stab" | "pad" => 4,
-        _ => 5,
+        "stab" | "pad" => 3,
+        _ => 4,
     };
-    let octave = a["octave"].as_u64().unwrap_or(default_oct).clamp(1, 7);
+    let octave = a["octave"].as_u64().unwrap_or(default_oct).clamp(1, 6);
     let bars = a["bars"].as_u64().unwrap_or(4).clamp(1, 16);
     let default_pat = match role.as_str() {
         "bass" => 2,
@@ -1536,6 +1589,7 @@ fn synth_track(app: &mut App, a: &Value) -> Result<Value> {
             after: None,
         },
     );
+    app.params_tick();
     let row = app.state.project.channels.len().saturating_sub(1);
     let clean_name = match role.as_str() {
         "bass" => format!("Bass ({root} {scale})"),
@@ -1550,12 +1604,12 @@ fn synth_track(app: &mut App, a: &Value) -> Result<Value> {
     app.route_sample_to(row, mixer_track);
 
     let cutoff_val = a["cutoff"].as_f64().unwrap_or(match role.as_str() {
-        "bass" => 0.28,
-        "stab" => 0.46,
-        "pad" => 0.40,
-        _ => 0.62,
+        "bass" => 0.24,
+        "stab" => 0.44,
+        "pad" => 0.38,
+        _ => 0.50,
     });
-    let res_val = a["resonance"].as_f64().unwrap_or(0.24);
+    let res_val = a["resonance"].as_f64().unwrap_or(0.22);
 
     if let Some(list) = app.state.params.lists.get(&row).cloned() {
         for (pi, p) in list.params.iter().enumerate() {
@@ -1564,6 +1618,39 @@ fn synth_track(app: &mut App, a: &Value) -> Result<Value> {
                 app.params_cmd(crate::params::PCmd::Set(row, pi, cutoff_val.clamp(0.05, 0.95)));
             } else if pn.contains("res") || pn == "q" {
                 app.params_cmd(crate::params::PCmd::Set(row, pi, res_val.clamp(0.0, 0.8)));
+            } else if pn.contains("vol") && pn.contains("env") {
+                app.params_cmd(crate::params::PCmd::Set(row, pi, 1.0));
+            } else if pn.contains("decay") && role != "pad" {
+                app.params_cmd(crate::params::PCmd::Set(row, pi, 0.35));
+            } else if pn.contains("sustain") && role != "pad" {
+                app.params_cmd(crate::params::PCmd::Set(row, pi, 0.15));
+            }
+        }
+    }
+
+    // Guarantee warm low-pass filtering on mixer track via Pulp Filter / Lemon Filter
+    if let Some(fx_idx) = app.plugins.effects.iter().position(|e| {
+        let n = e.desc.name.to_ascii_lowercase();
+        n.contains("pulp") || n.contains("filter")
+    }) {
+        let cap = crate::mixer::user_slot_capacity(&app.state, mixer_track);
+        for k in 0..cap {
+            let slot = crate::mixer::visible_user_slot(&app.state, mixer_track, k);
+            if crate::mixer::track(&app.state, mixer_track).is_some_and(|m| m.slots[slot as usize].is_none()) {
+                app.state.selected_mixer = mixer_track;
+                app.state.mixer.sel.clear();
+                crate::mixer::run(app, crate::mixer::MCmd::AddEffect(slot, fx_idx));
+                app.params_tick();
+                let fx_key = crate::plugins::fx_key(mixer_track, slot);
+                if let Some(list) = app.state.params.lists.get(&fx_key).cloned() {
+                    for (pi, p) in list.params.iter().enumerate() {
+                        let pn = p.name.to_ascii_lowercase();
+                        if pn.contains("cutoff") {
+                            app.params_cmd(crate::params::PCmd::Set(fx_key, pi, cutoff_val.clamp(0.12, 0.75)));
+                        }
+                    }
+                }
+                break;
             }
         }
     }
